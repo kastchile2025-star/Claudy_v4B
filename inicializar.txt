@@ -1,0 +1,22 @@
+Para inicializar Claudy, tienes dos formas principales dependiendo de qué componente quieres usar:
+
+1. CLI (Chat en terminal)
+Primero asegúrate de que está compilado y enlazado globalmente:
+
+cd C:\Users\felip\Downloads\Claudy-main
+npm install
+npm run build
+npm link
+Luego inicia el chat:
+
+claudy chat
+El CLI intentará arrancar automáticamente el servidor de OpenCode si no está corriendo.
+
+2. App de Escritorio (Mascota/Pet)
+Asegúrate de tener las dependencias de Python (Pillow, requests, etc.) e inicia:
+
+cd C:\Users\felip\Downloads\Claudy-main
+python src/desktop/pet.py
+O si ya hiciste npm link y clawd está en tu PATH:
+
+clawd

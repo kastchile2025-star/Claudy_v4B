@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build outputs
+dist/
+*/dist/
+
+# Config files with secrets
+config.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+.tmp/
+
+# IDE
+.vscode/
+.idea/
+
+# Desktop pet generated asset
+src/desktop/clawd_asset.png
+src/desktop/clawd_asset_v*.png
+src/desktop/claudy_orbit_frame_*.png
+src/desktop/__pycache__/
+
+# Backups
+_backup/
+
+# Claude workspaces
+.claude/

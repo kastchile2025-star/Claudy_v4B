@@ -1,0 +1,32 @@
+{
+  "name": "Claudy AI Assistant",
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {
+    "ghcr.io/shyim/devcontainers-features/bun:0": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "bash .devcontainer/post-start.sh",
+  "portsAttributes": {
+    "3000": {
+      "label": "Claudy Frontend",
+      "onAutoForward": "notify"
+    },
+    "3001": {
+      "label": "Claudy Backend",
+      "onAutoForward": "silent"
+    }
+  },
+  "forwardPorts": [3000, 3001],
+  "remoteUser": "codespace"
+}
