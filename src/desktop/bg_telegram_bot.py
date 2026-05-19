@@ -99,10 +99,51 @@ def ask_claudy(msg):
             data=json.dumps({"message": msg}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
-        resp = urllib.request.urlopen(req, timeout=90)
+        resp = urllib.request.urlopen(req, timeout=180)
         return json.loads(resp.read()).get("response", "Sin respuesta")
     except Exception as e:
         return f"Error conectando con Claudy: {e}"
+
+
+# Mensajes de progreso para cuando Claudy se demora
+PROGRESS_MESSAGES = [
+    (12, "Dame un momento, estoy buscando..."),
+    (28, "Sigo trabajando, ya casi tengo algo para ti."),
+    (50, "Esto tomo mas de lo esperado, no te abandone."),
+    (80, "Aun aqui. Tarea larga, pero ahi vamos."),
+    (120, "Sigo encima. Si esto sigue colgado, avisame."),
+]
+
+
+async def _ask_with_progress(update, msg):
+    """Run ask_claudy in a thread and emit typing + textual progress updates."""
+    chat = update.message.chat
+    task = asyncio.create_task(asyncio.to_thread(ask_claudy, msg))
+    start = asyncio.get_event_loop().time()
+    sent_idx = 0
+    try:
+        while not task.done():
+            try:
+                await chat.send_action("typing")
+            except Exception:
+                pass
+            # Check if we crossed a progress threshold
+            elapsed = asyncio.get_event_loop().time() - start
+            while sent_idx < len(PROGRESS_MESSAGES) and elapsed >= PROGRESS_MESSAGES[sent_idx][0]:
+                try:
+                    await update.message.reply_text(PROGRESS_MESSAGES[sent_idx][1])
+                except Exception:
+                    pass
+                sent_idx += 1
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=4.0)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+        return await task
+    except Exception as e:
+        return f"Error: {e}"
 
 
 async def start(update, context):
@@ -135,7 +176,48 @@ def _synth_voice_mp3(text):
         return None
 
 
+import re as _re
+_IMAGE_MARKER = _re.compile(r"\[CLAUDY_IMAGE:([^\]]+)\]")
+_FILE_MARKER = _re.compile(r"\[CLAUDY_FILE:([^\]]+)\]")
+
+
+async def _maybe_send_attachments(update, result):
+    """Extract [CLAUDY_IMAGE:path] and [CLAUDY_FILE:path] markers, send them as
+    photos/documents, and return the cleaned text. Returns ('', True) if only
+    attachments (no remaining text)."""
+    sent_any = False
+    for m in _IMAGE_MARKER.finditer(result):
+        p = m.group(1).strip()
+        if os.path.exists(p):
+            try:
+                with open(p, "rb") as f:
+                    await update.message.reply_photo(photo=f)
+                sent_any = True
+            except Exception as e:
+                await update.message.reply_text(f"No pude enviar imagen: {e}")
+    for m in _FILE_MARKER.finditer(result):
+        p = m.group(1).strip()
+        if os.path.exists(p):
+            try:
+                with open(p, "rb") as f:
+                    await update.message.reply_document(document=f, filename=os.path.basename(p))
+                sent_any = True
+            except Exception as e:
+                await update.message.reply_text(f"No pude enviar archivo: {e}")
+    cleaned = _IMAGE_MARKER.sub("", result)
+    cleaned = _FILE_MARKER.sub("", cleaned).strip()
+    return cleaned, sent_any
+
+
 async def _reply(update, result):
+    # Attachments first (image/file markers)
+    try:
+        cleaned, sent_any = await _maybe_send_attachments(update, result)
+    except Exception:
+        cleaned, sent_any = result, False
+    if sent_any and not cleaned:
+        return
+    result = cleaned if sent_any else result
     if TTS_REPLY:
         # Try to send voice; fallback to text on error
         try:
@@ -165,7 +247,7 @@ async def handle_text(update, context):
     if not msg:
         return
     await update.message.chat.send_action("typing")
-    result = ask_claudy(msg)
+    result = await _ask_with_progress(update, msg)
     await _reply(update, result)
 
 
@@ -195,7 +277,7 @@ async def handle_voice(update, context):
             await update.message.reply_text("No entendi el audio. Manda mas claro o por texto.")
             return
         await update.message.reply_text(f"🎤 \"{text}\"")
-        result = ask_claudy(text)
+        result = await _ask_with_progress(update, text)
         await _reply(update, result)
     except Exception as e:
         await update.message.reply_text(f"Error procesando audio: {e}")

@@ -31,6 +31,11 @@ except Exception:
     def _tts_stop(): pass
 
 try:
+    from model_router import pick_model as _route_model
+except Exception:
+    def _route_model(_prompt, _config, fallback): return fallback
+
+try:
     from PIL import Image, ImageDraw, ImageFilter
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow", "--quiet"])
@@ -439,6 +444,17 @@ class ClawdPet(tk.Tk):
         pull = (220 - dist) / 220.0 * max_pull
         return int(dx / dist * pull), int(dy / dist * pull)
 
+    def _is_crab(self):
+        """Detecta si el skin actual es cangrejo."""
+        try:
+            flag = os.path.join(SCRIPT_DIR, "custom_skin.flag")
+            if not os.path.exists(flag):
+                return False
+            with open(flag, "r", encoding="utf-8", errors="replace") as f:
+                return "crab" in f.read().lower()
+        except Exception:
+            return False
+
     def animate(self):
         state = self.state
         # --- Frame update with per-state speed + mode ---
@@ -460,6 +476,19 @@ class ClawdPet(tk.Tk):
             self._advance_frame(speed=8, mode="pingpong")
         elif state == "wave":
             self._advance_frame(speed=3, mode="loop")
+        # --- Crab-specific frame timing ---
+        elif state == "crab_walk":
+            self._advance_frame(speed=2, mode="loop")
+        elif state == "pinch":
+            self._advance_frame(speed=3, mode="pingpong")
+        elif state == "hide":
+            self._advance_frame(speed=10, mode="pingpong")
+        elif state == "bubble":
+            self._advance_frame(speed=5, mode="loop")
+        elif state == "dig":
+            self._advance_frame(speed=2, mode="loop")
+        elif state == "scuttle":
+            self._advance_frame(speed=1, mode="loop")
         else:
             self._advance_frame(speed=4, mode="loop")
 
@@ -551,6 +580,57 @@ class ClawdPet(tk.Tk):
             offset_x = -3
             self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
             self.tick += 1
+        # --- Crab-specific motions ---
+        elif state == "crab_walk":
+            # Sideways march: zigzag amplio en X, mini-bobbing en Y
+            elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
+            direction = getattr(self, "_crab_dir", 1)
+            offset_x = int(math.sin(self.tick / 6) * 2) + direction * (elapsed // 6) % 24 - 12
+            offset_y = int(abs(math.sin(self.tick / 3)) * -3)
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
+            self.tick += 1
+        elif state == "pinch":
+            # Pinzas al aire: rebote vertical agresivo + temblor horizontal
+            elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
+            offset_y = -int(abs(math.sin(elapsed / 3)) * 10)
+            offset_x = int(math.sin(self.tick / 1.5) * 4)
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
+            self.tick += 1
+        elif state == "hide":
+            # Esconderse: hundirse rapido en Y, vibracion leve, luego asomarse
+            elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
+            if elapsed < 8:
+                offset_y = int(elapsed * 2)
+            elif elapsed < 30:
+                offset_y = 16 + int(math.sin(self.tick / 4) * 1)
+            else:
+                offset_y = max(0, 16 - int((elapsed - 30) * 1.5))
+            offset_x = int(math.sin(self.tick / 5) * 1)
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
+            self.tick += 1
+        elif state == "bubble":
+            # Burbujear: rebote suave hacia arriba como si soltara burbujas
+            offset_y = -int(abs(math.sin(self.tick / 8)) * 4)
+            offset_x = int(math.sin(self.tick / 12) * 2)
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
+            self.tick += 1
+        elif state == "dig":
+            # Cavar: oscilacion fuerte X-Y rapida, simula movimiento de patas escarbando
+            offset_x = int(math.sin(self.tick / 2) * 5)
+            offset_y = int(math.cos(self.tick / 2) * 3) + 2
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
+            self.tick += 1
+        elif state == "scuttle":
+            # Carrera lateral rapida (huida) — un solo trip ida y vuelta
+            elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
+            phase = (elapsed % 60) / 60.0
+            if phase < 0.5:
+                offset_x = int(phase * 60) - 15
+            else:
+                offset_x = int((1.0 - phase) * 60) - 15
+            offset_y = int(abs(math.sin(self.tick / 2)) * -4)
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
+            self.tick += 1
         else:
             # Unknown state: fall back to idle motion
             offset_y = int(math.sin(self.tick / 30) * 2.5)
@@ -566,6 +646,9 @@ class ClawdPet(tk.Tk):
             return
         self.state = new_state
         self._state_start_tick = self.tick
+        if new_state == "crab_walk":
+            import random as _r
+            self._crab_dir = _r.choice([-1, 1])
         def _restore():
             if self.state == new_state:
                 self.state = "idle"
@@ -578,6 +661,24 @@ class ClawdPet(tk.Tk):
             if self.state == "idle" and not self.bubble_interactive:
                 # Probabilities tuned to feel alive but not annoying
                 pick = _r.random()
+                # Crab skin: bias toward crab-specific animations
+                if self._is_crab() and _r.random() < 0.55:
+                    crab_pick = _r.random()
+                    if crab_pick < 0.30:
+                        self._set_state_briefly("crab_walk", 2400)
+                    elif crab_pick < 0.50:
+                        self._set_state_briefly("pinch", 1500)
+                    elif crab_pick < 0.65:
+                        self._set_state_briefly("bubble", 2200)
+                    elif crab_pick < 0.80:
+                        self._set_state_briefly("dig", 1800)
+                    elif crab_pick < 0.92:
+                        self._set_state_briefly("scuttle", 2000)
+                    else:
+                        self._set_state_briefly("hide", 3500)
+                    # Re-schedule and exit early so we don't double-pick
+                    self.after(_r.randint(12000, 28000), self._start_idle_behaviors)
+                    return
                 # Time-of-day bias
                 hr = datetime.datetime.now().hour
                 if hr >= 23 or hr < 6:
@@ -1088,6 +1189,48 @@ class ClawdPet(tk.Tk):
         history_btn.bind("<Enter>", lambda _e: history_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
         history_btn.bind("<Leave>", lambda _e: history_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
 
+        # Folder analyzer button: pick a folder, analyze deep, save to Obsidian.
+        folder_btn = tk.Label(
+            bub, text="\U0001F4C1", bg=THEME["bg_bubble_border"], fg=THEME["text_primary"],
+            font=("Segoe UI Emoji", 8), cursor="hand2",
+            padx=3, pady=1, relief="flat", bd=0,
+        )
+        folder_id = canvas.create_window(48, 14, anchor="nw", window=folder_btn)
+
+        def _on_analyze_folder(_e=None):
+            from tkinter import filedialog
+            path = filedialog.askdirectory(title="Carpeta para analizar (recursivo)")
+            if not path:
+                return
+            self._set_response_text(f"Analizando profundamente:\n{path}\n\nEsto puede tomar 30-90s...")
+            try:
+                status.configure(text="Iniciando analisis...", fg=THEME["accent"])
+            except Exception:
+                pass
+            def _run():
+                try:
+                    result = self._analyze_folder_deep(path, status)
+                except Exception as e:
+                    result = f"Error: {e}"
+                self.after(0, lambda: self._set_response_text(result))
+                self.after(0, lambda: status.configure(text="Enter envia  ·  Esc cierra", fg=THEME["text_secondary"]))
+            threading.Thread(target=_run, daemon=True).start()
+
+        folder_btn.bind("<Button-1>", _on_analyze_folder)
+        folder_btn.bind("<Enter>", lambda _e: folder_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
+        folder_btn.bind("<Leave>", lambda _e: folder_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
+
+        # Clear visible area button (history stays saved on disk).
+        clear_btn = tk.Label(
+            bub, text="\U0001F9F9", bg=THEME["bg_bubble_border"], fg=THEME["text_primary"],
+            font=("Segoe UI Emoji", 8), cursor="hand2",
+            padx=3, pady=1, relief="flat", bd=0,
+        )
+        clear_id = canvas.create_window(78, 14, anchor="nw", window=clear_btn)
+        clear_btn.bind("<Button-1>", lambda _e: self._set_response_text(""))
+        clear_btn.bind("<Enter>", lambda _e: clear_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
+        clear_btn.bind("<Leave>", lambda _e: clear_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
+
         # Minimize button.
         minimize_btn = tk.Label(
             bub, text="\u2014", bg=THEME["bg_bubble"], fg=THEME["text_secondary"],
@@ -1188,7 +1331,7 @@ class ClawdPet(tk.Tk):
             self.bubble_minimized = True
             self._reset_idle_timer()
             # Hide all UI chrome AND the bubble background — only Zzz remains
-            for item in (header_id, entry_id, status_id, minimize_id, history_id):
+            for item in (header_id, entry_id, status_id, minimize_id, history_id, folder_id, clear_id):
                 canvas.itemconfigure(item, state="hidden")
             canvas.itemconfigure("bubble_bg", state="hidden")
             for item in _idle_items:
@@ -1203,7 +1346,7 @@ class ClawdPet(tk.Tk):
             self.bubble_minimized = False
             self._cancel_idle_timer()
             self._stop_zzz_animation()
-            for item in (header_id, entry_id, status_id, minimize_id, history_id):
+            for item in (header_id, entry_id, status_id, minimize_id, history_id, folder_id, clear_id):
                 canvas.itemconfigure(item, state="normal")
             canvas.itemconfigure("bubble_bg", state="normal")
             for item in _idle_items:
@@ -1247,6 +1390,89 @@ class ClawdPet(tk.Tk):
                             self.after(0, lambda: self._set_response_text(out))
                         threading.Thread(target=_wrap, daemon=True).start()
                         entry.configure(state="normal"); entry.focus_set()
+                    # ---------- CLAUDY POWERS ----------
+                    try:
+                        import claudy_powers as cp
+                    except Exception:
+                        cp = None
+                    if cp:
+                        if cmd.startswith("/install "):
+                            name = cmd[9:].strip()
+                            self._set_response_text(f"Instalando: {name}\n(puede tomar varios minutos)")
+                            status.configure(text="Instalando...", fg=THEME["accent"])
+                            _async(lambda: cp.install_app(name)); return
+                        if cmd.startswith("/uninstall "):
+                            _async(lambda: cp.uninstall_app(cmd[11:].strip())); return
+                        if cmd.startswith("/search-app "):
+                            _async(lambda: cp.search_app(cmd[12:].strip())); return
+                        if cmd.startswith("/installed"):
+                            parts = cmd.split(None, 1); flt = parts[1] if len(parts) > 1 else ""
+                            _async(lambda: cp.list_installed(flt)); return
+                        if cmd.startswith("/launch "):
+                            _respond(cp.launch_app(cmd[8:].strip())); return
+                        if cmd.startswith("/find-app "):
+                            _async(lambda: cp.find_app_path(cmd[10:].strip()) or "(no encontrado, prueba /find-app-deep)"); return
+                        if cmd.startswith("/find-app-deep "):
+                            self._set_response_text("Busqueda profunda en C:\\ (puede tardar)...")
+                            _async(lambda: cp.deep_find_app(cmd[15:].strip()) or "(no encontrado en disco)"); return
+                        if cmd.strip() == "/reindex-apps":
+                            _async(lambda: cp.rebuild_app_index()); return
+                        if cmd.strip() in ("/autostart on", "/autostart-folder on"):
+                            _respond(cp.enable_startup_shortcut()); return
+                        if cmd.strip() in ("/autostart off", "/autostart-folder off"):
+                            _respond(cp.disable_startup_shortcut()); return
+                        if cmd.strip() in ("/autostart", "/autostart status"):
+                            _respond(f"Autostart (Startup folder): {'ON' if cp.is_startup_shortcut_enabled() else 'OFF'}\nRegistro Run: {'ON' if self._is_auto_start_enabled() else 'OFF'}"); return
+                        if cmd.startswith("/close "):
+                            _respond(cp.close_app(cmd[7:].strip())); return
+                        if cmd.startswith("/running"):
+                            parts = cmd.split(None, 1); flt = parts[1] if len(parts) > 1 else ""
+                            _async(lambda: cp.list_running(flt)); return
+                        if cmd.startswith("/download "):
+                            rest = cmd[10:].strip()
+                            parts = rest.split(None, 1)
+                            url = parts[0]
+                            save_as = parts[1] if len(parts) > 1 else ""
+                            self._set_response_text(f"Descargando: {url}")
+                            _async(lambda: cp.download_and_open(url, save_as)); return
+                        if cmd.startswith("/install-url "):
+                            url = cmd[13:].strip()
+                            self._set_response_text(f"Descargando e instalando: {url}")
+                            _async(lambda: cp.download_and_install(url)); return
+                        # ---------- FILESYSTEM ----------
+                        if cmd.startswith("/tree"):
+                            parts = cmd.split(None, 1); p = parts[1].strip() if len(parts) > 1 else "."
+                            _async(lambda: cp.folder_tree(p)); return
+                        if cmd.startswith("/folder-info"):
+                            parts = cmd.split(None, 1); p = parts[1].strip() if len(parts) > 1 else "."
+                            _async(lambda: cp.folder_info(p)); return
+                        if cmd.startswith("/files"):
+                            parts = cmd.split(None, 2)
+                            p = parts[1].strip() if len(parts) > 1 else "."
+                            pat = parts[2].strip() if len(parts) > 2 else ""
+                            _async(lambda: cp.list_files(p, pattern=pat)); return
+                        if cmd.startswith("/find"):
+                            parts = cmd.split(None, 2)
+                            if len(parts) < 3:
+                                _respond("Usa: /find <ruta> <texto>"); return
+                            _async(lambda: cp.find_in_files(parts[1].strip(), parts[2].strip())); return
+                        if cmd.startswith("/read "):
+                            p = cmd[6:].strip().strip('"\'')
+                            _async(lambda: cp.read_file(p)); return
+                        if cmd.startswith("/analyze"):
+                            parts = cmd.split(None, 1); p = parts[1].strip().strip('"\'') if len(parts) > 1 else "."
+                            self._set_response_text(f"Analizando: {p}\n(puede tomar un momento)")
+                            def _do_analyze():
+                                summary = cp.analyze_folder_summary(p)
+                                if summary.startswith("No es"):
+                                    return summary
+                                # Pasarlo al LLM para interpretacion
+                                return self.send_quick_message(
+                                    f"Analiza esta carpeta y dame un reporte: tipo de proyecto, "
+                                    f"tecnologias, archivos clave, estructura, posibles issues.\n\n"
+                                    f"DATOS:\n{summary[:8000]}",
+                                    _skip_skill_action=True)
+                            _async(_do_analyze); return
                     # ---------- Bloque A ----------
                     if cmd.startswith("/ocr "):
                         path = cmd[5:].strip().strip('"\'')
@@ -1318,7 +1544,7 @@ class ClawdPet(tk.Tk):
                     if cmd.startswith("/screenshot-ai"):
                         path = ex.screenshot_now()
                         def _scAi():
-                            return self._analyze_image_pollinations(path, "Describe en detalle lo que se ve en esta captura de pantalla.")
+                            return self._analyze_image_native(path, "Describe en detalle lo que se ve en esta captura de pantalla.")
                         _async(_scAi); return
                     if cmd.startswith("/volumen "):
                         try: _respond(ex.set_volume(int(cmd.split()[1])))
@@ -1521,6 +1747,13 @@ class ClawdPet(tk.Tk):
                 src = prompt.split(None, 2)[2].strip()
                 ok, msg = self._install_skill(src)
                 self._set_response_text(msg)
+                entry.configure(state="normal"); entry.focus_set(); return
+            if prompt.startswith("/skill use ") or prompt.startswith("/skill usa "):
+                q = prompt.split(None, 2)[2].strip()
+                def _do_skill_use():
+                    msg = self._skill_use(q)
+                    self.after(0, lambda: self._set_response_text(msg))
+                threading.Thread(target=_do_skill_use, daemon=True).start()
                 entry.configure(state="normal"); entry.focus_set(); return
             # F3.17 /play <query>
             if prompt.startswith("/play"):
@@ -2017,14 +2250,149 @@ class ClawdPet(tk.Tk):
         status.configure(text=thinking)
         self._last_prompt = prompt  # Guardar para fallback de acciones
 
+        # Mensajes en cursiva dentro del input mientras procesa
+        self._start_typing_progress(entry, prompt)
+
+        # Hitos de progreso en la burbuja (mismas frases que Telegram)
+        self._start_milestone_progress()
+
         def worker():
             try:
                 answer = self.send_quick_message(prompt)
             except Exception as error:
                 answer = f"Mmm... algo falló en mi cabecita: {error}"
+            self._stop_milestone_progress()
             self.after(0, lambda: self.finish_quick_answer(answer, status, entry))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ============================================================
+    # Hitos de progreso ("dame un momento, sigo trabajando...")
+    # ============================================================
+    PROGRESS_MILESTONES = [
+        (12, "Dame un momento, estoy buscando..."),
+        (28, "Sigo trabajando, ya casi tengo algo para ti."),
+        (50, "Esto tomo mas de lo esperado, no te abandone."),
+        (80, "Aun aqui. Tarea larga, pero ahi vamos."),
+        (120, "Sigo encima. Si esto sigue colgado, avisame."),
+    ]
+
+    def _start_milestone_progress(self):
+        """Schedule milestone updates into the response bubble while worker runs."""
+        self._milestone_active = True
+        self._milestone_after_ids = []
+        for delay_s, msg in self.PROGRESS_MILESTONES:
+            aid = self.after(int(delay_s * 1000), lambda m=msg: self._emit_milestone(m))
+            self._milestone_after_ids.append(aid)
+
+    def _emit_milestone(self, msg):
+        if not getattr(self, "_milestone_active", False):
+            return
+        try:
+            self._set_response_text(msg)
+        except Exception:
+            pass
+
+    def _stop_milestone_progress(self):
+        self._milestone_active = False
+        for aid in getattr(self, "_milestone_after_ids", []) or []:
+            try:
+                self.after_cancel(aid)
+            except Exception:
+                pass
+        self._milestone_after_ids = []
+
+    # ============================================================
+    # Mensajes de progreso animados dentro del input (cursiva)
+    # ============================================================
+    def _start_typing_progress(self, entry, prompt=""):
+        """Show rotating italic progress messages inside the (disabled) entry."""
+        try:
+            import tkinter.font as tkfont
+        except Exception:
+            return
+        # Save original font + colors once
+        if not hasattr(self, "_entry_original_font"):
+            try:
+                cur_font = entry.cget("font")
+                self._entry_original_font = cur_font
+            except Exception:
+                self._entry_original_font = None
+        # Build an italic variant
+        try:
+            italic = tkfont.Font(family="Segoe UI", size=9, slant="italic")
+            entry.configure(font=italic, fg="#000000", disabledforeground="#000000")
+        except Exception:
+            pass
+
+        # Pick a rotating sequence biased by command type
+        plow = (prompt or "").lower()
+        sequences = self._progress_sequence_for(plow)
+        self._progress_idx = 0
+        self._progress_seq = sequences
+        self._progress_active = True
+
+        def _tick():
+            if not getattr(self, "_progress_active", False):
+                return
+            try:
+                msg = self._progress_seq[self._progress_idx % len(self._progress_seq)]
+                entry.configure(state="normal")
+                entry.delete(0, tk.END)
+                entry.insert(0, msg)
+                entry.configure(state="disabled")
+                self._progress_idx += 1
+            except Exception:
+                pass
+            self._progress_after_id = self.after(1600, _tick)
+
+        _tick()
+
+    def _progress_sequence_for(self, plow):
+        """Pick contextual progress messages based on the prompt."""
+        if any(k in plow for k in ("imagen", "/img", "foto", "dibuja", "ilustra")):
+            return ["pintando pixeles...", "mezclando colores...", "afinando trazos...", "casi lista la imagen..."]
+        if any(k in plow for k in ("/browse", "buscar en", "internet", "web ", "investigar")):
+            return ["navegando la web...", "leyendo paginas...", "filtrando ruido...", "extrayendo lo bueno..."]
+        if any(k in plow for k in ("/yt", "youtube", "video")):
+            return ["abriendo el video...", "transcribiendo...", "resumiendo ideas..."]
+        if any(k in plow for k in ("/ocr", "boleta", "factura")):
+            return ["leyendo la imagen...", "reconociendo texto...", "identificando montos..."]
+        if any(k in plow for k in ("/code", "codigo", "programa", "script", "funcion", "bug")):
+            return ["analizando codigo...", "trazando logica...", "buscando soluciones...", "ensamblando respuesta..."]
+        if any(k in plow for k in ("/delegate", "/debate")):
+            return ["lanzando subagente...", "asignando contexto...", "iniciando proceso..."]
+        if any(k in plow for k in ("/recordar", "recuerdas", "memoria")):
+            return ["revisando memoria...", "calculando similitudes...", "ordenando recuerdos..."]
+        if any(k in plow for k in ("/aprender", "skill")):
+            return ["destilando conversacion...", "armando la skill...", "guardando habilidad..."]
+        # Default sequence
+        return [
+            "leyendo tu mensaje...",
+            "revisando contexto...",
+            "consultando al modelo...",
+            "pensando en la respuesta...",
+            "redactando...",
+            "casi listo...",
+        ]
+
+    def _stop_typing_progress(self, entry):
+        """Stop the rotating progress and restore entry appearance."""
+        self._progress_active = False
+        try:
+            aid = getattr(self, "_progress_after_id", None)
+            if aid:
+                self.after_cancel(aid)
+        except Exception:
+            pass
+        try:
+            entry.configure(state="normal")
+            entry.delete(0, tk.END)
+            if self._entry_original_font:
+                entry.configure(font=self._entry_original_font)
+            entry.configure(fg=THEME.get("text_primary", "#e8e8f0"))
+        except Exception:
+            pass
 
     def _split_answer_pages(self, text, chars_per_page=300):
         """Split answer into pages, trying to break at sentence boundaries."""
@@ -2260,7 +2628,7 @@ class ClawdPet(tk.Tk):
                 "Listo para la siguiente.", "¿Algo más en mente?", "Te escucho.",
             ])
             status.configure(text=done_text, fg=THEME["text_secondary"])
-            entry.configure(state="normal")
+            self._stop_typing_progress(entry)
             entry.focus_set()
         except tk.TclError:
             pass
@@ -2270,7 +2638,7 @@ class ClawdPet(tk.Tk):
         try:
             self._set_response_text(self._strip_markdown(result))
             status.configure(text="Búsqueda completada.", fg=THEME["text_secondary"])
-            entry.configure(state="normal")
+            self._stop_typing_progress(entry)
             entry.focus_set()
         except tk.TclError:
             pass
@@ -2652,7 +3020,7 @@ class ClawdPet(tk.Tk):
             except Exception:
                 pass
             def _run_img():
-                answer = self._analyze_image_pollinations(path, question)
+                answer = self._analyze_image_native(path, question)
                 self._save_memory("Usuario", f"[archivo: {os.path.basename(path)}] {question}".strip())
                 self._save_memory("Claudy", answer)
                 self.after(0, lambda: self._set_response_text(answer))
@@ -2917,6 +3285,9 @@ class ClawdPet(tk.Tk):
         skills_dir = os.path.join(os.path.expanduser("~"), ".claudy", "skills")
         os.makedirs(skills_dir, exist_ok=True)
         try:
+            # GitHub blob URL -> raw URL
+            if "github.com" in source and "/blob/" in source:
+                source = source.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
             # GitHub shorthand: user/repo
             if "/" in source and "://" not in source and not source.endswith(".zip"):
                 source = f"https://github.com/{source}/archive/refs/heads/main.zip"
@@ -3026,6 +3397,72 @@ class ClawdPet(tk.Tk):
                     count += 1
                     break
         return count
+
+    def _load_installed_skills(self, max_skills=20, max_chars_per_skill=400):
+        """Read SKILL.md files from ~/.claudy/skills/* and return formatted context."""
+        skills_dir = os.path.join(os.path.expanduser("~"), ".claudy", "skills")
+        if not os.path.isdir(skills_dir):
+            return ""
+        chunks = []
+        for folder in sorted(os.listdir(skills_dir))[:max_skills]:
+            full = os.path.join(skills_dir, folder)
+            if not os.path.isdir(full):
+                continue
+            for cand in ("SKILL.md", "skill.md", "Skill.md"):
+                p = os.path.join(full, cand)
+                if os.path.exists(p):
+                    try:
+                        with open(p, "r", encoding="utf-8", errors="replace") as f:
+                            body = f.read(max_chars_per_skill * 2)
+                        # Strip YAML frontmatter
+                        if body.startswith("---"):
+                            end = body.find("---", 3)
+                            if end > 0:
+                                body = body[end+3:].strip()
+                        chunks.append(f"### {folder}\n{body[:max_chars_per_skill]}")
+                    except Exception:
+                        pass
+                    break
+        if not chunks:
+            return ""
+        return "[SKILLS INSTALADAS LOCALMENTE]\n" + "\n\n".join(chunks) + "\n[Fin skills locales]\n\n"
+
+    def _skill_use(self, query):
+        """Install a skill and return usage hint. Skill becomes available immediately
+        for the next prompt via _load_installed_skills.
+        Accepts: direct URL (.md, .zip, github blob), 'user/repo', or search query."""
+        q = query.strip()
+        # Direct URL or user/repo -> install directly, skip search
+        is_url = "://" in q
+        is_repo = ("/" in q) and (" " not in q) and not is_url
+        if is_url or is_repo:
+            ok, msg = self._install_skill(q)
+            if not ok:
+                return f"Falló instalar {q}: {msg}"
+            count = self._reload_skills_compat()
+            return (f"Skill instalada y activa: {q}\n"
+                    f"Total skills locales: {count}\n"
+                    f"Ya puedes pedirme algo que la use — la cargué en mi contexto.")
+        try:
+            url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(q + ' hermes skill')}&per_page=5"
+            req = urllib.request.Request(url, headers={"User-Agent": "Claudy/1.0", "Accept": "application/vnd.github.v3+json"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read())
+            items = data.get("items", [])
+            if not items:
+                return f"Sin skills para '{query}'."
+            top = items[0]
+            repo = top.get("full_name")
+            ok, msg = self._install_skill(repo)
+            if not ok:
+                return f"Encontré {repo} pero falló instalar: {msg}"
+            count = self._reload_skills_compat()
+            return (f"Skill instalada y activa: {repo}\n"
+                    f"Stars: {top.get('stargazers_count', 0)} | {(top.get('description') or '')[:120]}\n"
+                    f"Total skills locales: {count}\n"
+                    f"Ya puedes pedirme algo que la use — la cargué en mi contexto.")
+        except Exception as e:
+            return f"Error: {e}"
 
     # --- F3.15 /skill buscar ---
     def _search_skills_registry(self, query):
@@ -3143,6 +3580,84 @@ class ClawdPet(tk.Tk):
         except Exception as e:
             return f"Error analizando imagen: {e}"
 
+    def _analyze_image_native(self, image_path, question):
+        """P3-1: Send image to the configured vision-capable provider (Anthropic/OpenAI).
+        Falls back to Pollinations if no key or model lacks vision."""
+        try:
+            config = self.load_claudy_config()
+            model = self._current_model or config.get("opencode", {}).get("defaultModel", "")
+            mlow = (model or "").lower()
+            with open(image_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+            ext = os.path.splitext(image_path)[1].lower().lstrip(".") or "png"
+            if ext == "jpg":
+                ext = "jpeg"
+            media_type = f"image/{ext}"
+            prompt = question or "Describe esta imagen en espanol con detalle."
+
+            # Anthropic Claude
+            if "claude" in mlow or "anthropic" in mlow:
+                keys = self._get_provider_keys(config, "anthropic")
+                if not keys:
+                    return self._analyze_image_pollinations(image_path, question)
+                actual = model.partition("/")[2] if "/" in model else model
+                payload = {
+                    "model": actual,
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                        {"type": "text", "text": prompt},
+                    ]}],
+                }
+                headers = {
+                    "Content-Type": "application/json",
+                    "x-api-key": keys[0],
+                    "anthropic-version": "2023-06-01",
+                }
+                req = urllib.request.Request(
+                    "https://api.anthropic.com/v1/messages",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                )
+                with urllib.request.urlopen(req, timeout=90) as resp:
+                    data = json.loads(resp.read())
+                blocks = data.get("content", [])
+                return "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip() or "(sin respuesta)"
+
+            # OpenAI / OpenAI-compat (only if model supports vision: gpt-4o, gpt-4-vision, etc.)
+            if any(k in mlow for k in ("gpt-4o", "gpt-4-vision", "gpt-4-turbo", "vision")):
+                keys = self._get_provider_keys(config, "openai")
+                if not keys:
+                    return self._analyze_image_pollinations(image_path, question)
+                actual = model.partition("/")[2] if "/" in model else model
+                payload = {
+                    "model": actual,
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}},
+                    ]}],
+                }
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {keys[0]}",
+                }
+                req = urllib.request.Request(
+                    "https://api.openai.com/v1/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                )
+                with urllib.request.urlopen(req, timeout=90) as resp:
+                    data = json.loads(resp.read())
+                choices = data.get("choices") or []
+                if choices:
+                    return choices[0].get("message", {}).get("content", "").strip() or "(sin respuesta)"
+                return "(sin respuesta)"
+        except Exception as e:
+            return f"Error vision nativa: {e}. Intentando fallback...\n" + self._analyze_image_pollinations(image_path, question)
+        # No vision-capable provider detected -> fallback
+        return self._analyze_image_pollinations(image_path, question)
+
     def _handle_pasted_image(self, status_widget, entry_widget):
         """Called on Ctrl+V in bubble entry. If clipboard has image, save+analyze."""
         img = self._grab_clipboard_image()
@@ -3176,7 +3691,7 @@ class ClawdPet(tk.Tk):
             pass
 
         def _run():
-            answer = self._analyze_image_pollinations(path, question)
+            answer = self._analyze_image_native(path, question)
             self._save_memory("Usuario", f"[imagen pegada] {question}".strip())
             self._save_memory("Claudy", answer)
             self.after(0, lambda: self._set_response_text(answer))
@@ -3581,7 +4096,7 @@ class ClawdPet(tk.Tk):
             self._compress_context()
 
     def _save_memory(self, role, text):
-        """Save to SQLite + mirror to external provider if configured."""
+        """Save to SQLite + mirror to external provider + Obsidian vault if configured."""
         self._save_memory_sqlite(role, text)
         # Optional mirror to external provider
         try:
@@ -3598,6 +4113,14 @@ class ClawdPet(tk.Tk):
                         self._mem_provider.save(role, text)
                     except Exception:
                         pass
+            # Mirror to Obsidian vault if configured
+            vault = (cfg.get("obsidian", {}) or {}).get("vault", "")
+            if vault and os.path.isdir(vault):
+                try:
+                    import obsidian_export as ox
+                    ox.append_today(vault, role, text)
+                except Exception as e:
+                    print(f"[obsidian] error: {e}")
         except Exception:
             pass
 
@@ -4520,6 +5043,16 @@ class ClawdPet(tk.Tk):
     def _try_handle_skill_action(self, prompt):
         lower = prompt.lower().strip()
 
+        # ===== CLAUDY POWERS (intent detection lenguaje natural) =====
+        try:
+            import claudy_powers as cp
+            intent, arg = cp.detect_intent(prompt)
+            if intent:
+                # Confirm sensitive actions in the response, then execute async
+                return True, cp.execute_intent(intent, arg)
+        except Exception:
+            pass
+
         # 1. Web search
         if lower.startswith("/buscar ") or lower.startswith("/search "):
             query = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
@@ -5160,6 +5693,165 @@ class ClawdPet(tk.Tk):
             return f"PDF: {os.path.basename(path)}\nPáginas: {n_pages}\n\nContenido:\n{summary}"
         except Exception as e:
             return f"Error leyendo PDF: {e}"
+
+    def _analyze_folder_deep(self, folder_path, status_widget=None):
+        """Deep-analyze a folder: structure + key files + LLM interpretation, save to Obsidian.
+        Runs in current thread — caller must wrap in threading.Thread."""
+        if not folder_path or not os.path.isdir(folder_path):
+            return f"No es un directorio valido: {folder_path}"
+
+        def _status(msg):
+            if status_widget is None:
+                return
+            try:
+                self.after(0, lambda: status_widget.configure(text=msg, fg=THEME["accent"]))
+            except Exception:
+                pass
+
+        _status("Escaneando estructura...")
+        try:
+            import claudy_powers as cp
+            structure = cp.folder_tree(folder_path, max_depth=5, max_items=400)
+            stats = cp.folder_info(folder_path)
+        except Exception as e:
+            return f"Error escaneando: {e}"
+
+        _status("Leyendo archivos clave...")
+        priority_files = (
+            "README.md", "README", "readme.md", "package.json", "pyproject.toml",
+            "requirements.txt", "Cargo.toml", "go.mod", "tsconfig.json", "Makefile",
+            "docker-compose.yml", "Dockerfile", ".env.example", "setup.py", "setup.cfg",
+        )
+        key_contents = []
+        try:
+            for r, dirs, files in os.walk(folder_path):
+                dirs[:] = [d for d in dirs if d not in cp.IGNORE_DIRS and not d.startswith(".")]
+                for f in files:
+                    if f in priority_files and len(key_contents) < 8:
+                        full = os.path.join(r, f)
+                        rel = os.path.relpath(full, folder_path)
+                        body = cp.read_file(full, max_bytes=2500)
+                        key_contents.append(f"--- {rel} ---\n{body}")
+                if len(key_contents) >= 8:
+                    break
+        except Exception as e:
+            key_contents.append(f"(error leyendo archivos clave: {e})")
+
+        scan_block = (
+            "=== ESTRUCTURA ===\n" + structure[:4000] +
+            "\n\n=== STATS ===\n" + stats[:1500] +
+            "\n\n=== ARCHIVOS CLAVE ===\n" + "\n\n".join(key_contents)[:8000]
+        )
+
+        _status("Consultando LLM...")
+        config = self.load_claudy_config()
+        opencode = config["opencode"]
+        base_url = opencode.get("baseUrl", "").rstrip("/")
+        model = self._current_model or opencode.get("defaultModel", "deepseek-chat")
+        is_local = any(h in base_url for h in ("127.0.0.1", "localhost", "0.0.0.0"))
+
+        analysis_prompt = (
+            "Analiza esta carpeta y entrega un reporte profundo y estructurado en Markdown:\n"
+            "1. **Resumen ejecutivo**: que es este proyecto/carpeta en 2-3 lineas.\n"
+            "2. **Tipo de proyecto** y **tecnologias detectadas** (lenguajes, frameworks, herramientas).\n"
+            "3. **Arquitectura/estructura**: como esta organizada la carpeta.\n"
+            "4. **Archivos clave** y su rol.\n"
+            "5. **Dependencias importantes** (si las hay).\n"
+            "6. **Estado del proyecto**: madurez, actividad reciente (por tamano, recientes).\n"
+            "7. **Riesgos / cosas a revisar**: vulnerabilidades, deuda tecnica, archivos sospechosos.\n"
+            "8. **Recomendaciones** concretas y accionables.\n\n"
+            f"DATOS DE LA CARPETA:\n{scan_block}"
+        )
+
+        llm_answer = ""
+        try:
+            if is_local:
+                self.ensure_opencode_server(base_url, config)
+                if not self.quick_session_id:
+                    created = self.request_json(f"{base_url}/session", {"title": "Claudy Desktop"}, config, timeout=12)
+                    self.quick_session_id = created.get("id")
+                provider_id, _, model_id = model.partition("/")
+                payload = {
+                    "model": {"providerID": provider_id, "modelID": model_id or provider_id},
+                    "system": "Eres Claudy. Analiza carpetas y devuelves Markdown estructurado, conciso y accionable.",
+                    "tools": {"bash": False, "read": False, "glob": False, "grep": False, "webfetch": False,
+                              "edit": False, "task": False, "todowrite": False,
+                              "websearch": False, "codesearch": False, "lsp": False, "skill": False},
+                    "parts": [{"type": "text", "text": analysis_prompt}],
+                }
+                response = self.request_json(f"{base_url}/session/{self.quick_session_id}/message", payload, config, timeout=180)
+                parts = response.get("parts") or []
+                llm_answer = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+            else:
+                response = self._call_remote_provider(model, "Eres Claudy. Analiza carpetas en Markdown.", "", analysis_prompt, config)
+                # Extract text from any provider format
+                if response.get("content") and isinstance(response["content"], list):
+                    llm_answer = "\n".join(b.get("text", "") for b in response["content"] if b.get("type") == "text").strip()
+                elif response.get("choices"):
+                    llm_answer = response["choices"][0].get("message", {}).get("content", "").strip()
+        except Exception as e:
+            llm_answer = f"_(No se pudo consultar al LLM: {e})_"
+
+        _status("Guardando en Obsidian...")
+        folder_name = os.path.basename(os.path.abspath(folder_path)) or "raiz"
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        md_content = (
+            f"**Carpeta:** `{folder_path}`\n"
+            f"**Analizada:** {ts}\n"
+            f"**Modelo:** {model}\n\n"
+            f"## Analisis del LLM\n\n{llm_answer or '_(sin respuesta)_'}\n\n"
+            f"---\n\n## Estructura\n\n```\n{structure[:6000]}\n```\n\n"
+            f"## Estadisticas\n\n```\n{stats[:2000]}\n```\n\n"
+            f"## Archivos clave (extracto)\n\n"
+        )
+        for kc in key_contents[:5]:
+            md_content += f"```\n{kc[:1500]}\n```\n\n"
+
+        title = f"Analisis carpeta - {folder_name} - {datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
+
+        # Save into Claudy/Analisis-Carpetas/ subfolder of the vault for organization.
+        vault = self._get_obsidian_vault()
+        note_info = ""
+        result = ""
+        if vault:
+            subdir = os.path.join(vault, "Claudy", "Analisis-Carpetas")
+            try:
+                os.makedirs(subdir, exist_ok=True)
+                safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:120]
+                fname = f"{safe_title}.md"
+                fpath = os.path.join(subdir, fname)
+                counter = 1
+                while os.path.exists(fpath):
+                    fname = f"{safe_title}_{counter}.md"
+                    fpath = os.path.join(subdir, fname)
+                    counter += 1
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(f"---\ntags: [claudy, analisis-carpeta]\ncarpeta: {folder_path}\nfecha: {ts}\n---\n\n")
+                    f.write(f"# {title}\n\n")
+                    f.write(md_content)
+                size_kb = round(os.path.getsize(fpath) / 1024, 1)
+                result = f"Nota creada en Obsidian: Claudy/Analisis-Carpetas/{fname}"
+                note_info = f"\n\nArchivo: {fpath}\nTamano: {size_kb} KB"
+            except Exception as e:
+                result = f"Error guardando nota: {e}"
+        else:
+            result = "No encuentro tu vault de Obsidian. Configura 'obsidian.vaultPath' en ~/.claudy/config.json."
+
+        word_count = len((llm_answer or "").split())
+        char_count = len(llm_answer or "")
+        completion_status = (
+            f"\nAnalisis completado: {word_count} palabras, {char_count} caracteres.\n"
+            f"MD total: {len(md_content)} caracteres."
+        )
+
+        _status("Listo.")
+        full_text = (
+            f"{result}{note_info}\n"
+            f"{completion_status}\n\n"
+            f"=== ANALISIS COMPLETO ===\n\n"
+            f"{llm_answer or '_(sin respuesta del LLM)_'}"
+        )
+        return full_text
 
     def _get_obsidian_vault(self):
         """Find Obsidian vault path from config or common locations."""
@@ -7587,6 +8279,8 @@ Tambien puedes hablar naturalmente:
         opencode = config["opencode"]
         base_url = opencode.get("baseUrl", "http://127.0.0.1:4096").rstrip("/")
         model = self._current_model or opencode.get("defaultModel", "deepseek-chat")
+        # P3-2: Model router - swap to a category-specific model if router enabled
+        model = _route_model(prompt, config, model)
 
         is_local = any(h in base_url for h in ("127.0.0.1", "localhost", "0.0.0.0"))
         context = self._build_memory_context()
@@ -7600,7 +8294,8 @@ Tambien puedes hablar naturalmente:
             "PROHIBIDO: 'como modelo de IA', preámbulos, markdown, derivar a otros sitios. "
             "Si no sabes, di 'No sé'. Resuelve, no informes."
         )
-        enhanced_sys = superpowers + base_sys
+        local_skills = self._load_installed_skills()
+        enhanced_sys = superpowers + local_skills + base_sys
 
         if is_local:
             self.ensure_opencode_server(base_url, config)
@@ -7739,13 +8434,75 @@ Tambien puedes hablar naturalmente:
     def _call_provider_api(self, provider, api_url, is_anthropic, is_openai_compat, model, system_prompt, context, user_prompt, key, config):
         """Make a single API call to a provider."""
         if is_anthropic:
-            return self._call_anthropic(api_url, model, system_prompt, context, user_prompt, key)
+            return self._call_anthropic(api_url, model, system_prompt, context, user_prompt, key, config)
         elif is_openai_compat:
-            return self._call_openai_compat(api_url, model, system_prompt, context, user_prompt, key)
+            return self._call_openai_compat(api_url, model, system_prompt, context, user_prompt, key, config)
         else:
             return self._call_generic(api_url, model, system_prompt, context, user_prompt, key, provider)
 
-    def _call_openai_compat(self, api_url, model, system_prompt, context, user_prompt, key):
+    def _anthropic_tool_schemas(self):
+        """Convert OpenAI-style registry to Anthropic tool format."""
+        out = []
+        for name, info in self.TOOL_REGISTRY.items():
+            fn = info["schema"]["function"]
+            out.append({
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+            })
+        return out
+
+    def _execute_tool_calls_and_followup(self, tool_calls, base_payload, headers, endpoint, is_anthropic):
+        """Run each tool call and POST a follow-up with the tool results.
+        Returns the final response JSON."""
+        import urllib.request as r
+        if is_anthropic:
+            tool_result_blocks = []
+            assistant_blocks = []
+            for tc in tool_calls:
+                tid = tc.get("id")
+                name = tc.get("name")
+                inp = tc.get("input", {}) or {}
+                info = self.TOOL_REGISTRY.get(name)
+                try:
+                    result = info["handler"](self, **inp) if info else f"Tool '{name}' not found."
+                except Exception as e:
+                    result = f"Error: {e}"
+                assistant_blocks.append({"type": "tool_use", "id": tid, "name": name, "input": inp})
+                tool_result_blocks.append({"type": "tool_result", "tool_use_id": tid, "content": str(result)[:4000]})
+            messages = list(base_payload.get("messages", []))
+            messages.append({"role": "assistant", "content": assistant_blocks})
+            messages.append({"role": "user", "content": tool_result_blocks})
+            payload = dict(base_payload)
+            payload["messages"] = messages
+            req = r.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            with r.urlopen(req, timeout=90) as resp:
+                return json.loads(resp.read())
+        else:
+            messages = list(base_payload.get("messages", []))
+            messages.append({"role": "assistant", "tool_calls": tool_calls, "content": None})
+            for tc in tool_calls:
+                tid = tc.get("id")
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                try:
+                    args = json.loads(fn.get("arguments", "{}") or "{}")
+                except Exception:
+                    args = {}
+                info = self.TOOL_REGISTRY.get(name)
+                try:
+                    result = info["handler"](self, **args) if info else f"Tool '{name}' not found."
+                except Exception as e:
+                    result = f"Error: {e}"
+                messages.append({"role": "tool", "tool_call_id": tid, "content": str(result)[:4000]})
+            payload = dict(base_payload)
+            payload["messages"] = messages
+            payload.pop("tools", None)  # avoid recursive tool use
+            req = r.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            with r.urlopen(req, timeout=90) as resp:
+                return json.loads(resp.read())
+
+    def _call_openai_compat(self, api_url, model, system_prompt, context, user_prompt, key, config=None):
         """Call OpenAI-compatible API."""
         endpoint = api_url
         messages = [{"role": "system", "content": system_prompt}]
@@ -7758,6 +8515,11 @@ Tambien puedes hablar naturalmente:
             "temperature": 0.7,
             "max_tokens": 1024,
         }
+        # P2-2: native function calling
+        tools_enabled = bool((config or {}).get("tools", {}).get("enableFunctionCalling", False))
+        if tools_enabled and self.TOOL_REGISTRY:
+            payload["tools"] = self._get_tool_schemas()
+            payload["tool_choice"] = "auto"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key}",
@@ -7765,9 +8527,17 @@ Tambien puedes hablar naturalmente:
         import urllib.request as r
         req = r.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
         with r.urlopen(req, timeout=90) as resp:
-            return json.loads(resp.read())
+            data = json.loads(resp.read())
+        if tools_enabled:
+            choices = data.get("choices") or []
+            if choices:
+                msg = choices[0].get("message", {})
+                tcs = msg.get("tool_calls") or []
+                if tcs:
+                    return self._execute_tool_calls_and_followup(tcs, payload, headers, endpoint, is_anthropic=False)
+        return data
 
-    def _call_anthropic(self, api_url, model, system_prompt, context, user_prompt, key):
+    def _call_anthropic(self, api_url, model, system_prompt, context, user_prompt, key, config=None):
         """Call Anthropic Messages API with prompt caching."""
         cache_control = {"type": "ephemeral"}
         payload = {
@@ -7780,6 +8550,9 @@ Tambien puedes hablar naturalmente:
         }
         if context:
             payload["system"].append({"type": "text", "text": context, "cache_control": cache_control})
+        tools_enabled = bool((config or {}).get("tools", {}).get("enableFunctionCalling", False))
+        if tools_enabled and self.TOOL_REGISTRY:
+            payload["tools"] = self._anthropic_tool_schemas()
         headers = {
             "Content-Type": "application/json",
             "x-api-key": key,
@@ -7789,7 +8562,12 @@ Tambien puedes hablar naturalmente:
         import urllib.request as r
         req = r.Request(api_url, data=json.dumps(payload).encode("utf-8"), headers=headers)
         with r.urlopen(req, timeout=90) as resp:
-            return json.loads(resp.read())
+            data = json.loads(resp.read())
+        if tools_enabled and data.get("stop_reason") == "tool_use":
+            tool_uses = [b for b in data.get("content", []) if b.get("type") == "tool_use"]
+            if tool_uses:
+                return self._execute_tool_calls_and_followup(tool_uses, payload, headers, api_url, is_anthropic=True)
+        return data
 
     def _call_generic(self, api_url, model, system_prompt, context, user_prompt, key, provider):
         """Generic API call for providers like Google."""
