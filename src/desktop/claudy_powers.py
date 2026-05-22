@@ -6,10 +6,12 @@ o str legible para mostrar en el bubble.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 
@@ -431,6 +433,13 @@ def read_file(path, max_bytes=8000):
         if ext == ".pdf":
             try:
                 from pypdf import PdfReader
+            except ImportError:
+                import sys, subprocess
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "pypdf"])
+                    from pypdf import PdfReader
+                except Exception as e:
+                    return f"Falta pypdf y no se pudo auto-instalar: {e}"
             except Exception:
                 return "Instala: pip install pypdf"
             reader = PdfReader(path)
@@ -445,6 +454,13 @@ def read_file(path, max_bytes=8000):
         if ext == ".docx":
             try:
                 from docx import Document
+            except ImportError:
+                import sys, subprocess
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "python-docx"])
+                    from docx import Document
+                except Exception as e:
+                    return f"Falta python-docx y no se pudo auto-instalar: {e}"
             except Exception:
                 return "Instala: pip install python-docx"
             doc = Document(path)
@@ -453,6 +469,14 @@ def read_file(path, max_bytes=8000):
         if ext in (".xlsx", ".xls"):
             try:
                 import pandas as pd
+            except ImportError:
+                import sys, subprocess
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl"])
+                    import pandas as pd
+                except Exception as e:
+                    return f"Falta pandas/openpyxl y no se pudo auto-instalar: {e}"
+            try:
                 df = pd.read_excel(path)
                 return df.head(50).to_string()[:max_bytes]
             except Exception as e:
@@ -465,6 +489,851 @@ def read_file(path, max_bytes=8000):
         return data
     except Exception as e:
         return f"Error leyendo: {e}"
+
+
+def _clean_user_path(path):
+    path = (path or "").strip().strip('"\'')
+    natural = _natural_path_to_path(path)
+    if natural:
+        return natural
+    path = _strip_named_prefix(path)
+    aliases = {
+        "desktop": os.path.expanduser("~/Desktop"),
+        "escritorio": os.path.expanduser("~/Desktop"),
+        "downloads": os.path.expanduser("~/Downloads"),
+        "descargas": os.path.expanduser("~/Downloads"),
+        "documents": os.path.expanduser("~/Documents"),
+        "documentos": os.path.expanduser("~/Documents"),
+    }
+    low = path.lower()
+    if low in aliases:
+        return aliases[low]
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def _normalize_label(text):
+    text = unicodedata.normalize("NFKD", text or "")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower().strip()
+    text = re.sub(r"[.!?]+$", "", text).strip()
+    text = re.sub(r"\s+", " ", text)
+    for prefix in (
+        "el ", "la ", "los ", "las ", "mi ", "mis ",
+        "en el ", "en la ", "en mi ", "dentro de ",
+        "carpeta ", "directorio ", "folder ",
+    ):
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+    return text
+
+
+_FUZZY_LOCATION_ALIASES = (
+    ("desktop", "~/Desktop", ("desktop", "escritorio", "escritori")),
+    ("downloads", "~/Downloads", ("downloads", "download", "dowloads", "dowload", "descargas", "descrgas", "descarga", "descrga")),
+    ("documents", "~/Documents", ("documents", "document", "documentos", "documento", "docs")),
+    ("home", "~", ("home", "inicio", "usuario", "user")),
+    ("pictures", "~/Pictures", ("pictures", "picture", "imagenes", "imagen", "fotos", "foto")),
+    ("music", "~/Music", ("music", "musica")),
+    ("videos", "~/Videos", ("videos", "video")),
+)
+
+
+def _fuzzy_match_alias(label):
+    """Return the home-relative path for a fuzzy-matched location label, or ''."""
+    if not label:
+        return ""
+    for _, base, keys in _FUZZY_LOCATION_ALIASES:
+        if label in keys:
+            return os.path.expanduser(base)
+    # Substring match (e.g. "carpeta dowload" -> contains "dowload")
+    for _, base, keys in _FUZZY_LOCATION_ALIASES:
+        for k in keys:
+            if len(k) >= 4 and k in label:
+                return os.path.expanduser(base)
+    return ""
+
+
+def _location_alias_path(location):
+    location = (location or "").strip().strip('"\'')
+    if not location:
+        return ""
+    norm = _normalize_label(location)
+    hit = _fuzzy_match_alias(norm)
+    if hit:
+        return hit
+    cleaned = location
+    cleaned = re.sub(r"^(?:en\s+)?(?:el|la|mi|mis)\s+", "", cleaned, flags=re.I).strip()
+    cleaned = re.sub(r"^(?:carpeta|directorio|folder)\s+", "", cleaned, flags=re.I).strip()
+    cleaned_norm = _normalize_label(cleaned)
+    hit = _fuzzy_match_alias(cleaned_norm)
+    if hit:
+        return hit
+    if _looks_like_explicit_path(cleaned):
+        return os.path.abspath(os.path.expanduser(cleaned))
+    if "\\" in cleaned or "/" in cleaned:
+        return os.path.abspath(os.path.expanduser(cleaned))
+    if _looks_like_explicit_path(norm):
+        return os.path.abspath(os.path.expanduser(norm))
+    return ""
+
+
+def _looks_like_explicit_path(path):
+    path = (path or "").strip().strip('"\'')
+    if not path:
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", path):
+        return True
+    if path.startswith(("~", "./", "../", "/", "\\")):
+        return True
+    return False
+
+
+def _strip_named_prefix(name):
+    name = (name or "").strip().strip('"\'')
+    name = re.sub(r"[.!?]+$", "", name).strip()
+    name = re.sub(
+        r"^(?:llamad[ao]|con\s+nombre|nombre|que\s+se\s+llame|llamarla|llamarlo)\s+",
+        "",
+        name,
+        flags=re.I,
+    ).strip()
+    return name.strip('"\'')
+
+
+def _safe_child_name(name):
+    name = _strip_named_prefix(name)
+    name = re.sub(r'[<>:"/\\|?*]+', "_", name).strip()
+    name = re.sub(r"\s+", " ", name)
+    return name.strip(" .")
+
+
+def _natural_path_to_path(raw):
+    raw = (raw or "").strip().strip('"\'')
+    if not raw:
+        return ""
+    if _looks_like_explicit_path(raw):
+        return os.path.abspath(os.path.expanduser(raw))
+
+    # "en el escritorio llamada pruebas"
+    m = re.match(
+        r"^(?:en|dentro\s+de)\s+(.+?)\s+(?:llamad[ao]|con\s+nombre|nombre|que\s+se\s+llame)\s+(.+)$",
+        raw,
+        re.I,
+    )
+    if m:
+        base = _location_alias_path(m.group(1))
+        name = _safe_child_name(m.group(2))
+        if base and name:
+            return os.path.join(base, name)
+
+    # "llamada pruebas en el escritorio" or "pruebas en descargas"
+    named = _strip_named_prefix(raw)
+    m = re.match(r"^(.+?)\s+(?:en|dentro\s+de)\s+(.+)$", named, re.I)
+    if m:
+        base = _location_alias_path(m.group(2))
+        name = _safe_child_name(m.group(1))
+        if base and name:
+            return os.path.join(base, name)
+
+    direct_location = _location_alias_path(raw)
+    if direct_location:
+        return direct_location
+
+    if "\\" in raw or "/" in raw:
+        return os.path.abspath(os.path.expanduser(raw))
+
+    # "llamada pruebas" -> relative to current working directory.
+    named = _strip_named_prefix(raw)
+    if named != raw:
+        return os.path.abspath(os.path.expanduser(_safe_child_name(named)))
+    return ""
+
+
+def _artifact_marker(path):
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    return f"Ubicacion: {folder}\n[CLAUDY_PATH:{path}]"
+
+
+def _file_backups_dir():
+    d = os.path.join(os.path.expanduser("~"), ".claudy", "file_backups")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _snapshot_file(path):
+    if not os.path.isfile(path):
+        return ""
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(path))
+    backup = os.path.join(_file_backups_dir(), f"{ts}__{safe_name}.bak")
+    shutil.copy2(path, backup)
+    return backup
+
+
+def _is_text_editable(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext in BINARY_EXTS:
+        return False
+    return not ext or ext in TEXT_EXTS
+
+
+def parse_path_content_arg(raw):
+    """Parse '<path> | <content>', '<path>\\n<content>', or '<path> con <content>'."""
+    raw = (raw or "").strip()
+    if not raw:
+        return "", ""
+    if "\n" in raw:
+        path, content = raw.split("\n", 1)
+        return path.strip().strip('"\'').strip(), content
+    if " | " in raw:
+        path, content = raw.split(" | ", 1)
+        return path.strip().strip('"\'').strip(), content
+    match = re.match(
+        r"(.+?)\s+(?:con(?:\s+el)?(?:\s+contenido)?|que diga|con texto)\s+(.+)$",
+        raw,
+        re.I,
+    )
+    if match:
+        return match.group(1).strip().strip('"\''), match.group(2)
+    return raw.strip().strip('"\''), ""
+
+
+def create_folder(path):
+    target = _clean_user_path(path)
+    if not target:
+        return "Falta la ruta de la carpeta."
+    try:
+        existed = os.path.isdir(target)
+        os.makedirs(target, exist_ok=True)
+        status = "Carpeta ya existia" if existed else "Carpeta creada"
+        return f"{status}: {target}\n{_artifact_marker(target)}"
+    except Exception as e:
+        return f"Error creando carpeta: {e}"
+
+
+def create_docx(path, content=""):
+    """Create a .docx file with given content. Appends .docx if missing."""
+    target = _clean_user_path(path)
+    if not target:
+        return "Falta la ruta del archivo."
+    if not target.lower().endswith(".docx"):
+        target += ".docx"
+    try:
+        from docx import Document
+        from docx.shared import Inches, Pt, RGBColor
+    except ImportError:
+        import sys, subprocess
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "python-docx"])
+            from docx import Document
+            from docx.shared import Inches, Pt, RGBColor
+        except Exception as e:
+            return f"Falta python-docx y no se pudo auto-instalar: {e}"
+    except Exception:
+        return "Falta python-docx (pip install python-docx)"
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        doc = Document()
+        
+        # Set professional standard 1-inch margins
+        for section in doc.sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1)
+            section.right_margin = Inches(1)
+            
+        # Define modern professional colors & typography
+        # Base/Normal body style
+        style = doc.styles['Normal']
+        font = style.font
+        font.name = 'Calibri'
+        font.size = Pt(11)
+        font.color.rgb = RGBColor(0x33, 0x33, 0x33) # Elegant charcoal text
+        
+        # Style Heading 1
+        h1_style = doc.styles['Heading 1']
+        h1_font = h1_style.font
+        h1_font.name = 'Georgia'
+        h1_font.size = Pt(20)
+        h1_font.bold = True
+        h1_font.color.rgb = RGBColor(0x1F, 0x4E, 0x78) # Dark blue accent
+        
+        # Style Heading 2
+        h2_style = doc.styles['Heading 2']
+        h2_font = h2_style.font
+        h2_font.name = 'Georgia'
+        h2_font.size = Pt(14)
+        h2_font.bold = True
+        h2_font.color.rgb = RGBColor(0x2E, 0x75, 0xB6) # Medium blue accent
+        
+        # Style Heading 3
+        h3_style = doc.styles['Heading 3']
+        h3_font = h3_style.font
+        h3_font.name = 'Georgia'
+        h3_font.size = Pt(12)
+        h3_font.bold = True
+        h3_font.italic = True
+        h3_font.color.rgb = RGBColor(0x56, 0x56, 0x56) # Charcoal/grey accent
+        
+        for line in (content or "").split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                doc.add_heading(stripped[2:], level=1)
+            elif stripped.startswith("## "):
+                doc.add_heading(stripped[3:], level=2)
+            elif stripped.startswith("### "):
+                doc.add_heading(stripped[4:], level=3)
+            else:
+                p = doc.add_paragraph(line)
+                # Add elegant paragraph spacing
+                p.paragraph_format.space_after = Pt(6)
+                
+        doc.save(target)
+        size = os.path.getsize(target)
+        return f"Archivo creado: {target}\nTamano: {size} bytes\n{_artifact_marker(target)}"
+    except Exception as e:
+        return f"Error creando docx: {e}"
+
+
+def create_xlsx(path, data=None, title=""):
+    """Create a styled .xlsx workbook.
+
+    `data` can be:
+      - list[list]: first row treated as header
+      - dict with optional keys: sheets=[{name, headers, rows}], or {headers, rows}
+      - list[dict]: rows; headers inferred from first dict
+    """
+    target = _clean_user_path(path)
+    if not target:
+        return "Falta la ruta del archivo."
+    if not target.lower().endswith(".xlsx"):
+        target += ".xlsx"
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        import sys, subprocess
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            from openpyxl.utils import get_column_letter
+        except Exception as e:
+            return f"Falta openpyxl y no se pudo auto-instalar: {e}"
+    except Exception:
+        return "Falta openpyxl (pip install openpyxl)"
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        wb = Workbook()
+        wb.remove(wb.active)
+
+        # Normalize input into list of sheets [{name, headers, rows}]
+        sheets = []
+        if isinstance(data, dict) and "sheets" in data:
+            sheets = data["sheets"]
+        elif isinstance(data, dict) and "rows" in data:
+            sheets = [{
+                "name": data.get("name", title or "Hoja1"),
+                "headers": data.get("headers") or [],
+                "rows": data.get("rows") or [],
+            }]
+        elif isinstance(data, list) and data and isinstance(data[0], dict):
+            headers = list(data[0].keys())
+            rows = [[d.get(h, "") for h in headers] for d in data]
+            sheets = [{"name": title or "Hoja1", "headers": headers, "rows": rows}]
+        elif isinstance(data, list) and data and isinstance(data[0], list):
+            sheets = [{"name": title or "Hoja1", "headers": data[0], "rows": data[1:]}]
+        else:
+            sheets = [{"name": title or "Hoja1", "headers": [], "rows": []}]
+
+        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        header_fill = PatternFill("solid", fgColor="1F4E78")
+        thin = Side(border_style="thin", color="BFBFBF")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        body_align = Alignment(vertical="top", wrap_text=True)
+        zebra = PatternFill("solid", fgColor="F2F2F2")
+
+        for sh in sheets:
+            ws = wb.create_sheet(title=(sh.get("name") or "Hoja")[:31])
+            headers = sh.get("headers") or []
+            rows = sh.get("rows") or []
+            if headers:
+                ws.append(headers)
+                for col_idx, _ in enumerate(headers, start=1):
+                    cell = ws.cell(row=1, column=col_idx)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = center
+                    cell.border = border
+                ws.row_dimensions[1].height = 22
+                ws.freeze_panes = "A2"
+            for r_idx, row in enumerate(rows, start=(2 if headers else 1)):
+                for c_idx, val in enumerate(row, start=1):
+                    cell = ws.cell(row=r_idx, column=c_idx, value=val)
+                    cell.alignment = body_align
+                    cell.border = border
+                    if r_idx % 2 == 0:
+                        cell.fill = zebra
+            # Auto-width
+            ncols = max([len(headers)] + [len(r) for r in rows] + [0])
+            for col_idx in range(1, ncols + 1):
+                letter = get_column_letter(col_idx)
+                max_len = 10
+                for row_idx in range(1, ws.max_row + 1):
+                    v = ws.cell(row=row_idx, column=col_idx).value
+                    if v is not None:
+                        max_len = max(max_len, min(50, len(str(v)) + 2))
+                ws.column_dimensions[letter].width = max_len
+            if headers:
+                ws.auto_filter.ref = ws.dimensions
+
+        if not wb.sheetnames:
+            wb.create_sheet("Hoja1")
+        wb.save(target)
+        size = os.path.getsize(target)
+        return f"Archivo creado: {target}\nTamano: {size} bytes\n{_artifact_marker(target)}"
+    except Exception as e:
+        return f"Error creando xlsx: {e}"
+
+
+_PPTX_PALETTES = {
+    "history":   {"accent": (0x6B, 0x4A, 0x2E), "accent2": (0xA0, 0x6E, 0x44), "bg": (0xF7, 0xF1, 0xE8), "ink": (0x2B, 0x1F, 0x12)},
+    "nature":    {"accent": (0x2F, 0x6E, 0x3B), "accent2": (0x6E, 0xA8, 0x4F), "bg": (0xEF, 0xF6, 0xEB), "ink": (0x1B, 0x2E, 0x1B)},
+    "tech":      {"accent": (0x12, 0x33, 0x6E), "accent2": (0x2E, 0x84, 0xE6), "bg": (0xEE, 0xF3, 0xFB), "ink": (0x0F, 0x1A, 0x35)},
+    "business":  {"accent": (0x1F, 0x4E, 0x78), "accent2": (0x2E, 0x75, 0xB6), "bg": (0xF5, 0xF7, 0xFA), "ink": (0x1A, 0x1A, 0x1A)},
+    "education": {"accent": (0x5B, 0x2E, 0x86), "accent2": (0x9B, 0x6E, 0xD3), "bg": (0xF5, 0xEE, 0xFB), "ink": (0x29, 0x18, 0x42)},
+    "warm":      {"accent": (0xB0, 0x3A, 0x2E), "accent2": (0xE2, 0x7A, 0x3E), "bg": (0xFA, 0xF1, 0xE8), "ink": (0x33, 0x1B, 0x12)},
+    "dark":      {"accent": (0xE6, 0xC2, 0x6F), "accent2": (0xB0, 0x8A, 0x3E), "bg": (0x15, 0x18, 0x21), "ink": (0xE8, 0xE6, 0xDE)},
+    "minimal":   {"accent": (0x1A, 0x1A, 0x1A), "accent2": (0x6B, 0x6B, 0x6B), "bg": (0xFA, 0xFA, 0xFA), "ink": (0x1A, 0x1A, 0x1A)},
+}
+
+
+def _fetch_image_pollinations(query, out_path, width=1280, height=720, timeout=30):
+    """Generate an AI image from a text prompt (free, no key). Returns path or ''."""
+    try:
+        prompt = urllib.parse.quote(query)
+        url = f"https://image.pollinations.ai/prompt/{prompt}?width={width}&height={height}&nologo=true&model=flux"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 Claudy/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+        if len(data) < 1000:
+            return ""
+        with open(out_path, "wb") as f:
+            f.write(data)
+        return out_path
+    except Exception:
+        return ""
+
+
+def create_pptx(path, slides=None, title="", subtitle="", theme="business", images=True):
+    """Create a styled .pptx presentation with optional AI-generated images per slide.
+
+    `slides`: list of dicts. Each slide:
+      { "title": str, "bullets": [str, ...], "body": str, "image_query": str }
+    `theme`: key from _PPTX_PALETTES (history|nature|tech|business|education|warm|dark|minimal).
+    `images`: if True, fetch one AI image per slide using `image_query` (or slide title as fallback).
+    """
+    target = _clean_user_path(path)
+    if not target:
+        return "Falta la ruta del archivo."
+    if not target.lower().endswith(".pptx"):
+        target += ".pptx"
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt, Emu
+        from pptx.dml.color import RGBColor
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.enum.text import PP_ALIGN
+    except ImportError:
+        import sys, subprocess
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "python-pptx"])
+            from pptx import Presentation
+            from pptx.util import Inches, Pt, Emu
+            from pptx.dml.color import RGBColor
+            from pptx.enum.shapes import MSO_SHAPE
+            from pptx.enum.text import PP_ALIGN
+        except Exception as e:
+            return f"Falta python-pptx y no se pudo auto-instalar: {e}"
+    except Exception:
+        return "Falta python-pptx (pip install python-pptx)"
+
+    palette = _PPTX_PALETTES.get(theme, _PPTX_PALETTES["business"])
+
+    def C(rgb):
+        return RGBColor(*rgb)
+
+    ACCENT = C(palette["accent"])
+    ACCENT2 = C(palette["accent2"])
+    BG = C(palette["bg"])
+    INK = C(palette["ink"])
+    WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+    bg_is_dark = sum(palette["bg"]) < 380
+    cover_ink = WHITE if sum(palette["accent"]) < 450 else INK
+    footer_color = RGBColor(0xBF, 0xBF, 0xBF) if bg_is_dark else RGBColor(0x88, 0x88, 0x88)
+
+    img_dir = ""
+    if images:
+        img_dir = os.path.join(tempfile.gettempdir(), f"claudy_pptx_{int(time.time())}")
+        os.makedirs(img_dir, exist_ok=True)
+
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+        SW, SH = prs.slide_width, prs.slide_height
+
+        def _solid_rect(slide, left, top, width, height, color):
+            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+            shape.line.fill.background()
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = color
+            shape.shadow.inherit = False
+            return shape
+
+        def _add_text(slide, left, top, width, height, text, size=18, bold=False, color=INK, align=PP_ALIGN.LEFT, font="Calibri"):
+            box = slide.shapes.add_textbox(left, top, width, height)
+            tf = box.text_frame
+            tf.word_wrap = True
+            tf.margin_left = Pt(4)
+            tf.margin_right = Pt(4)
+            p = tf.paragraphs[0]
+            p.alignment = align
+            run = p.add_run()
+            run.text = text
+            run.font.name = font
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            run.font.color.rgb = color
+            return box
+
+        def _fetch(query, idx):
+            if not images or not query:
+                return ""
+            safe = re.sub(r"[^A-Za-z0-9]+", "_", query)[:40] or f"img_{idx}"
+            out = os.path.join(img_dir, f"{idx:02d}_{safe}.jpg")
+            return _fetch_image_pollinations(query, out, width=1280, height=720)
+
+        slides = slides or []
+
+        # ---------- COVER ----------
+        if title:
+            blank = prs.slide_layouts[6]
+            s = prs.slides.add_slide(blank)
+            _solid_rect(s, 0, 0, SW, SH, BG)
+            cover_q = (slides[0].get("image_query") if slides else "") or title
+            cover_img = _fetch(f"{cover_q} cinematic editorial photography", 0)
+            if cover_img:
+                # Full-bleed image with darkened overlay
+                s.shapes.add_picture(cover_img, 0, 0, width=SW, height=SH)
+                overlay = _solid_rect(s, 0, 0, SW, SH, RGBColor(*palette["accent"]))
+                overlay.fill.transparency = 0  # python-pptx doesn't expose alpha cleanly; emulate w/ panel
+                # Instead overlay a translucent dark panel via lower-half gradient (simple band)
+                band = _solid_rect(s, 0, Inches(4.2), SW, Inches(3.3), RGBColor(0, 0, 0))
+                _set_shape_alpha(band, 55)
+                # Side accent bar
+                _solid_rect(s, 0, 0, Inches(0.45), SH, ACCENT2)
+                _add_text(s, Inches(0.9), Inches(4.6), Inches(11.5), Inches(1.5),
+                          title, size=52, bold=True, color=WHITE, font="Calibri")
+                if subtitle:
+                    _add_text(s, Inches(0.9), Inches(6.0), Inches(11.5), Inches(0.7),
+                              subtitle, size=22, color=WHITE)
+            else:
+                _solid_rect(s, 0, 0, SW, SH, ACCENT)
+                _solid_rect(s, 0, 0, Inches(0.5), SH, ACCENT2)
+                _add_text(s, Inches(1.0), Inches(2.6), Inches(11.5), Inches(1.5),
+                          title, size=52, bold=True, color=cover_ink)
+                if subtitle:
+                    _add_text(s, Inches(1.0), Inches(4.0), Inches(11.5), Inches(0.8),
+                              subtitle, size=22, color=cover_ink)
+
+        # ---------- CONTENT SLIDES ----------
+        for idx, sl in enumerate(slides, start=1):
+            blank = prs.slide_layouts[6]
+            s = prs.slides.add_slide(blank)
+            _solid_rect(s, 0, 0, SW, SH, BG)
+            # Top accent bar
+            _solid_rect(s, 0, 0, SW, Inches(0.25), ACCENT)
+            # Side accent
+            _solid_rect(s, 0, Inches(0.25), Inches(0.12), SH - Inches(0.25), ACCENT2)
+
+            stitle = sl.get("title", "")
+            bullets = sl.get("bullets") or []
+            body = sl.get("body") or ""
+            img_q = sl.get("image_query") or stitle
+            img_path = _fetch(f"{img_q} editorial photography high quality", idx)
+
+            if img_path:
+                # Two-column layout: text 55% left, image 40% right
+                img_w = Inches(5.2)
+                img_h = Inches(5.4)
+                img_left = SW - img_w - Inches(0.5)
+                img_top = Inches(1.4)
+                # Frame
+                frame = _solid_rect(s, img_left - Emu(40000), img_top - Emu(40000),
+                                    img_w + Emu(80000), img_h + Emu(80000), ACCENT)
+                s.shapes.add_picture(img_path, img_left, img_top, width=img_w, height=img_h)
+                text_left = Inches(0.6)
+                text_w = img_left - Inches(0.6) - Inches(0.3)
+            else:
+                text_left = Inches(0.6)
+                text_w = Inches(12.1)
+
+            if stitle:
+                _add_text(s, text_left, Inches(0.5), text_w, Inches(0.9),
+                          stitle, size=30, bold=True, color=ACCENT)
+                # Underline accent
+                _solid_rect(s, text_left, Inches(1.35),
+                            min(Inches(1.8), text_w), Inches(0.06), ACCENT2)
+
+            top = Inches(1.7)
+            if bullets:
+                box = s.shapes.add_textbox(text_left, top, text_w, Inches(5.0))
+                tf = box.text_frame
+                tf.word_wrap = True
+                for i, b in enumerate(bullets):
+                    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                    p.alignment = PP_ALIGN.LEFT
+                    p.space_after = Pt(10)
+                    run = p.add_run()
+                    run.text = f"•  {b}"
+                    run.font.name = "Calibri"
+                    run.font.size = Pt(18)
+                    run.font.color.rgb = INK
+            elif body:
+                box = s.shapes.add_textbox(text_left, top, text_w, Inches(5.0))
+                tf = box.text_frame
+                tf.word_wrap = True
+                for i, line in enumerate(body.split("\n")):
+                    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                    p.space_after = Pt(6)
+                    run = p.add_run()
+                    run.text = line
+                    run.font.name = "Calibri"
+                    run.font.size = Pt(16)
+                    run.font.color.rgb = INK
+
+            # Footer
+            _add_text(s, Inches(0.6), Inches(7.05), Inches(8.0), Inches(0.35),
+                      title or "Claudy", size=10, color=footer_color)
+            _add_text(s, Inches(11.5), Inches(7.05), Inches(1.5), Inches(0.35),
+                      f"{idx} / {len(slides)}", size=10, color=footer_color, align=PP_ALIGN.RIGHT)
+
+        if not prs.slides:
+            blank = prs.slide_layouts[6]
+            s = prs.slides.add_slide(blank)
+            _solid_rect(s, 0, 0, SW, SH, BG)
+            _solid_rect(s, 0, 0, SW, Inches(0.25), ACCENT)
+            _add_text(s, Inches(0.7), Inches(3.0), Inches(12.0), Inches(1.0),
+                      title or "Presentacion", size=40, bold=True, color=ACCENT)
+
+        prs.save(target)
+        size = os.path.getsize(target)
+        return f"Archivo creado: {target}\nTamano: {size} bytes\n{_artifact_marker(target)}"
+    except Exception as e:
+        return f"Error creando pptx: {e}"
+
+
+def _set_shape_alpha(shape, percent):
+    """Apply alpha (0=opaque, 100=transparent) to a shape's solid fill via XML hack."""
+    try:
+        from pptx.oxml.ns import qn
+        from lxml import etree
+        sp = shape.fill._xPr
+        # Find or create solidFill > srgbClr > alpha
+        solidFill = sp.find(qn("a:solidFill"))
+        if solidFill is None:
+            return
+        srgb = solidFill.find(qn("a:srgbClr"))
+        if srgb is None:
+            return
+        # Remove any existing alpha
+        for a in srgb.findall(qn("a:alpha")):
+            srgb.remove(a)
+        alpha_val = max(0, min(100000, int((100 - percent) * 1000)))
+        alpha = etree.SubElement(srgb, qn("a:alpha"))
+        alpha.set("val", str(alpha_val))
+    except Exception:
+        pass
+
+
+def create_pdf(path, content=""):
+    """Create a styled PDF document using ReportLab Platypus flowables."""
+    target = _clean_user_path(path)
+    if not target:
+        return "Falta la ruta del archivo."
+    if not target.lower().endswith(".pdf"):
+        target += ".pdf"
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.colors import HexColor
+    except ImportError:
+        import sys, subprocess
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "reportlab"])
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.colors import HexColor
+        except Exception as e:
+            return f"Falta reportlab y no se pudo auto-instalar: {e}"
+    except Exception:
+        return "Falta reportlab (pip install reportlab)"
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        
+        # Professional standard margins (0.75 in / 54pt)
+        doc = SimpleDocTemplate(
+            target,
+            pagesize=letter,
+            rightMargin=54, leftMargin=54,
+            topMargin=54, bottomMargin=54
+        )
+        
+        styles = getSampleStyleSheet()
+        
+        # Define premium matching corporate theme styles
+        title_style = ParagraphStyle(
+            'DocTitle',
+            parent=styles['Heading1'],
+            fontName='Helvetica-Bold',
+            fontSize=24,
+            leading=28,
+            textColor=HexColor('#1F4E78'),
+            spaceAfter=15
+        )
+        
+        h1_style = ParagraphStyle(
+            'DocH1',
+            parent=styles['Heading2'],
+            fontName='Helvetica-Bold',
+            fontSize=15,
+            leading=18,
+            textColor=HexColor('#2E75B6'),
+            spaceBefore=14,
+            spaceAfter=8,
+            keepWithNext=True
+        )
+        
+        h2_style = ParagraphStyle(
+            'DocH2',
+            parent=styles['Heading3'],
+            fontName='Helvetica-Bold',
+            fontSize=12,
+            leading=15,
+            textColor=HexColor('#565656'),
+            spaceBefore=10,
+            spaceAfter=6,
+            keepWithNext=True
+        )
+        
+        body_style = ParagraphStyle(
+            'DocBody',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=10,
+            leading=14,
+            textColor=HexColor('#333333'),
+            spaceAfter=8
+        )
+        
+        story = []
+        
+        lines = (content or "").split("\n")
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                story.append(Spacer(1, 6))
+                continue
+                
+            if stripped.startswith("# "):
+                story.append(Paragraph(stripped[2:], title_style))
+                story.append(Spacer(1, 10))
+            elif stripped.startswith("## "):
+                story.append(Paragraph(stripped[3:], h1_style))
+            elif stripped.startswith("### "):
+                story.append(Paragraph(stripped[4:], h2_style))
+            else:
+                story.append(Paragraph(line, body_style))
+                
+        doc.build(story)
+        size = os.path.getsize(target)
+        return f"Archivo creado: {target}\nTamano: {size} bytes\n{_artifact_marker(target)}"
+    except Exception as e:
+        return f"Error creando pdf: {e}"
+
+
+def write_file(path, content="", append=False):
+    target = _clean_user_path(path)
+    if not target:
+        return "Falta la ruta del archivo."
+    if os.path.isdir(target):
+        return f"Es una carpeta, no un archivo: {target}"
+    if not _is_text_editable(target):
+        return f"No edito binarios desde aqui: {target}"
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        existed = os.path.exists(target)
+        backup = _snapshot_file(target) if existed else ""
+        mode = "a" if append else "w"
+        with open(target, mode, encoding="utf-8", newline="") as f:
+            f.write(content or "")
+        verb = "Archivo actualizado" if existed else "Archivo creado"
+        if append:
+            verb = "Contenido agregado" if existed else "Archivo creado"
+        size = os.path.getsize(target)
+        lines = [f"{verb}: {target}", f"Tamano: {size} bytes"]
+        if backup:
+            lines.append(f"Backup: {backup}")
+        lines.append(_artifact_marker(target))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error escribiendo archivo: {e}"
+
+
+def append_file(path, content=""):
+    return write_file(path, content, append=True)
+
+
+def replace_in_file(path, old, new, max_replacements=0):
+    target = _clean_user_path(path)
+    old = "" if old is None else str(old)
+    new = "" if new is None else str(new)
+    if not target:
+        return "Falta la ruta del archivo."
+    if not old:
+        return "Falta el texto a reemplazar."
+    if not os.path.isfile(target):
+        return f"No existe el archivo: {target}"
+    if not _is_text_editable(target):
+        return f"No edito binarios desde aqui: {target}"
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as f:
+            data = f.read()
+        count = data.count(old)
+        if count == 0:
+            return f"No encontre el texto indicado en: {target}\n{_artifact_marker(target)}"
+        backup = _snapshot_file(target)
+        limit = int(max_replacements or 0)
+        updated = data.replace(old, new, limit if limit > 0 else -1)
+        replaced = min(count, limit) if limit > 0 else count
+        with open(target, "w", encoding="utf-8", newline="") as f:
+            f.write(updated)
+        lines = [
+            f"Archivo editado: {target}",
+            f"Reemplazos: {replaced}",
+        ]
+        if backup:
+            lines.append(f"Backup: {backup}")
+        lines.append(_artifact_marker(target))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error editando archivo: {e}"
 
 
 def analyze_folder_summary(path, max_files_sample=20):
@@ -547,21 +1416,137 @@ INTENT_PATTERNS = [
 
 def detect_intent_filesystem_smart(prompt):
     """Special handling for 'busca X en Y' to return two args."""
-    m = re.match(r"^(?:busca(?:r)?|encuentra|find|grep)\s+[\"']?(.+?)[\"']?\s+en\s+(.+)$", prompt.strip(), re.I)
+    text = prompt.strip()
+
+    create_verb = r"(?:cr[eé]a(?:me|r)?|nuevo|nueva|genera|haz(?:me)?|hacer)"
+
+    # "dentro de X / en X, crea (una) carpeta Y"
+    m = re.match(
+        rf"^(?:dentro\s+de|en)\s+(.+?)[,\s]+{create_verb}\s+(?:un\s+|una\s+|el\s+|la\s+)?(?:carpeta|directorio|folder)\s+(.+)$",
+        text,
+        re.I,
+    )
+    if m:
+        location = m.group(1).strip()
+        name = m.group(2).strip()
+        return ("create_folder", f"{name} en {location}")
+
+    # "dentro de X / en X, crea (un) archivo Y[ con Z]"
+    m = re.match(
+        rf"^(?:dentro\s+de|en)\s+(.+?)[,\s]+{create_verb}\s+(?:un\s+|una\s+|el\s+|la\s+)?(?:archivo|file)\s+(.+)$",
+        text,
+        re.I,
+    )
+    if m:
+        location = m.group(1).strip()
+        rest = m.group(2).strip()
+        fname, content = parse_path_content_arg(rest)
+        return ("write_file", (f"{fname} en {location}", content, False))
+
+    m = re.match(
+        rf"^{create_verb}\s+(?:un\s+|una\s+|el\s+|la\s+)?(?:carpeta|directorio|folder)\s*$",
+        text,
+        re.I,
+    )
+    if m:
+        return ("create_folder", "")
+
+    m = re.match(
+        rf"^{create_verb}\s+(?:un\s+|una\s+|el\s+|la\s+)?(?:carpeta|directorio|folder)\s+(.+)$",
+        text,
+        re.I,
+    )
+    if m:
+        return ("create_folder", m.group(1).strip())
+
+    m = re.match(
+        rf"^{create_verb}\s+(?:un\s+|una\s+|el\s+|la\s+)?(?:archivo|file)\s+(.+)$",
+        text,
+        re.I,
+    )
+    if m:
+        path, content = parse_path_content_arg(m.group(1).strip())
+        return ("write_file", (path, content, False))
+
+    m = re.match(
+        r"^(?:escribe|guarda|guardar|save)\s+(.+?)\s+(?:en|dentro de)\s+(?:el\s+)?(?:archivo\s+|file\s+)?(.+)$",
+        text,
+        re.I,
+    )
+    if m and _looks_like_file_target(m.group(2)):
+        return ("write_file", (m.group(2).strip(), m.group(1), False))
+
+    m = re.match(
+        r"^(?:agrega|anade|append)\s+(.+?)\s+(?:al|a)\s+(?:el\s+)?(?:archivo\s+|file\s+)?(.+)$",
+        text,
+        re.I,
+    )
+    if m and _looks_like_file_target(m.group(2)):
+        return ("append_file", (m.group(2).strip(), m.group(1)))
+
+    m = re.match(
+        r"^(?:reemplaza|replace)\s+[\"']?(.+?)[\"']?\s+(?:por|with)\s+[\"']?(.+?)[\"']?\s+(?:en|in)\s+(?:el\s+)?(?:archivo\s+|file\s+)?(.+)$",
+        text,
+        re.I,
+    )
+    if m and _looks_like_file_target(m.group(3)):
+        return ("replace_in_file", (m.group(3).strip(), m.group(1), m.group(2)))
+
+    m = re.match(
+        r"^(?:edita|editar|modifica|modificar)\s+(?:el\s+)?(?:archivo\s+|file\s+)?(.+?)\s+(?:reemplaza|cambia)\s+[\"']?(.+?)[\"']?\s+(?:por|a)\s+[\"']?(.+?)[\"']?$",
+        text,
+        re.I,
+    )
+    if m and _looks_like_file_target(m.group(1)):
+        return ("replace_in_file", (m.group(1).strip(), m.group(2), m.group(3)))
+
+    m = re.match(
+        r"^(?:edita|editar|modifica|modificar)\s+(?:el\s+)?(?:archivo\s+|file\s+)?(.+?)\s+(?:con|contenido)\s+(.+)$",
+        text,
+        re.I,
+    )
+    if m and _looks_like_file_target(m.group(1)):
+        return ("write_file", (m.group(1).strip(), m.group(2), False))
+
+    m = re.match(r"^(?:busca(?:r)?|encuentra|find|grep)\s+[\"']?(.+?)[\"']?\s+en\s+(.+)$", text, re.I)
     if m:
         return ("find_in", (m.group(1).strip(), m.group(2).strip()))
     return None
 
 
+def clean_politeness_prefixes(text):
+    text = text.strip()
+    prev = None
+    while prev != text:
+        prev = text
+        # Remove Spanish/English politeness and query prefix wrappers
+        text = re.sub(
+            r"^(?:hola\s+claudy|hola|hey|claudy|oye|escucha|por\s+favor|puedes|podr[ií]as|quiero|necesito|podemos|vamos\s+a|ay[uú]dame\s+a|hazme\s+el\s+favor\s+de|me\s+gustar[ií]a\s+que\s+crearas|me\s+gustar[ií]a\s+crear|me\s+gustar[ií]a|crear[ií]as)\s+",
+            "",
+            text,
+            flags=re.I
+        ).strip()
+    return text
+
+
 def detect_intent(prompt):
     """Returns (intent_name, arg_or_tuple) or (None, None)."""
     text = prompt.strip()
+    # Clean politeness and conversational wrappers
+    cleaned = clean_politeness_prefixes(text)
     # Special two-arg case: find_in
-    fi = detect_intent_filesystem_smart(text)
+    fi = detect_intent_filesystem_smart(cleaned)
     if fi:
         return fi
+    # Also try matching on original text if cleaned didn't work
+    fi_orig = detect_intent_filesystem_smart(text)
+    if fi_orig:
+        return fi_orig
+
     for pat, intent in INTENT_PATTERNS:
-        m = pat.match(text)
+        m = pat.match(cleaned)
+        if not m:
+            m = pat.match(text)
         if m:
             arg = m.group(1).strip() if m.groups() else ""
             if intent == "search_app_maybe":
@@ -596,6 +1581,17 @@ def _looks_like_path(s):
     return False
 
 
+def _looks_like_file_target(s):
+    s = (s or "").strip().strip('"\'')
+    if _looks_like_path(s):
+        return True
+    if os.path.splitext(s)[1]:
+        return True
+    if "\\" in s or "/" in s:
+        return True
+    return False
+
+
 def execute_intent(intent, arg):
     if intent == "install":
         return install_app(arg)
@@ -618,6 +1614,22 @@ def execute_intent(intent, arg):
     if intent == "screenshot_send":
         return screenshot_for_send()
     # FILESYSTEM intents
+    if intent == "create_folder":
+        return create_folder(arg)
+    if intent == "write_file":
+        if isinstance(arg, tuple):
+            return write_file(arg[0], arg[1] if len(arg) > 1 else "", append=bool(arg[2]) if len(arg) > 2 else False)
+        path, content = parse_path_content_arg(arg)
+        return write_file(path, content)
+    if intent == "append_file":
+        if isinstance(arg, tuple):
+            return append_file(arg[0], arg[1] if len(arg) > 1 else "")
+        path, content = parse_path_content_arg(arg)
+        return append_file(path, content)
+    if intent == "replace_in_file":
+        if isinstance(arg, tuple) and len(arg) >= 3:
+            return replace_in_file(arg[0], arg[1], arg[2])
+        return "Usa: reemplaza <texto> por <texto nuevo> en <archivo>"
     if intent == "analyze_folder":
         return analyze_folder_summary(arg)
     if intent == "list_folder":

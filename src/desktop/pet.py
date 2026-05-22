@@ -22,13 +22,32 @@ from ctypes import wintypes
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_NAME = "Claudy"
 
-try:
-    from tts import speak as _tts_speak, stop_speaking as _tts_stop
-    TTS_OK = True
-except Exception:
-    TTS_OK = False
-    def _tts_speak(*_a, **_k): pass
-    def _tts_stop(): pass
+TTS_OK = False
+_tts_loaded = False
+_tts_real_speak = None
+_tts_real_stop = None
+
+def _ensure_tts_loaded():
+    # Lazy: edge_tts import can hang on startup (network).
+    global TTS_OK, _tts_loaded, _tts_real_speak, _tts_real_stop
+    if _tts_loaded:
+        return
+    _tts_loaded = True
+    try:
+        from tts import speak as s, stop_speaking as st
+        _tts_real_speak = s
+        _tts_real_stop = st
+        TTS_OK = True
+    except Exception:
+        TTS_OK = False
+
+def _tts_speak(*a, **k):
+    _ensure_tts_loaded()
+    if _tts_real_speak: _tts_real_speak(*a, **k)
+
+def _tts_stop():
+    _ensure_tts_loaded()
+    if _tts_real_stop: _tts_real_stop()
 
 try:
     from model_router import pick_model as _route_model
@@ -45,15 +64,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSET_FRAMES = [os.path.join(SCRIPT_DIR, f"claudy_orbit_frame_{i}.png") for i in range(6)]
 TRANSPARENT_COLOR = "#ff00ff"
 
-THEME = {
-    "bg_bubble": "#161622",
-    "bg_bubble_border": "#2a2a40",
-    "bg_input": "#0f0f1a",
-    "bg_input_border": "#2a2a40",
-    "text_primary": "#e8e8f0",
-    "text_secondary": "#8a8aa3",
-    "accent": "#7c6bff",
-    "accent_glow": "#ff7edb",
+# --- Theme system with multiple visual styles ---
+# Sprite colors stay constant across themes (the pet doesn't restyle on theme switch).
+_SPRITE_COLORS = {
     "body": (110, 120, 230, 255),
     "body_dark": (60, 65, 140, 255),
     "screen": (18, 18, 32, 255),
@@ -62,13 +75,82 @@ THEME = {
     "fin": (255, 190, 100, 255),
 }
 
+THEMES = {
+    "glass": {
+        "name": "Nocturne",
+        # Tinted near-black (chroma toward accent hue).
+        "bg_bubble": "#0f0e14",
+        "bg_bubble_border": "#2a2733",
+        "bg_input": "#15131c",
+        "bg_input_border": "#2a2733",
+        "text_primary": "#ece9f5",
+        "text_secondary": "#8a8499",
+        "text_label": "#5f5a6f",
+        # Accent: violet desaturado (no purple AI por defecto).
+        "accent": "#c4b5fd",
+        "accent_glow": "#f6c9ff",
+        "accent_dim": "#3a3349",
+        "divider": "#1d1b26",
+        "style": "glass",
+        **_SPRITE_COLORS,
+    },
+    "terminal": {
+        "name": "Terminal",
+        "bg_bubble": "#0b0d0b",
+        "bg_bubble_border": "#1b211b",
+        "bg_input": "#070907",
+        "bg_input_border": "#243024",
+        "text_primary": "#dfe6dc",
+        "text_secondary": "#7a8e76",
+        "text_label": "#4d5d49",
+        "accent": "#a5e08a",
+        "accent_glow": "#e9d977",
+        "accent_dim": "#23331f",
+        "divider": "#15191a",
+        "style": "terminal",
+        **_SPRITE_COLORS,
+    },
+    "editorial": {
+        "name": "Editorial",
+        # Warm paper (tinted toward red-brown).
+        "bg_bubble": "#f7f3eb",
+        "bg_bubble_border": "#ece2cc",
+        "bg_input": "#fbf8f1",
+        "bg_input_border": "#d9c9a8",
+        "text_primary": "#1f1814",
+        "text_secondary": "#6b5a4a",
+        "text_label": "#8d7d6c",
+        "accent": "#a13629",
+        "accent_glow": "#d4762b",
+        "accent_dim": "#e8d4cf",
+        "divider": "#e3d6bd",
+        "style": "editorial",
+        **_SPRITE_COLORS,
+    },
+}
+
+# Active theme — start with glass
+_THEME_KEYS = list(THEMES.keys())
+_active_theme_idx = 0
+THEME = dict(THEMES[_THEME_KEYS[_active_theme_idx]])
+
+# Typography scale — clear hierarchy
+FONT_TITLE = ("Segoe UI", 11, "bold")    # status / header
+FONT_BODY = ("Segoe UI", 10)              # main chat text
+FONT_INPUT = ("Segoe UI", 11)             # input field — slightly bigger
+FONT_LABEL = ("Segoe UI", 8)              # captions / tiny hints
+FONT_MONO = ("Cascadia Mono", 10)         # code-ish
+
 MEMORY_MAX_MESSAGES = 200
 MEMORY_CONTEXT_MESSAGES = 20
 MEMORY_CONTEXT_CHARS = 6000
 
-BUBBLE_WIDTH = 300
-BUBBLE_HEIGHT = 340
-BUBBLE_MINI_SIZE = 44
+BUBBLE_WIDTH = 360
+BUBBLE_HEIGHT = 420
+BUBBLE_MINI_SIZE = 72
+MOON_FRAME_COUNT = 6
+# Idle sprite: beautiful animated moon with Zzz and stars.
+MOON_FRAMES = [os.path.join(SCRIPT_DIR, f"claudy_moon_frame_{i}.png") for i in range(MOON_FRAME_COUNT)]
 
 WEBCHAT_HTML = """<!DOCTYPE html>
 <html lang="es">
@@ -248,9 +330,64 @@ class ClawdPet(tk.Tk):
         self.configure(bg=TRANSPARENT_COLOR)
         self.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
 
-        self.frames = [tk.PhotoImage(file=path) for path in ASSET_FRAMES]
+        # ===== One-time 3D Crab Skin Migration =====
+        try:
+            img_3d_path = "C:\\Users\\asus\\.gemini\\antigravity\\brain\\3b517328-c08b-49ef-bf4b-964cd9e198f6\\media__1779411206528.png"
+            migration_flag = os.path.join(SCRIPT_DIR, "crab_3d_migrated.flag")
+            
+            is_migrated_v2 = False
+            if os.path.exists(migration_flag):
+                with open(migration_flag, "r") as f:
+                    if "v2" in f.read():
+                        is_migrated_v2 = True
+            
+            if os.path.exists(img_3d_path) and not is_migrated_v2:
+                import sys
+                import shutil
+                if SCRIPT_DIR not in sys.path:
+                    sys.path.insert(0, SCRIPT_DIR)
+                import skin_swap
+                
+                # 1) Generate the 6 beautiful animated frames in the crab backup folder
+                backup_dir = os.path.join(SCRIPT_DIR, "backup_original")
+                os.makedirs(backup_dir, exist_ok=True)
+                skin_swap.create_animated_frames(img_3d_path, backup_dir, frame_size=128)
+                
+                # 2) Copy those frames to active directory
+                for i in range(6):
+                    shutil.copy(
+                        os.path.join(backup_dir, f"claudy_orbit_frame_{i}.png"),
+                        os.path.join(SCRIPT_DIR, f"claudy_orbit_frame_{i}.png")
+                    )
+                
+                # 3) Write flags to signal that the active skin is now crab
+                flag_path = os.path.join(SCRIPT_DIR, "custom_skin.flag")
+                with open(flag_path, "w") as f:
+                    f.write("source: backup_original (crab)\n")
+                with open(migration_flag, "w") as f:
+                    f.write("3D Crab migration v2 completed successfully!\n")
+        except Exception as e:
+            print(f"Error migrating 3D crab skin: {e}")
+
+        # Load pet frames using PIL to threshold the alpha channel (eliminates pink outlines/fringe caused by transparent color blending)
+        self.frames = []
+        try:
+            from PIL import ImageTk
+            for path in ASSET_FRAMES:
+                if os.path.exists(path):
+                    pil_img = Image.open(path).convert("RGBA")
+                    r, g, b, a = pil_img.split()
+                    binary_a = a.point(lambda p: 255 if p > 30 else 0)
+                    pil_img.putalpha(binary_a)
+                    self.frames.append(ImageTk.PhotoImage(pil_img))
+                else:
+                    self.frames.append(tk.PhotoImage(file=path))
+        except Exception:
+            self.frames = [tk.PhotoImage(file=path) for path in ASSET_FRAMES]
+
         self.frame_index = 0
         self.img = self.frames[self.frame_index]
+        self.moon_frames = []
         self.label = tk.Label(self, image=self.img, bg=TRANSPARENT_COLOR, bd=0)
         self.label.pack()
 
@@ -266,6 +403,8 @@ class ClawdPet(tk.Tk):
         self.state = "idle"
         self.bubble_win = None
         self.bubble_interactive = False
+        self._notebook_win = None
+        self._notebook_state = None
         self.quick_session_id = None
         self.opencode_process = None
         self.history_win = None
@@ -274,6 +413,8 @@ class ClawdPet(tk.Tk):
         self._plan_mode = False  # /plan on|off — solo planea, no ejecuta
         self._checkpoint_history = []  # F3.1 stack para undo/redo
         self._checkpoint_undone = []
+        self._last_file_artifact_path = None
+        self._open_location_btn = None
         self._available_models = [
             "deepseek-chat", "deepseek-reasoner",
             "gpt-4o", "gpt-4o-mini", "gpt-4.1",
@@ -334,6 +475,7 @@ class ClawdPet(tk.Tk):
         self.menu.add_separator()
         auto_start_label = "Desactivar inicio automatico" if self._is_auto_start_enabled() else "Activar inicio automatico"
         self.menu.add_command(label=auto_start_label, command=self._toggle_auto_start_menu)
+        self.menu.add_command(label="Ocultar a bandeja", command=self._hide_to_tray)
         self.menu.add_command(label="Cerrar", command=self.destroy)
         self.label.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
 
@@ -465,9 +607,11 @@ class ClawdPet(tk.Tk):
         elif state == "dance":
             self._advance_frame(speed=2, mode="pingpong")
         elif state == "talking":
-            self._advance_frame(speed=3, mode="loop")
+            self._advance_frame(speed=2, mode="pingpong")
         elif state == "sleeping":
-            self._advance_frame(speed=14, mode="loop")
+            self._advance_frame(speed=8, mode="pingpong")
+        elif state == "hover":
+            self._advance_frame(speed=2, mode="pingpong")
         elif state == "surprised":
             self._advance_frame(speed=2, mode="pingpong")
         elif state == "yawn":
@@ -513,9 +657,10 @@ class ClawdPet(tk.Tk):
             self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
             self.tick += 1
         elif state == "hover":
-            offset_y = int(math.sin(self.tick / 10) * 3.5)
-            offset_x = int(math.sin(self.tick / 16) * 1.5)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y - 3}")
+            # Energetic, playful wiggle + gentle floating (feels alive and premium when cursor enters)
+            offset_y = int(math.sin(self.tick / 6) * 4.5) - 4
+            offset_x = int(math.sin(self.tick / 3) * 2.5)
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
             self.tick += 1
         elif state == "thinking":
             offset_y = int(math.sin(self.tick / 6) * 4)
@@ -528,8 +673,9 @@ class ClawdPet(tk.Tk):
             self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
             self.tick += 1
         elif state == "talking":
-            offset_x = int(math.sin(self.tick / 5) * 3)
-            offset_y = int(math.sin(self.tick / 11) * 1.5)
+            # Animated bouncing sway with smooth head-bobbing speech feel
+            offset_x = int(math.sin(self.tick / 4) * 4.5)
+            offset_y = -int(abs(math.sin(self.tick / 3.5)) * 5)
             self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
             self.tick += 1
         elif state == "wave":
@@ -547,10 +693,11 @@ class ClawdPet(tk.Tk):
             self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
             self.tick += 1
         elif state == "sleeping":
-            # Slow deep breathing
-            offset_y = int(math.sin(self.tick / 60) * 1.5)
-            offset_x = cur_dx
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y + 2}")
+            # Slow, rhythmic, deep breathing wave
+            offset_y = int(math.sin(self.tick / 40) * 3.0) + 2
+            offset_x = int(math.cos(self.tick / 80) * 1.0)
+            offset_x += cur_dx
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
             self.tick += 1
         elif state == "surprised":
             # Sharp upward jump then settle
@@ -578,6 +725,12 @@ class ClawdPet(tk.Tk):
             # Small backward shrink (simulated with downward drift)
             offset_y = int(math.sin(self.tick / 8) * 1) + 4
             offset_x = -3
+            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
+            self.tick += 1
+        elif state == "notebook":
+            # Subtle typing nod: tiny vertical bobs synced to key taps
+            offset_y = int(abs(math.sin(self.tick / 2.2)) * 2)
+            offset_x = int(math.sin(self.tick / 5) * 1)
             self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
             self.tick += 1
         # --- Crab-specific motions ---
@@ -649,9 +802,13 @@ class ClawdPet(tk.Tk):
         if new_state == "crab_walk":
             import random as _r
             self._crab_dir = _r.choice([-1, 1])
+        if new_state == "sleeping":
+            self.show_thought("Zzz...")
         def _restore():
             if self.state == new_state:
                 self.state = "idle"
+                if new_state == "sleeping":
+                    self.hide_bubble()
         self.after(duration_ms, _restore)
 
     def _start_idle_behaviors(self):
@@ -661,6 +818,11 @@ class ClawdPet(tk.Tk):
             if self.state == "idle" and not self.bubble_interactive:
                 # Probabilities tuned to feel alive but not annoying
                 pick = _r.random()
+                # Robot skin: occasionally pull out a notebook and type
+                if (not self._is_crab()) and _r.random() < 0.18:
+                    self._start_notebook_animation()
+                    self.after(_r.randint(20000, 40000), self._start_idle_behaviors)
+                    return
                 # Crab skin: bias toward crab-specific animations
                 if self._is_crab() and _r.random() < 0.55:
                     crab_pick = _r.random()
@@ -773,7 +935,18 @@ class ClawdPet(tk.Tk):
         self.menu.add_separator()
         auto_start_label = "Desactivar inicio automatico" if self._is_auto_start_enabled() else "Activar inicio automatico"
         self.menu.add_command(label=auto_start_label, command=self._toggle_auto_start_menu)
+        self.menu.add_command(label="Ocultar a bandeja", command=self._hide_to_tray)
         self.menu.add_command(label="Cerrar", command=self.destroy)
+
+    def _hide_to_tray(self):
+        """Hide the floating sprite into the system tray icon."""
+        self.withdraw()
+        if self.bubble_win:
+            try:
+                self.bubble_win.withdraw()
+            except Exception:
+                pass
+        self._show_notification("Claudy", "Oculto en la bandeja. Click derecho en el icono para mostrar.")
 
     def _on_drag_start(self, event):
         self._dragging = True
@@ -907,12 +1080,41 @@ class ClawdPet(tk.Tk):
             # Fallback: create a simple colored square.
             icon_image = PILImage.new("RGBA", (16, 16), (124, 107, 255, 255))
 
+        def _show_all():
+            try:
+                self.deiconify()
+                self.lift()
+                if self.bubble_win:
+                    self.bubble_win.deiconify()
+            except Exception:
+                pass
+
+        def _hide_all():
+            try:
+                self.withdraw()
+                if self.bubble_win:
+                    self.bubble_win.withdraw()
+            except Exception:
+                pass
+
+        def _toggle_all():
+            try:
+                if self.state() == "withdrawn":
+                    _show_all()
+                else:
+                    _hide_all()
+            except Exception:
+                pass
+
+        # Route to Tk mainloop (pystray runs in a separate thread; Tk is not thread-safe).
         def on_show_tray(icon, item):
-            self.deiconify()
-            self.lift()
+            self.after(0, _show_all)
 
         def on_hide_tray(icon, item):
-            self.withdraw()
+            self.after(0, _hide_all)
+
+        def on_toggle_tray(icon, item):
+            self.after(0, _toggle_all)
 
         def on_toggle_auto_start(icon, item):
             if self._is_auto_start_enabled():
@@ -923,10 +1125,15 @@ class ClawdPet(tk.Tk):
                 self._show_notification("Claudy", "Inicio automatico activado")
 
         def on_quit(icon, item):
+            try:
+                self._run_backup_on_exit()
+            except Exception:
+                pass
             icon.stop()
             self.destroy()
 
         menu = pystray.Menu(
+            pystray.MenuItem("Mostrar", on_toggle_tray, default=True, visible=False),
             pystray.MenuItem("Mostrar", on_show_tray),
             pystray.MenuItem("Ocultar", on_hide_tray),
             pystray.Menu.SEPARATOR,
@@ -938,6 +1145,113 @@ class ClawdPet(tk.Tk):
         self._tray_icon = pystray.Icon("claudy", icon_image, "Claudy", menu)
         # Run tray in daemon thread so it doesn't block the mainloop.
         threading.Thread(target=self._tray_icon.run, daemon=True).start()
+
+    def _backup_flag_path(self):
+        return os.path.join(os.path.expanduser("~"), ".claudy", "backup_on_exit.enabled")
+
+    def _backup_script_path(self):
+        return os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "..", "scripts", "backup-claudy-full.ps1",
+        ))
+
+    def _set_auto_backup(self, enabled):
+        flag = self._backup_flag_path()
+        os.makedirs(os.path.dirname(flag), exist_ok=True)
+        if enabled:
+            with open(flag, "w", encoding="utf-8") as f:
+                f.write("1")
+            return "Auto-backup al cerrar Claudy: ACTIVADO. Se respaldara en G:\\Mi unidad\\Claudy-Backups."
+        else:
+            try:
+                os.remove(flag)
+            except FileNotFoundError:
+                pass
+            return "Auto-backup al cerrar Claudy: DESACTIVADO."
+
+    def _backup_status(self):
+        enabled = os.path.exists(self._backup_flag_path())
+        backup_dir = "G:\\Mi unidad\\Claudy-Backups"
+        lines = [f"Auto-backup al cerrar: {'ACTIVADO' if enabled else 'desactivado'}"]
+        if os.path.isdir(backup_dir):
+            try:
+                files = sorted(
+                    [f for f in os.listdir(backup_dir) if f.startswith("claudy-full-") and f.endswith(".zip")],
+                    reverse=True,
+                )
+                if files:
+                    lines.append(f"Backups en {backup_dir}: {len(files)}")
+                    last = os.path.join(backup_dir, files[0])
+                    size_mb = round(os.path.getsize(last) / (1024 * 1024), 1)
+                    lines.append(f"Mas reciente: {files[0]} ({size_mb} MB)")
+                else:
+                    lines.append(f"Sin backups aun en {backup_dir}.")
+            except Exception as e:
+                lines.append(f"Error leyendo {backup_dir}: {e}")
+        else:
+            lines.append(f"{backup_dir} no existe (Google Drive no montado?)")
+        lines.append("")
+        lines.append("Comandos: /backup [ahora] | /backup on | /backup off | /backup status")
+        return "\n".join(lines)
+
+    def _run_backup_now(self):
+        script = self._backup_script_path()
+        if not os.path.exists(script):
+            return f"No encuentro el script: {script}"
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", script, "-Quiet"],
+                capture_output=True, text=True, timeout=300,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if r.returncode == 0:
+                # Find the most recent zip
+                d = "G:\\Mi unidad\\Claudy-Backups"
+                try:
+                    files = sorted(
+                        [f for f in os.listdir(d) if f.startswith("claudy-full-") and f.endswith(".zip")],
+                        reverse=True,
+                    )
+                    if files:
+                        last = os.path.join(d, files[0])
+                        size_mb = round(os.path.getsize(last) / (1024 * 1024), 1)
+                        return f"Backup listo: {files[0]} ({size_mb} MB)\n[CLAUDY_PATH:{last}]"
+                except Exception:
+                    pass
+                return "Backup completado."
+            err = (r.stderr or r.stdout or "").strip()[-500:]
+            if r.returncode == 2:
+                return "Google Drive (G:) no esta disponible. Conecta Drive y reintenta."
+            return f"Backup fallo (codigo {r.returncode}): {err}"
+        except subprocess.TimeoutExpired:
+            return "El backup tardo mas de 5 minutos. Revisa G:\\Mi unidad\\Claudy-Backups manualmente."
+        except Exception as e:
+            return f"Error ejecutando backup: {e}"
+
+    def _run_backup_on_exit(self):
+        """Fire-and-forget Google Drive backup on exit. Non-blocking, silent on failure."""
+        try:
+            # Flag file lets the user opt-out by deleting it; opt-in default = exists.
+            flag = os.path.join(os.path.expanduser("~"), ".claudy", "backup_on_exit.enabled")
+            if not os.path.exists(flag):
+                return  # opt-in: not enabled
+            script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..", "..", "scripts", "backup-claudy-full.ps1",
+            )
+            script = os.path.normpath(script)
+            if not os.path.exists(script):
+                return
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                 "-ExecutionPolicy", "Bypass",
+                 "-File", script, "-Quiet"],
+                shell=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
 
     def run_bounce(self, frame):
         offsets = [0, -5, -10, -14, -8, -3, 0, 3, 0]
@@ -963,7 +1277,14 @@ class ClawdPet(tk.Tk):
     def _check_bubble_focus(self):
         if not self.bubble_win:
             return
-        
+
+        # Grace period after opening: avoid auto-closing the welcome bubble
+        # before the user has had a chance to move the mouse onto it.
+        opened_at = getattr(self, "_bubble_opened_at", 0)
+        if opened_at and (time.time() - opened_at) < 2.0:
+            self.after(200, self._check_bubble_focus)
+            return
+
         # If the pet is currently bouncing, its bounds are shifting rapidly.
         # Wait for the bounce to finish before checking focus bounds.
         if self.state == "bounce":
@@ -1038,9 +1359,9 @@ class ClawdPet(tk.Tk):
         pet_x = self.base_x
         pet_y = self.base_y
         pet_w = self.width
-        # Center horizontally on pet, just above its head
+        # Center horizontally on pet, closer to its head
         x = pet_x + pet_w // 2 - size // 2
-        y = pet_y - size + 10
+        y = pet_y - size + 42
         return x, y
 
     def _sync_minimized_bubble(self):
@@ -1083,17 +1404,69 @@ class ClawdPet(tk.Tk):
         return pts
 
     def _draw_bubble(self, canvas, w, h, bg, border):
-        """Draw a clean rounded bubble with soft shadow and tail."""
-        # Soft shadow (simulated with offset dark polygon).
-        shadow_pts = self._rounded_bubble_path(w, h, 16, tail_h=10, tail_w=16)
-        shadow_pts = [(x + 2, y + 3) for x, y in shadow_pts]
-        canvas.create_polygon(shadow_pts, smooth=True, fill="#000000", outline="",
-                              stipple="gray25", tags=("bubble_bg",))
+        style = THEME.get("style", "glass")
+        if style == "terminal":
+            self._draw_bubble_terminal(canvas, w, h, bg, border)
+        elif style == "editorial":
+            self._draw_bubble_editorial(canvas, w, h, bg, border)
+        else:
+            self._draw_bubble_glass(canvas, w, h, bg, border)
 
-        # Main bubble.
-        pts = self._rounded_bubble_path(w, h, 16, tail_h=10, tail_w=16)
+    def _draw_bubble_glass(self, canvas, w, h, bg, border):
+        # Layered shadow + halo + glass surface + top highlight
+        for offset, stipple in ((6, "gray12"), (3, "gray25")):
+            sh = self._rounded_bubble_path(w, h, 22, tail_h=10, tail_w=18)
+            sh = [(x + 1, y + offset) for x, y in sh]
+            canvas.create_polygon(sh, smooth=True, fill="#000000", outline="",
+                                  stipple=stipple, tags=("bubble_bg",))
+        halo = self._rounded_bubble_path(w, h, 22, tail_h=10, tail_w=18)
+        canvas.create_polygon(halo, smooth=True, fill="", outline=THEME["accent"],
+                              width=2, stipple="gray25", tags=("bubble_bg",))
+        pts = self._rounded_bubble_path(w, h, 22, tail_h=10, tail_w=18)
         canvas.create_polygon(pts, smooth=True, fill=bg, outline=border, width=1,
                               tags=("bubble_bg",))
+        hl_pts = [(24, 4), (w - 24, 4), (w - 18, 10), (18, 10)]
+        canvas.create_polygon(hl_pts, smooth=True, fill="#ffffff", outline="",
+                              stipple="gray12", tags=("bubble_bg",))
+
+    def _draw_bubble_terminal(self, canvas, w, h, bg, border):
+        # Sharp rectangle, scanlines, double border, CRT corner glow
+        canvas.create_rectangle(0, 0, w, h, fill=bg, outline="", tags=("bubble_bg",))
+        # Scanlines — horizontal faint lines every 3px
+        for y in range(0, h, 3):
+            canvas.create_line(0, y, w, y, fill=THEME["divider"], width=1, tags=("bubble_bg",))
+        # Double border — outer thin, inner accent
+        canvas.create_rectangle(0, 0, w - 1, h - 1, outline=border, width=1, tags=("bubble_bg",))
+        canvas.create_rectangle(4, 4, w - 5, h - 5, outline=THEME["accent"], width=1, tags=("bubble_bg",))
+        # Tail/pointer at bottom-center
+        cx = w // 2
+        canvas.create_polygon(
+            [cx - 8, h - 1, cx, h + 8, cx + 8, h - 1],
+            fill=bg, outline=THEME["accent"], width=1, tags=("bubble_bg",)
+        )
+        # Corner brackets (CRT corners)
+        for (x0, y0, x1, y1, x2, y2) in [
+            (8, 8, 8, 16, 16, 8),               # TL
+            (w - 9, 8, w - 9, 16, w - 17, 8),    # TR
+            (8, h - 9, 8, h - 17, 16, h - 9),    # BL
+            (w - 9, h - 9, w - 9, h - 17, w - 17, h - 9),  # BR
+        ]:
+            canvas.create_line(x0, y0, x1, y1, fill=THEME["accent_glow"], width=2, tags=("bubble_bg",))
+            canvas.create_line(x0, y0, x2, y2, fill=THEME["accent_glow"], width=2, tags=("bubble_bg",))
+
+    def _draw_bubble_editorial(self, canvas, w, h, bg, border):
+        # Paper-like: cream background, single hairline border, no shadow drama
+        canvas.create_rectangle(0, 0, w, h, fill=bg, outline="", tags=("bubble_bg",))
+        # A single accent line on top (editorial bar)
+        canvas.create_rectangle(0, 0, w, 3, fill=THEME["accent"], outline="", tags=("bubble_bg",))
+        # Hairline border
+        canvas.create_rectangle(0, 0, w - 1, h - 1, outline=border, width=1, tags=("bubble_bg",))
+        # Tail
+        cx = w // 2
+        canvas.create_polygon(
+            [cx - 7, h - 1, cx, h + 7, cx + 7, h - 1],
+            fill=bg, outline=border, width=1, tags=("bubble_bg",)
+        )
 
     def show_thought(self, text):
         self.hide_bubble()
@@ -1178,13 +1551,26 @@ class ClawdPet(tk.Tk):
         self._draw_bubble(canvas, width, height, THEME["bg_bubble"], THEME["bg_bubble_border"])
 
         # History button (left) – tiny toggle icon.
+        # Brand label \u2014 small uppercase tag (left).
+        brand_lbl = tk.Label(
+            bub, text="CLAUDY", bg=THEME["bg_bubble"], fg=THEME["accent"],
+            font=("Segoe UI", 8, "bold"), padx=0, pady=0,
+        )
+        brand_id = canvas.create_window(20, 18, anchor="nw", window=brand_lbl)
+        # Live status dot
+        status_dot = tk.Label(
+            bub, text="\u25cf", bg=THEME["bg_bubble"], fg="#5ee6a1",
+            font=("Segoe UI", 7), padx=0, pady=0,
+        )
+        status_dot_id = canvas.create_window(76, 19, anchor="nw", window=status_dot)
+        # History button
         history_btn = tk.Label(
             bub, text="\u2630", bg=THEME["bg_bubble_border"], fg=THEME["text_primary"],
-            font=("Segoe UI", 7), cursor="hand2",
-            padx=3, pady=1, relief="flat", bd=0,
+            font=("Segoe UI", 9), cursor="hand2",
+            padx=5, pady=2, relief="flat", bd=0,
             highlightbackground=THEME["accent"], highlightthickness=0,
         )
-        history_id = canvas.create_window(18, 14, anchor="nw", window=history_btn)
+        history_id = canvas.create_window(width - 168, 14, anchor="nw", window=history_btn)
         history_btn.bind("<Button-1>", lambda _e: self.show_history_window())
         history_btn.bind("<Enter>", lambda _e: history_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
         history_btn.bind("<Leave>", lambda _e: history_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
@@ -1192,10 +1578,10 @@ class ClawdPet(tk.Tk):
         # Folder analyzer button: pick a folder, analyze deep, save to Obsidian.
         folder_btn = tk.Label(
             bub, text="\U0001F4C1", bg=THEME["bg_bubble_border"], fg=THEME["text_primary"],
-            font=("Segoe UI Emoji", 8), cursor="hand2",
-            padx=3, pady=1, relief="flat", bd=0,
+            font=("Segoe UI Emoji", 10), cursor="hand2",
+            padx=4, pady=1, relief="flat", bd=0,
         )
-        folder_id = canvas.create_window(48, 14, anchor="nw", window=folder_btn)
+        folder_id = canvas.create_window(width - 138, 14, anchor="nw", window=folder_btn)
 
         def _on_analyze_folder(_e=None):
             from tkinter import filedialog
@@ -1220,46 +1606,75 @@ class ClawdPet(tk.Tk):
         folder_btn.bind("<Enter>", lambda _e: folder_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
         folder_btn.bind("<Leave>", lambda _e: folder_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
 
+        # Open last file/folder location button.
+        open_location_btn = tk.Label(
+            bub, text="\U0001F4C2", bg=THEME["bg_bubble_border"], fg=THEME["text_secondary"],
+            font=("Segoe UI Emoji", 10), cursor="hand2",
+            padx=4, pady=1, relief="flat", bd=0,
+        )
+        open_location_id = canvas.create_window(width - 108, 14, anchor="nw", window=open_location_btn)
+        self._open_location_btn = open_location_btn
+        open_location_btn.bind("<Button-1>", lambda _e: self._open_last_file_location())
+        open_location_btn.bind("<Enter>", lambda _e: self._set_open_location_hover(True))
+        open_location_btn.bind("<Leave>", lambda _e: self._set_open_location_hover(False))
+        self._set_open_location_button_state()
+
         # Clear visible area button (history stays saved on disk).
         clear_btn = tk.Label(
             bub, text="\U0001F9F9", bg=THEME["bg_bubble_border"], fg=THEME["text_primary"],
-            font=("Segoe UI Emoji", 8), cursor="hand2",
-            padx=3, pady=1, relief="flat", bd=0,
+            font=("Segoe UI Emoji", 10), cursor="hand2",
+            padx=4, pady=1, relief="flat", bd=0,
         )
-        clear_id = canvas.create_window(78, 14, anchor="nw", window=clear_btn)
-        clear_btn.bind("<Button-1>", lambda _e: self._set_response_text(""))
+        clear_id = canvas.create_window(width - 78, 14, anchor="nw", window=clear_btn)
+        clear_btn.bind("<Button-1>", lambda _e: (self._chat_view.clear() if getattr(self, "_chat_view", None) else self._set_response_text("")))
         clear_btn.bind("<Enter>", lambda _e: clear_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
         clear_btn.bind("<Leave>", lambda _e: clear_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
-
         # Minimize button.
         minimize_btn = tk.Label(
-            bub, text="\u2014", bg=THEME["bg_bubble"], fg=THEME["text_secondary"],
-            font=("Segoe UI", 10), cursor="hand2",
+            bub, text="\u2013", bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+            font=("Segoe UI", 14, "bold"), cursor="hand2",
+            padx=4, pady=0,
         )
-        minimize_id = canvas.create_window(width - 14, 10, anchor="ne", window=minimize_btn)
+        minimize_id = canvas.create_window(width - 14, 14, anchor="ne", window=minimize_btn)
+        minimize_btn.bind("<Enter>", lambda _e: minimize_btn.config(fg=THEME["accent"]))
+        minimize_btn.bind("<Leave>", lambda _e: minimize_btn.config(fg=THEME["text_primary"]))
 
-        # Scrollable response area.
-        response_frame = tk.Frame(bub, bg=THEME["bg_bubble"], bd=0, highlightthickness=0)
-        response_scroll = tk.Scrollbar(
-            response_frame, orient="vertical", width=6,
-            bg=THEME["bg_bubble_border"], troughcolor=THEME["bg_bubble"],
-            activebackground=THEME["accent"], highlightthickness=0, bd=0,
-            relief="flat",
-        )
-        response_text = tk.Text(
-            response_frame, bg=THEME["bg_bubble"], fg=THEME["text_primary"],
-            font=("Segoe UI", 10), wrap="word",
-            yscrollcommand=response_scroll.set, state="disabled",
-            highlightthickness=0, bd=0, padx=8, pady=4,
-            cursor="arrow", relief="flat", spacing1=2, spacing3=2,
-            selectbackground=THEME["accent"], selectforeground="#ffffff",
-        )
-        response_scroll.config(command=response_text.yview)
-        response_scroll.pack(side="right", fill="y")
-        response_text.pack(side="left", fill="both", expand=True)
-        self._response_text_widget = response_text
-        self._set_response_text(text)
-        header_id = canvas.create_window(14, 34, anchor="nw", width=width - 28, height=200, window=response_frame)
+        # Modern canvas-based chat view (bubbles, avatars, timestamps, animations).
+        try:
+            from chat_view import ChatView
+        except Exception:
+            ChatView = None
+        if ChatView is not None:
+            chat = ChatView(bub, theme=THEME, width=width - 32, height=270)
+            self._chat_view = chat
+            self._response_text_widget = None  # no legacy text widget
+            # Load history.
+            try:
+                if getattr(self, "_chat_history_buffer", None) is not None:
+                    chat.load_history(self._chat_history_buffer)
+                    self._chat_history_buffer = None
+                else:
+                    history = self._load_memory()[-12:] if hasattr(self, "_load_memory") else []
+                    chat.load_history(history)
+            except Exception:
+                pass
+            # If a starting prompt text was provided (and no history), show as system.
+            if not chat._messages and text:
+                chat.add_system(text)
+            header_id = canvas.create_window(16, 44, anchor="nw", width=width - 32, height=270, window=chat)
+        else:
+            # Fallback: legacy text widget if chat_view fails to import.
+            response_frame = tk.Frame(bub, bg=THEME["bg_bubble"], bd=0, highlightthickness=0)
+            response_text = tk.Text(
+                response_frame, bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+                font=FONT_BODY, wrap="word", state="disabled",
+                highlightthickness=0, bd=0, padx=14, pady=10, relief="flat",
+            )
+            response_text.pack(side="left", fill="both", expand=True)
+            self._response_text_widget = response_text
+            self._chat_view = None
+            self._set_response_text(text)
+            header_id = canvas.create_window(16, 44, anchor="nw", width=width - 32, height=270, window=response_frame)
 
         # Dummy references for minimize/expand (pagination removed).
         prev_id = None
@@ -1272,16 +1687,40 @@ class ClawdPet(tk.Tk):
         # Input area — simple placeholder via direct entry manipulation.
         _PLACEHOLDER = "Escribe aqui..."
 
-        entry = tk.Entry(
+        entry = tk.Text(
             bub,
             bg=THEME["bg_input"], fg=THEME["text_secondary"],
             insertbackground=THEME["accent"], insertwidth=2,
-            relief="flat", font=("Segoe UI", 10),
+            relief="flat", font=FONT_INPUT,
             highlightthickness=1, highlightbackground=THEME["bg_input_border"],
             highlightcolor=THEME["accent"], bd=0,
+            wrap="word", padx=6, pady=6,
         )
+
+        # Override standard entry methods to make tk.Text act exactly like tk.Entry
+        def text_get(index1=None, index2=None):
+            if index1 is None:
+                return entry.get("1.0", "end-1c")
+            return tk.Text.get(entry, index1, index2)
+        
+        def text_delete(first, last=None):
+            if first == 0 and last == tk.END:
+                entry.delete("1.0", "end")
+            else:
+                tk.Text.delete(entry, first, last)
+                
+        def text_insert(index, chars, *tags):
+            if index == 0:
+                entry.insert("1.0", chars)
+            else:
+                tk.Text.insert(entry, index, chars, *tags)
+
+        entry.get = text_get
+        entry.delete = text_delete
+        entry.insert = text_insert
+
         entry.insert(0, _PLACEHOLDER)
-        entry_id = canvas.create_window(22, 244, anchor="nw", width=width - 44, height=28, window=entry)
+        entry_id = canvas.create_window(20, 314, anchor="nw", width=width - 40, height=48, window=entry)
 
         def _has_placeholder():
             return entry.get() == _PLACEHOLDER
@@ -1303,50 +1742,72 @@ class ClawdPet(tk.Tk):
         entry.bind("<FocusOut>", lambda _e: entry.after_idle(_restore_placeholder))
 
         status = tk.Label(
-            bub, text="Enter envia  \u00b7  Esc cierra",
-            bg=THEME["bg_bubble"], fg=THEME["text_secondary"],
-            font=("Segoe UI", 8), padx=10, pady=2, anchor="w",
+            bub, text="Enter envía  ·  Esc cierra  ·  [Espacio] 2s: Hablar 🎙️",
+            bg=THEME["bg_bubble"], fg=THEME["text_label"],
+            font=FONT_LABEL, padx=12, pady=4, anchor="w",
         )
-        status_id = canvas.create_window(14, 280, anchor="nw", width=width - 28, window=status)
+        status_id = canvas.create_window(16, 372, anchor="nw", width=width - 32, window=status)
 
-        # Position for the minimized (Zzz) state — centered in the mini window.
+        # Position for the minimized (sleep) state — centered in the mini window.
         mini_cx = BUBBLE_MINI_SIZE // 2
         mini_cy = BUBBLE_MINI_SIZE // 2
 
-        # Sleep state visual — a single floating blue "Zzz" (no bubble, no shadow).
-        zzz_text_id = canvas.create_text(
-            mini_cx, mini_cy,
-            text="Zzz", fill="#4a9eff", font=("Segoe UI", 14, "bold")
-        )
-        canvas.itemconfigure(zzz_text_id, state="hidden")
+        # Sleep visual: animated vector Zzz text elements (100% transparent, NO pink backgrounds!)
+        zzz_1 = canvas.create_text(mini_cx - 10, mini_cy + 15, text="z", fill=THEME["accent"], font=("Segoe UI", 12, "bold"))
+        zzz_2 = canvas.create_text(mini_cx + 2, mini_cy + 2, text="Z", fill=THEME["accent"], font=("Segoe UI", 16, "bold"))
+        zzz_3 = canvas.create_text(mini_cx - 4, mini_cy - 12, text="Z", fill=THEME["accent"], font=("Segoe UI", 20, "bold"))
 
-        _idle_items = (zzz_text_id,)
+        _idle_items = (zzz_1, zzz_2, zzz_3)
+        for item in _idle_items:
+            canvas.itemconfigure(item, state="hidden")
 
-        self._zzz_text_id = zzz_text_id
-        self._zzz_shadow_id = None  # No shadow anymore
+        self._canvas = canvas
+        self._idle_items = _idle_items
+        self._zzz_texts = [zzz_1, zzz_2, zzz_3]
         self._zzz_tick = 0
         self._zzz_anim_running = False
 
         def minimize():
             self.bubble_minimized = True
             self._reset_idle_timer()
-            # Hide all UI chrome AND the bubble background — only Zzz remains
-            for item in (header_id, entry_id, status_id, minimize_id, history_id, folder_id, clear_id):
+            # Hide all UI chrome AND the bubble background
+            for item in (header_id, entry_id, status_id, minimize_id, history_id, folder_id, open_location_id, clear_id, brand_id, status_dot_id):
                 canvas.itemconfigure(item, state="hidden")
             canvas.itemconfigure("bubble_bg", state="hidden")
-            for item in _idle_items:
-                canvas.itemconfigure(item, state="normal")
+            
+            is_working = getattr(self, "_milestone_active", False)
+            if is_working:
+                # Keep sleep elements hidden while active task runs
+                for item in _idle_items:
+                    canvas.itemconfigure(item, state="hidden")
+                self._stop_zzz_animation()
+                
+                # Instantly display the active status progress message
+                status_text = status.cget("text")
+                if "Enter" in status_text or not status_text:
+                    status_text = "Redactando informe..."
+                self.show_pet_speech_bubble(status_text, duration=None)
+            else:
+                for item in _idle_items:
+                    canvas.itemconfigure(item, state="normal")
+                self._start_zzz_animation()
+                
             sz = BUBBLE_MINI_SIZE
             canvas.configure(width=sz, height=sz)
             cx, cy = self.minimized_position(sz)
             bub.geometry(f"{sz}x{sz}+{cx}+{cy}")
-            self._start_zzz_animation()
 
         def expand():
             self.bubble_minimized = False
             self._cancel_idle_timer()
             self._stop_zzz_animation()
-            for item in (header_id, entry_id, status_id, minimize_id, history_id, folder_id, clear_id):
+            if hasattr(self, "_pet_speech_win") and self._pet_speech_win:
+                try:
+                    self._pet_speech_win.destroy()
+                except Exception:
+                    pass
+                self._pet_speech_win = None
+            for item in (header_id, entry_id, status_id, minimize_id, history_id, folder_id, open_location_id, clear_id, brand_id, status_dot_id):
                 canvas.itemconfigure(item, state="normal")
             canvas.itemconfigure("bubble_bg", state="normal")
             for item in _idle_items:
@@ -1372,6 +1833,54 @@ class ClawdPet(tk.Tk):
             if not prompt or prompt == _PLACEHOLDER:
                 return
             entry.delete(0, tk.END)
+
+            # If Guided Report Flow is active, process the current answer
+            if getattr(self, "_guided_report_active", False):
+                self._handle_guided_report_step(prompt, status, entry)
+                return
+
+            # Check if this is a new request to generate a report
+            plow = prompt.lower().strip()
+            is_report_req = False
+            topic = ""
+            if plow.startswith("/informe") or plow.startswith("/reporte"):
+                is_report_req = True
+                topic = prompt.split(None, 1)[1].strip() if len(prompt.split(None, 1)) > 1 else ""
+            else:
+                triggers = [
+                    "informe sobre", "informe de", "reporte sobre", "reporte de",
+                    "crea un informe", "crear un informe", "hazme un informe", "quiero un informe",
+                    "generame un informe", "necesito un informe", "hacer un informe", "haz un informe",
+                    "hiciera un informe", "hiciese un informe", "hidice un informe", "hacer informe",
+                    "crea un reporte", "crear un reporte", "hazme un reporte", "quiero un reporte",
+                    "generame un reporte", "necesito un reporte", "hacer un reporte", "haz un reporte"
+                ]
+                for trig in triggers:
+                    if trig in plow:
+                        is_report_req = True
+                        idx = plow.find(trig)
+                        topic = prompt[idx + len(trig):].strip()
+                        # Clean prefix "sobre" or "de"
+                        if topic.lower().startswith("sobre "):
+                            topic = topic[6:].strip()
+                        elif topic.lower().startswith("de "):
+                            topic = topic[3:].strip()
+                        break
+            
+            if is_report_req:
+                self._start_guided_report_flow(topic, status, entry)
+                return
+
+            # Clear visible chat history on sending to focus solely on the active turn
+            chat = getattr(self, "_chat_view", None)
+            if chat is not None:
+                try:
+                    chat.clear()
+                    chat.add_user(prompt)
+                    chat.show_typing()
+                except Exception:
+                    pass
+
             # ==================== FASE 4 — todas las features ====================
             if prompt.startswith("/") :
                 try:
@@ -1459,6 +1968,30 @@ class ClawdPet(tk.Tk):
                         if cmd.startswith("/read "):
                             p = cmd[6:].strip().strip('"\'')
                             _async(lambda: cp.read_file(p)); return
+                        if cmd.startswith("/mkdir ") or cmd.startswith("/crear-carpeta "):
+                            p = cmd.split(None, 1)[1].strip() if " " in cmd else ""
+                            _respond(cp.create_folder(p)); return
+                        if cmd.startswith("/write ") or cmd.startswith("/crear-archivo "):
+                            rest = cmd.split(None, 1)[1] if " " in cmd else ""
+                            p, content = cp.parse_path_content_arg(rest)
+                            if not p:
+                                _respond("Usa: /write <ruta> | <contenido>")
+                                return
+                            _respond(cp.write_file(p, content)); return
+                        if cmd.startswith("/append ") or cmd.startswith("/agregar-archivo "):
+                            rest = cmd.split(None, 1)[1] if " " in cmd else ""
+                            p, content = cp.parse_path_content_arg(rest)
+                            if not p:
+                                _respond("Usa: /append <ruta> | <contenido>")
+                                return
+                            _respond(cp.append_file(p, content)); return
+                        if cmd.startswith("/replace ") or cmd.startswith("/edit-replace "):
+                            rest = cmd.split(None, 1)[1] if " " in cmd else ""
+                            parts = [x.strip() for x in rest.split(" | ", 2)]
+                            if len(parts) < 3:
+                                _respond("Usa: /replace <ruta> | <buscar> | <reemplazo>")
+                                return
+                            _respond(cp.replace_in_file(parts[0], parts[1], parts[2])); return
                         if cmd.startswith("/analyze"):
                             parts = cmd.split(None, 1); p = parts[1].strip().strip('"\'') if len(parts) > 1 else "."
                             self._set_response_text(f"Analizando: {p}\n(puede tomar un momento)")
@@ -2142,7 +2675,8 @@ class ClawdPet(tk.Tk):
                 "Consultando al oráculo...", "Hablando con las estrellas...", "Esforzándome...",
             ])
             status.configure(text=thinking, fg=THEME["accent"])
-            self._set_response_text(f"> {prompt}")
+            if not chat:
+                self._set_response_text(f"> {prompt}")
             # Animacion: pasa a thinking mientras procesa
             try:
                 if self.state != "bounce":
@@ -2157,9 +2691,53 @@ class ClawdPet(tk.Tk):
                 )
             self.ask_claudy(prompt, status, entry)
 
-        entry.bind("<Return>", submit)
+        def handle_return(event):
+            # Check if Shift is pressed (state 0x0001 is Shift, 0x0003 is Shift+NumLock, etc.)
+            if event.state & 0x0001:
+                return None  # Let Tkinter insert the newline natively
+            submit()
+            return "break"   # Stop standard Return key from adding a newline
+
+        entry.bind("<Return>", handle_return)
         entry.bind("<Escape>", lambda _e: self.hide_bubble())
         entry.bind("<FocusIn>", lambda _e: self._record_activity())
+
+        # ===== Spacebar Walkie-Talkie Push-to-Talk (PTT) =====
+        self._space_pressed_time = None
+        self._ptt_active = False
+
+        def on_space_press(event):
+            # If already holding or if entry is disabled/submitting, ignore repeat key events
+            if self._space_pressed_time is not None:
+                return None
+            self._space_pressed_time = time.time()
+            self._ptt_active = False
+            
+            # Non-blocking check for hold duration
+            def check_hold():
+                if self._space_pressed_time is not None:
+                    duration = time.time() - self._space_pressed_time
+                    if duration >= 1.9:
+                        self._ptt_active = True
+                        self._start_ptt_recording(status)
+            
+            bub.after(2000, check_hold)
+            return None
+
+        def on_space_release(event):
+            if self._space_pressed_time is None:
+                return None
+            
+            self._space_pressed_time = None
+            if self._ptt_active:
+                self._ptt_active = False
+                self._stop_ptt_recording()
+                # Stop the space character from being inserted into the entry
+                return "break"
+            return None
+
+        entry.bind("<KeyPress-space>", on_space_press)
+        entry.bind("<KeyRelease-space>", on_space_release)
 
         def _on_paste(_e=None):
             handled = self._handle_pasted_image(status, entry)
@@ -2170,12 +2748,10 @@ class ClawdPet(tk.Tk):
         entry.bind("<Control-V>", _on_paste)
 
         # F3.6 Drag & drop files onto the bubble
+        # Skip TkinterDnD._require: it can hang the UI thread on some Windows setups.
+        # Drop on the entry will still raise an error gracefully if DnD isn't initialized.
         try:
-            from tkinterdnd2 import TkinterDnD, DND_FILES
-            try:
-                TkinterDnD._require(bub)
-            except Exception:
-                pass
+            from tkinterdnd2 import DND_FILES
             try:
                 entry.drop_target_register(DND_FILES)
                 entry.dnd_bind("<<Drop>>", lambda e: self._handle_dropped_file(e, status, entry))
@@ -2188,6 +2764,7 @@ class ClawdPet(tk.Tk):
         cx, cy = self.bubble_position(width, height)
         bub.geometry(f"{width}x{height}+{cx}+{cy}")
         self.bubble_win = bub
+        self._bubble_opened_at = time.time()
         self._reset_idle_timer()
 
         # Foco automático en el input al abrir el chat — el usuario puede escribir directo
@@ -2196,22 +2773,508 @@ class ClawdPet(tk.Tk):
         except Exception:
             pass
 
+    def _normalize_existing_path(self, path):
+        path = (path or "").strip().strip('"\'')
+        if not path:
+            return ""
+        expanded = os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+        return expanded
+
+    def _extract_artifact_path(self, text):
+        text = str(text or "")
+        marker = re.search(r"\[CLAUDY_PATH:(.+?)\]", text)
+        if marker:
+            candidate = marker.group(1).strip().strip('"\'')
+            if candidate:
+                return os.path.normpath(os.path.abspath(os.path.expanduser(candidate)))
+
+        labels = ("Ruta:", "Ubicacion:", "Salida:", "Archivo:", "Archivo creado:", "Archivo actualizado:")
+        for line in text.splitlines():
+            stripped = line.strip()
+            for label in labels:
+                if stripped.lower().startswith(label.lower()):
+                    candidate = stripped[len(label):].strip()
+                    if candidate:
+                        normalized = os.path.normpath(os.path.abspath(os.path.expanduser(candidate)))
+                        parent = os.path.dirname(normalized) if not os.path.isdir(normalized) else normalized
+                        if os.path.exists(parent):
+                            return normalized
+
+        for match in re.finditer(r"[A-Za-z]:[\\/][^\r\n<>\"|?*]+", text):
+            candidate = match.group(0).strip().rstrip(").,;")
+            if candidate:
+                normalized = os.path.normpath(os.path.abspath(os.path.expanduser(candidate)))
+                parent = os.path.dirname(normalized) if not os.path.isdir(normalized) else normalized
+                if os.path.exists(parent):
+                    return normalized
+        return ""
+
+    def _remember_file_artifact(self, path):
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(os.path.expanduser(path.strip().strip('"\''))))
+        self._last_file_artifact_path = normalized
+        self._set_open_location_button_state()
+
+    def _set_open_location_button_state(self):
+        btn = getattr(self, "_open_location_btn", None)
+        if btn is None:
+            return
+        try:
+            path = getattr(self, "_last_file_artifact_path", None)
+            ready = bool(path)
+            btn.configure(
+                fg=THEME["accent"] if ready else THEME["text_secondary"],
+                bg=THEME["bg_input"] if ready else THEME["bg_bubble_border"],
+            )
+        except tk.TclError:
+            pass
+
+    def _set_open_location_hover(self, active):
+        btn = getattr(self, "_open_location_btn", None)
+        if btn is None:
+            return
+        try:
+            path = getattr(self, "_last_file_artifact_path", None)
+            ready = bool(path)
+            if active and ready:
+                btn.configure(fg="#ffffff", bg=THEME["accent"])
+            else:
+                self._set_open_location_button_state()
+        except tk.TclError:
+            pass
+
+    def _open_path_location(self, path):
+        if not path:
+            return False, "Ruta vacía"
+        normalized = os.path.normpath(os.path.abspath(os.path.expanduser(path.strip().strip('"\''))))
+        # Ensure parent directory exists
+        parent = os.path.dirname(normalized) if not os.path.isdir(normalized) else normalized
+        if not os.path.exists(parent):
+            parent = os.path.expanduser("~/Downloads")
+            if not os.path.exists(parent):
+                parent = os.getcwd()
+        try:
+            if os.path.isdir(normalized):
+                os.startfile(normalized)
+            else:
+                try:
+                    subprocess.run(
+                        f'explorer /select,"{normalized}"',
+                        shell=True, check=False,
+                    )
+                except Exception:
+                    os.startfile(parent)
+            return True, f"Ubicacion abierta: {normalized}"
+        except Exception as e:
+            return False, f"No pude abrir la ubicacion: {e}"
+
+    def _open_path_file(self, path):
+        """Open the file itself (not its folder)."""
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(os.path.expanduser(path.strip().strip('"\''))))
+        try:
+            os.startfile(normalized)
+        except Exception:
+            # Fallback: try opening its folder location if it is an unexecutable file type
+            self._open_path_location(normalized)
+
+    def _open_last_file_location(self):
+        path = getattr(self, "_last_file_artifact_path", None)
+        if not path:
+            self._set_response_text("No hay archivo o carpeta reciente para abrir.")
+            return
+        ok, msg = self._open_path_location(path)
+        if not ok:
+            self._set_response_text(msg)
+
     def _set_response_text(self, text):
-        """Set the scrollable response text in the chat bubble."""
+        """Push a response into the chat view (or fallback Text widget)."""
+        if getattr(self, "bubble_minimized", False):
+            clean_text = re.sub(r"\n?\[CLAUDY_PATH:.+?\]", "", str(text or "")).strip()
+            artifact_path = self._extract_artifact_path(text)
+            
+            is_working = getattr(self, "_milestone_active", False)
+            dur = None if is_working else 5000
+            
+            if artifact_path:
+                clean_text = f"✨ ¡Terminado!\nHe creado:\n{os.path.basename(artifact_path)}"
+                dur = 8000
+            elif not clean_text:
+                clean_text = "Trabajando..."
+            self.show_pet_speech_bubble(clean_text, duration=dur)
+
+        chat = getattr(self, "_chat_view", None)
+        if chat is not None:
+            try:
+                chat.hide_typing()
+            except Exception:
+                pass
+            artifact_path = self._extract_artifact_path(text)
+            if artifact_path:
+                self._remember_file_artifact(artifact_path)
+            else:
+                self._set_open_location_button_state()
+            display_text = re.sub(r"\n?\[CLAUDY_PATH:.+?\]", "", str(text or "")).rstrip()
+            if artifact_path:
+                display_text = re.sub(
+                    r"(?im)^\s*ubicaci[oó]n\s*:.*(?:\r?\n.*)?(?=\r?\n\S|\Z)",
+                    "", display_text,
+                ).strip()
+            if artifact_path:
+                chat.add_bot(f"¡Hemos terminado! Se ha creado el archivo:\n{os.path.basename(artifact_path)}")
+                chat.add_file_card(
+                    filename=os.path.basename(artifact_path),
+                    on_open_file=lambda p=artifact_path: self._open_path_file(p),
+                    on_open_folder=lambda p=artifact_path: self._open_path_location(p),
+                    message="Haz clic en el nombre para abrir la carpeta",
+                )
+            elif display_text:
+                is_system_status = len(display_text.splitlines()) == 1 and (
+                    "buscando" in display_text.lower() or 
+                    "instalando" in display_text.lower() or 
+                    "descargando" in display_text.lower() or 
+                    "ejecutando" in display_text.lower() or
+                    "procesando" in display_text.lower() or
+                    "abierta" in display_text.lower() or
+                    "abierto" in display_text.lower()
+                )
+                if is_system_status:
+                    chat.add_system(display_text)
+                else:
+                    chat.add_bot(display_text)
+            return
+
+        # Fallback legacy path.
         w = getattr(self, "_response_text_widget", None)
+        artifact_path = self._extract_artifact_path(text)
+        if artifact_path:
+            self._remember_file_artifact(artifact_path)
+        else:
+            self._set_open_location_button_state()
+        display_text = re.sub(r"\n?\[CLAUDY_PATH:.+?\]", "", str(text or "")).rstrip()
+        if artifact_path:
+            # Remove the "Ubicacion: ..." line — the icon below replaces it.
+            display_text = re.sub(
+                r"(?im)^\s*ubicaci[oó]n\s*:.*(?:\r?\n.*)?(?=\r?\n\S|\Z)",
+                "",
+                display_text,
+            )
+            display_text = re.sub(r"\n{3,}", "\n\n", display_text).rstrip()
         if w is None:
             return
         try:
+            self._ensure_chat_tags(w)
             w.configure(state="normal")
             w.delete("1.0", "end")
-            w.insert("1.0", text)
+            self._render_chat_content(w, display_text)
+            if artifact_path:
+                self._inject_open_location_link(w, artifact_path)
             w.configure(state="disabled")
-            w.see("1.0")
+            w.see("end")
+        except tk.TclError:
+            pass
+
+    def show_pet_speech_bubble(self, text, duration=5000):
+        """Show a premium floating speech bubble directly above the pet's head."""
+        if hasattr(self, "_pet_speech_win") and self._pet_speech_win:
+            try:
+                self._pet_speech_win.destroy()
+            except Exception:
+                pass
+            self._pet_speech_win = None
+            
+        win = tk.Toplevel(self)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        
+        try:
+            win.wm_attributes("-alpha", 0.0)
+        except Exception:
+            pass
+            
+        bg_color = "#1e1b29"
+        border_color = "#3d3752"
+        text_color = "#ece9f5"
+        
+        win.configure(bg=bg_color)
+        
+        # Main bubble frame
+        frame = tk.Frame(win, bg=bg_color, bd=1, highlightthickness=1,
+                         highlightbackground=border_color, highlightcolor=border_color)
+        frame.pack(fill="both", expand=True, padx=2, pady=2)
+        
+        lbl = tk.Label(
+            frame,
+            text=text,
+            bg=bg_color,
+            fg=text_color,
+            font=("Segoe UI", 9, "bold"),
+            wraplength=180,
+            justify="center",
+            padx=14,
+            pady=10
+        )
+        lbl.pack(fill="both", expand=True)
+        
+        win.update_idletasks()
+        bw = win.winfo_reqwidth()
+        bh = win.winfo_reqheight()
+        
+        px = self.winfo_x()
+        py = self.winfo_y()
+        pw = self.winfo_width()
+        
+        cx = px + pw // 2
+        bx = cx - bw // 2
+        by = py - bh - 10
+        
+        win.geometry(f"{bw}x{bh}+{bx}+{by}")
+        self._pet_speech_win = win
+        
+        def fade_in(alpha=0.0, current_y=by+10):
+            if not win.winfo_exists():
+                return
+            if alpha < 1.0:
+                alpha += 0.15
+                current_y -= 1.5
+                win.attributes("-alpha", min(1.0, alpha))
+                win.geometry(f"+{bx}+{int(current_y)}")
+                self.after(20, lambda: fade_in(alpha, current_y))
+            else:
+                win.attributes("-alpha", 1.0)
+                win.geometry(f"+{bx}+{by}")
+                if duration is not None:
+                    self.after(duration, lambda: fade_out())
+                
+        def fade_out(alpha=1.0):
+            if not win.winfo_exists():
+                return
+            if alpha > 0.0:
+                alpha -= 0.15
+                win.attributes("-alpha", max(0.0, alpha))
+                self.after(20, lambda: fade_out(alpha))
+            else:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                if getattr(self, "_pet_speech_win", None) == win:
+                    self._pet_speech_win = None
+                    
+                # If minimized and no longer working, restore Zzz sleep visual elements
+                if getattr(self, "bubble_minimized", False) and not getattr(self, "_milestone_active", False):
+                    canvas = getattr(self, "_canvas", None)
+                    idle_items = getattr(self, "_idle_items", None)
+                    if canvas and idle_items:
+                        for item in idle_items:
+                            try:
+                                canvas.itemconfigure(item, state="normal")
+                            except Exception:
+                                pass
+                        self._start_zzz_animation()
+                    
+        fade_in()
+
+    def _format_exchange(self, user_text, bot_text):
+        """Build marker-tagged exchange. Prefers DB history if available, else inline."""
+        preview = self._get_last_chat_preview(n=6, max_len=400)
+        if preview and "[[" in preview:
+            return preview
+        parts = []
+        if user_text:
+            parts.append(f"[[USER]]{user_text.strip()}")
+        if bot_text:
+            parts.append(f"[[CLAUDY]]{bot_text.strip()}")
+        return "\n".join(parts)
+
+    def _ensure_chat_tags(self, w):
+        """Configure styled tags for the chat text widget (idempotent)."""
+        if getattr(w, "_claudy_chat_tags_ready", False) and getattr(w, "_claudy_chat_theme_key", None) == _THEME_KEYS[_active_theme_idx]:
+            return
+        bg = THEME.get("bg_bubble", "#0e0e1a")
+        bg_border = THEME.get("bg_bubble_border", "#3b3b5c")
+        bg_input = THEME.get("bg_input", "#15152a")
+        accent = THEME.get("accent", "#8b7dff")
+        accent_glow = THEME.get("accent_glow", "#ff8de8")
+        accent_dim = THEME.get("accent_dim", "#5448a8")
+        text_primary = THEME.get("text_primary", "#f2f2ff")
+        text_secondary = THEME.get("text_secondary", "#9b9bb8")
+        text_label = THEME.get("text_label", "#6c6c8a")
+        divider = THEME.get("divider", "#22223a")
+
+        w.configure(bg=bg, fg=text_primary, spacing1=2, spacing2=2, spacing3=4)
+
+        # USER bubble — right-aligned, accent surface.
+        w.tag_configure(
+            "user_msg",
+            background=bg_input, foreground=text_primary,
+            lmargin1=60, lmargin2=60, rmargin=10,
+            spacing1=4, spacing3=6, wrap="word",
+            font=("Segoe UI", 10),
+            relief="flat", borderwidth=0,
+            justify="right",
+        )
+        w.tag_configure(
+            "user_badge",
+            background=accent, foreground="#ffffff",
+            lmargin1=60, lmargin2=60, rmargin=10,
+            font=("Segoe UI", 8, "bold"),
+            spacing1=8, spacing3=2,
+            justify="right",
+        )
+        # CLAUDY bubble — left-aligned, secondary surface.
+        w.tag_configure(
+            "bot_msg",
+            background=bg_border, foreground=text_primary,
+            lmargin1=10, lmargin2=10, rmargin=60,
+            spacing1=4, spacing3=6, wrap="word",
+            font=("Segoe UI", 10),
+            relief="flat", borderwidth=0,
+        )
+        w.tag_configure(
+            "bot_badge",
+            background=accent_dim, foreground=accent_glow,
+            lmargin1=10, lmargin2=10, rmargin=60,
+            font=("Segoe UI", 8, "bold"),
+            spacing1=8, spacing3=2,
+        )
+        # System / plain note (status updates, single messages).
+        w.tag_configure(
+            "sys_msg",
+            foreground=text_secondary,
+            lmargin1=14, lmargin2=14, rmargin=14,
+            spacing1=4, spacing3=4, wrap="word",
+            font=("Segoe UI", 10),
+        )
+        # Inline markdown tags.
+        w.tag_configure("md_bold", font=("Segoe UI", 10, "bold"), foreground=accent_glow)
+        w.tag_configure("md_code", background=bg, foreground=accent, font=("Cascadia Mono", 9))
+        w.tag_configure(
+            "md_codeblock",
+            background=bg, foreground=text_primary,
+            font=("Cascadia Mono", 9),
+            lmargin1=18, lmargin2=18, rmargin=18,
+            spacing1=4, spacing3=4, wrap="none",
+        )
+        w.tag_configure("md_bullet", foreground=accent, font=("Segoe UI", 10, "bold"))
+        w.tag_configure("divider", foreground=divider, font=("Segoe UI", 6))
+        w.tag_configure("timestamp", foreground=text_label, font=("Segoe UI", 7), justify="right")
+
+        w._claudy_chat_tags_ready = True
+        w._claudy_chat_theme_key = _THEME_KEYS[_active_theme_idx]
+
+    def _render_chat_content(self, w, text):
+        """Parse [[USER]]/[[CLAUDY]] markers and render styled bubbles.
+
+        Plain text (no markers) is rendered as a system note.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        # Split on role markers while keeping them.
+        parts = re.split(r"(\[\[USER\]\]|\[\[CLAUDY\]\])", text)
+        # If no markers found -> plain system message.
+        if not any(p in ("[[USER]]", "[[CLAUDY]]") for p in parts):
+            self._render_md_block(w, text, "sys_msg")
+            return
+
+        # Walk marker/content pairs.
+        i = 0
+        first = True
+        while i < len(parts):
+            token = parts[i].strip()
+            if token in ("[[USER]]", "[[CLAUDY]]"):
+                body = parts[i + 1] if i + 1 < len(parts) else ""
+                body = body.strip()
+                i += 2
+                if not body:
+                    continue
+                if not first:
+                    w.insert("end", "\n", "divider")
+                first = False
+                if token == "[[USER]]":
+                    w.insert("end", "  Tu  ", "user_badge")
+                    w.insert("end", "\n", "user_badge")
+                    self._render_md_block(w, body, "user_msg")
+                else:
+                    w.insert("end", "  ✦ Claudy  ", "bot_badge")
+                    w.insert("end", "\n", "bot_badge")
+                    self._render_md_block(w, body, "bot_msg")
+                w.insert("end", "\n")
+            else:
+                # Stray text before first marker — treat as system.
+                stray = parts[i].strip()
+                if stray:
+                    self._render_md_block(w, stray, "sys_msg")
+                    w.insert("end", "\n")
+                i += 1
+
+    def _render_md_block(self, w, text, base_tag):
+        """Render a single block applying lightweight markdown (bold, code, bullets, fences)."""
+        # Code fences ```...```
+        segments = re.split(r"```([\s\S]*?)```", text)
+        for idx, seg in enumerate(segments):
+            if idx % 2 == 1:
+                code = seg.strip("\n")
+                w.insert("end", code + "\n", ("md_codeblock",))
+                continue
+            for line in seg.split("\n"):
+                bullet = re.match(r"^\s*[-*]\s+(.*)$", line)
+                if bullet:
+                    w.insert("end", "  • ", ("md_bullet", base_tag))
+                    self._render_md_inline(w, bullet.group(1), base_tag)
+                else:
+                    self._render_md_inline(w, line, base_tag)
+                w.insert("end", "\n", (base_tag,))
+
+    def _render_md_inline(self, w, text, base_tag):
+        """Apply inline markdown: **bold** and `code`."""
+        # Tokenize: alternating plain / **bold** / `code`
+        pattern = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`)")
+        pos = 0
+        for m in pattern.finditer(text):
+            if m.start() > pos:
+                w.insert("end", text[pos:m.start()], (base_tag,))
+            token = m.group(0)
+            if token.startswith("**"):
+                w.insert("end", token[2:-2], ("md_bold", base_tag))
+            else:
+                w.insert("end", token[1:-1], ("md_code", base_tag))
+            pos = m.end()
+        if pos < len(text):
+            w.insert("end", text[pos:], (base_tag,))
+
+    def _inject_open_location_link(self, w, path):
+        """Append a beautiful clickable shortcut link/button to open the file's location."""
+        try:
+            tag = "open_loc_link"
+            if tag not in w.tag_names():
+                w.tag_configure(
+                    tag,
+                    foreground=THEME.get("accent", "#7c6bff"),
+                    font=("Segoe UI", 9, "bold underline"),
+                )
+                w.tag_bind(tag, "<Enter>", lambda _e: w.configure(cursor="hand2"))
+                w.tag_bind(tag, "<Leave>", lambda _e: w.configure(cursor=""))
+            w.tag_bind(tag, "<Button-1>", lambda _e, p=path: self._open_path_location(p))
+            
+            # Insert a divider line followed by a beautiful, clear shortcut link
+            w.insert("end", "\n\n───────────────────\n")
+            w.insert("end", "📂 [Abrir ubicación del archivo]", tag)
+            w.insert("end", "\n")
         except tk.TclError:
             pass
 
     def _append_response_text(self, text):
         """Append text to the scrollable response area (for live progress)."""
+        chat = getattr(self, "_chat_view", None)
+        if chat is not None:
+            t = (text or "").strip()
+            if t:
+                chat.add_system(t)
+            return
         w = getattr(self, "_response_text_widget", None)
         if w is None:
             return
@@ -2245,10 +3308,25 @@ class ClawdPet(tk.Tk):
     def ask_claudy(self, prompt, status, entry):
         thinking = random.choice([
             "Consultando al oráculo...", "Conectando neuronas...", "Hablando con las estrellas...",
-            "Corriendo a toda máquina...", "Esforzándome al máximo...", "Buscando inspiración...",
+            "Corriendo a toda máquina...", "Esforzándome al máximo...",
         ])
         status.configure(text=thinking)
         self._last_prompt = prompt  # Guardar para fallback de acciones
+        # Push user bubble + typing indicator immediately if not already added by submit()
+        chat = getattr(self, "_chat_view", None)
+        if chat is not None:
+            try:
+                has_prompt = False
+                if chat._messages:
+                    last = chat._messages[-1]
+                    if last.get("role") == "user" and last.get("text") == prompt:
+                        has_prompt = True
+                if not has_prompt:
+                    chat.clear()
+                    chat.add_user(prompt)
+                    chat.show_typing()
+            except Exception:
+                pass
 
         # Mensajes en cursiva dentro del input mientras procesa
         self._start_typing_progress(entry, prompt)
@@ -2267,10 +3345,275 @@ class ClawdPet(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     # ============================================================
+    # Guided Report Flow (Asistente de Informes Interactivo)
+    # ============================================================
+    def _start_guided_report_flow(self, topic, status, entry):
+        self._guided_report_active = True
+        self._guided_report_step = 1
+        self._guided_report_topic = topic or "Tema General"
+        self._guided_report_data = {
+            "topic": self._guided_report_topic,
+            "depth": None,
+            "images": None,
+            "references": None,
+            "style": None,
+            "language": None
+        }
+        self._bubble_status = status
+        self._bubble_entry = entry
+
+        # Clear visible chat and show starting message
+        chat = getattr(self, "_chat_view", None)
+        if chat is not None:
+            try:
+                chat.clear()
+            except Exception:
+                pass
+            chat.add_user(f"Quiero un informe sobre: {self._guided_report_topic}")
+            
+            chat.add_bot(
+                f"Perfecto, vamos a estructurar un gran informe sobre:\n"
+                f"**{self._guided_report_topic}**\n\n"
+                f"Por defecto se creará en formato **DOCX** dentro de tu carpeta de documentos.\n\n"
+                f"**Pregunta 1/5: ¿Qué alcance y profundidad deseas para el informe?**"
+            )
+            options = [
+                ("1", "Resumen Ejecutivo", "Una síntesis concisa, al grano y directa al núcleo de la información"),
+                ("2", "Extenso y Detallado", "Un desarrollo profundo con explicaciones exhaustivas e información completa"),
+                ("3", "Actualizado al día", "Enfocado en las últimas tendencias y descubrimientos más recientes en internet")
+            ]
+            chat.add_options(options, self._handle_option_select)
+            
+        status.configure(text="Paso 1: Profundidad", fg=THEME["accent"])
+        entry.configure(state="normal")
+        entry.focus_set()
+
+    def _handle_option_select(self, option_value):
+        status = getattr(self, "_bubble_status", None)
+        entry = getattr(self, "_bubble_entry", None)
+        if status and entry:
+            self._handle_guided_report_step(option_value, status, entry)
+
+    def _handle_guided_report_step(self, prompt, status, entry):
+        chat = getattr(self, "_chat_view", None)
+        if chat is None:
+            return
+            
+        step = self._guided_report_step
+        plow = prompt.lower().strip()
+        
+        if step == 1:
+            # Parse depth answer
+            title_map = {
+                "1": "Resumen Ejecutivo",
+                "2": "Extenso y Detallado",
+                "3": "Actualizado al día"
+            }
+            if prompt in title_map:
+                ans = title_map[prompt]
+                chat.add_user(ans)
+            else:
+                if "1" in plow or "resumen" in plow or "ejecutivo" in plow or "conciso" in plow:
+                    ans = "Resumen Ejecutivo"
+                elif "2" in plow or "extenso" in plow or "detallado" in plow or "profundo" in plow:
+                    ans = "Extenso y Detallado"
+                elif "3" in plow or "actualizado" in plow or "dia" in plow or "reciente" in plow:
+                    ans = "Actualizado al día"
+                else:
+                    ans = prompt
+                chat.add_user(prompt)
+                
+            self._guided_report_data["depth"] = ans
+            
+            # Go to step 2
+            self._guided_report_step = 2
+            chat.add_bot("**Pregunta 2/5: ¿Deseas incluir recursos visuales o imágenes?**")
+            options = [
+                ("1", "Sin imágenes", "Un documento puramente textual, limpio y minimalista"),
+                ("2", "Pocas imágenes", "Un par de imágenes clave para ilustrar conceptos fundamentales"),
+                ("3", "Muchas imágenes", "Un reporte visualmente enriquecido con ilustraciones en cada sección"),
+                ("4", "Carpeta de recursos aparte", "Yo busco y descargo las imágenes y te las entrego organizadas en una carpeta aparte")
+            ]
+            chat.add_options(options, self._handle_option_select)
+            status.configure(text="Paso 2: Imágenes", fg=THEME["accent"])
+            
+        elif step == 2:
+            # Parse images answer
+            title_map = {
+                "1": "Sin imágenes",
+                "2": "Pocas imágenes",
+                "3": "Muchas imágenes",
+                "4": "Carpeta de recursos aparte"
+            }
+            if prompt in title_map:
+                ans = title_map[prompt]
+                chat.add_user(ans)
+            else:
+                if "1" in plow or "sin" in plow or "ninguna" in plow:
+                    ans = "Sin imágenes"
+                elif "2" in plow or "pocas" in plow or "par" in plow:
+                    ans = "Pocas imágenes"
+                elif "3" in plow or "muchas" in plow or "ilustraciones" in plow:
+                    ans = "Muchas imágenes"
+                elif "4" in plow or "carpeta" in plow or "recursos" in plow or "aparte" in plow:
+                    ans = "Carpeta de recursos aparte"
+                else:
+                    ans = prompt
+                chat.add_user(prompt)
+                
+            self._guided_report_data["images"] = ans
+            
+            # Go to step 3
+            self._guided_report_step = 3
+            chat.add_bot("**Pregunta 3/5: ¿Cómo prefieres el manejo de fuentes y referencias?**")
+            options = [
+                ("1", "Sin citas", "Un reporte auto-explicativo sin referencias a pie de página ni bibliografía"),
+                ("2", "Con referencias al final", "Una lista ordenada de fuentes y enlaces de consulta al final del documento"),
+                ("3", "Citas con formato APA", "Citas académicas integradas en el texto siguiendo las normas oficiales de la APA"),
+                ("4", "Citas con formato IEEE", "Citas numeradas entre corchetes, ideales para informes técnicos o de ingeniería")
+            ]
+            chat.add_options(options, self._handle_option_select)
+            status.configure(text="Paso 3: Referencias", fg=THEME["accent"])
+            
+        elif step == 3:
+            # Parse references answer
+            title_map = {
+                "1": "Sin citas",
+                "2": "Con referencias al final",
+                "3": "Citas con formato APA",
+                "4": "Citas con formato IEEE"
+            }
+            if prompt in title_map:
+                ans = title_map[prompt]
+                chat.add_user(ans)
+            else:
+                if "1" in plow or "sin" in plow:
+                    ans = "Sin citas"
+                elif "2" in plow or "final" in plow or "lista" in plow:
+                    ans = "Con referencias al final"
+                elif "3" in plow or "apa" in plow:
+                    ans = "Citas con formato APA"
+                elif "4" in plow or "ieee" in plow:
+                    ans = "Citas con formato IEEE"
+                else:
+                    ans = prompt
+                chat.add_user(prompt)
+                
+            self._guided_report_data["references"] = ans
+            
+            # Go to step 4
+            self._guided_report_step = 4
+            chat.add_bot("**Pregunta 4/5: ¿Qué tono y estilo de maquetación deseas aplicar?**")
+            options = [
+                ("1", "Profesional Académico", "Texto formal, justificado, interlineado estándar y estructura sobria"),
+                ("2", "Corporativo Elegante", "Con portada formal, índice interactivo, fuentes modernas y justificación limpia"),
+                ("3", "Casual Creativo", "Un tono más cercano, diseño dinámico y enfoque de lectura ágil")
+            ]
+            chat.add_options(options, self._handle_option_select)
+            status.configure(text="Paso 4: Estilo", fg=THEME["accent"])
+            
+        elif step == 4:
+            # Parse style answer
+            title_map = {
+                "1": "Profesional Académico",
+                "2": "Corporativo Elegante",
+                "3": "Casual Creativo"
+            }
+            if prompt in title_map:
+                ans = title_map[prompt]
+                chat.add_user(ans)
+            else:
+                if "1" in plow or "profesional" in plow or "academico" in plow or "formal" in plow:
+                    ans = "Profesional Académico"
+                elif "2" in plow or "corporativo" in plow or "elegante" in plow or "portada" in plow:
+                    ans = "Corporativo Elegante"
+                elif "3" in plow or "casual" in plow or "creativo" in plow:
+                    ans = "Casual Creativo"
+                else:
+                    ans = prompt
+                chat.add_user(prompt)
+                
+            self._guided_report_data["style"] = ans
+            
+            # Go to step 5
+            self._guided_report_step = 5
+            chat.add_bot("**Pregunta 5/5: ¿En qué idioma deseas que redacte el informe?**")
+            options = [
+                ("1", "Español", "Redacción directa, natural y con ortografía impecable en español"),
+                ("2", "Inglés", "Redacción fluida, técnica y profesional en inglés")
+            ]
+            chat.add_options(options, self._handle_option_select)
+            status.configure(text="Paso 5: Idioma", fg=THEME["accent"])
+            
+        elif step == 5:
+            # Parse language answer
+            title_map = {
+                "1": "Español",
+                "2": "Inglés"
+            }
+            if prompt in title_map:
+                ans = title_map[prompt]
+                chat.add_user(ans)
+            else:
+                if "1" in plow or "espanol" in plow or "español" in plow or "spa" in plow:
+                    ans = "Español"
+                elif "2" in plow or "ingles" in plow or "inglés" in plow or "eng" in plow:
+                    ans = "Inglés"
+                else:
+                    ans = prompt
+                chat.add_user(prompt)
+                
+            self._guided_report_data["language"] = ans
+            
+            # End of questions
+            self._guided_report_active = False
+            self._guided_report_step = 0
+            
+            # Show premium summary card
+            chat.add_bot("¡Excelente! Tengo todo configurado para tu informe:")
+            chat.add_summary_card(
+                topic=self._guided_report_data['topic'],
+                depth=self._guided_report_data['depth'],
+                images=self._guided_report_data['images'],
+                references=self._guided_report_data['references'],
+                style=self._guided_report_data['style'],
+                language=self._guided_report_data['language']
+            )
+            chat.add_bot("Iniciando la recopilación, investigación y maquetación de tu documento...")
+            status.configure(text="Redactando informe...", fg=THEME["accent"])
+            
+            # Generate the prompt to send to LLM
+            system_instruction = (
+                f"Genera un informe altamente profesional en formato DOCX sobre el tema: '{self._guided_report_data['topic']}'.\n"
+                f"Sigue de forma estricta las siguientes preferencias del usuario:\n"
+                f"- Alcance/Profundidad: {self._guided_report_data['depth']}\n"
+                f"- Imágenes: {self._guided_report_data['images']}\n"
+                f"- Referencias/Citas: {self._guided_report_data['references']}\n"
+                f"- Estilo y Maquetación: {self._guided_report_data['style']} (Asegúrate de estructurar títulos, contenido justificado y maquetar de acuerdo a esta directriz)\n"
+                f"- Idioma de Redacción: {self._guided_report_data['language']}\n\n"
+                f"El informe final DEBE guardarse como un archivo .docx. Al terminar de crear el archivo, asegúrate de imprimir su ruta absoluta envuelta en la etiqueta [CLAUDY_PATH:ruta_completa] para poder mostrar la tarjeta interactiva de descarga y apertura de carpeta."
+            )
+            
+            # Start background processing thread
+            self._start_milestone_progress()
+            self._start_typing_progress(entry, system_instruction)
+            
+            def worker():
+                try:
+                    chat.show_typing()
+                    answer = self.send_quick_message(system_instruction, _skip_skill_action=True)
+                except Exception as error:
+                    answer = f"Error generando informe: {error}"
+                self._stop_milestone_progress()
+                self.after(0, lambda: self.finish_quick_answer(answer, status, entry))
+                
+            threading.Thread(target=worker, daemon=True).start()
+
+    # ============================================================
     # Hitos de progreso ("dame un momento, sigo trabajando...")
     # ============================================================
     PROGRESS_MILESTONES = [
-        (12, "Dame un momento, estoy buscando..."),
+        (12, "Dame un momento, sigo procesando..."),
         (28, "Sigo trabajando, ya casi tengo algo para ti."),
         (50, "Esto tomo mas de lo esperado, no te abandone."),
         (80, "Aun aqui. Tarea larga, pero ahi vamos."),
@@ -2288,6 +3631,18 @@ class ClawdPet(tk.Tk):
     def _emit_milestone(self, msg):
         if not getattr(self, "_milestone_active", False):
             return
+            
+        # Ensure sleep state visual elements are hidden while milestones are running
+        canvas = getattr(self, "_canvas", None)
+        idle_items = getattr(self, "_idle_items", None)
+        if canvas and idle_items:
+            for item in idle_items:
+                try:
+                    canvas.itemconfigure(item, state="hidden")
+                except Exception:
+                    pass
+            self._stop_zzz_animation()
+            
         try:
             self._set_response_text(msg)
         except Exception:
@@ -2477,58 +3832,168 @@ class ClawdPet(tk.Tk):
         """Stop the Zzz animation."""
         self._zzz_anim_running = False
 
+    NOTEBOOK_PHRASES = [
+        "TODO: revisar PR",
+        "idea: cache LLM",
+        "bug: skin swap",
+        "fix: scrollbar",
+        "note: refactor",
+        "log: build ok",
+        "task: tests",
+        "hint: parallel",
+    ]
+
+    def _start_notebook_animation(self):
+        """Robot saca un notebook, teclea una frase y lo guarda."""
+        if getattr(self, "_notebook_win", None) is not None:
+            return
+        if self.bubble_interactive or self.bubble_win is not None:
+            return
+        self.state = "notebook"
+        self._state_start_tick = self.tick
+        try:
+            import random as _r
+            phrase = _r.choice(self.NOTEBOOK_PHRASES)
+        except Exception:
+            phrase = "note..."
+
+        nb_w, nb_h = 132, 86
+        nb = tk.Toplevel(self)
+        nb.overrideredirect(True)
+        nb.attributes("-topmost", True)
+        nb.configure(bg=TRANSPARENT_COLOR)
+        try:
+            nb.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+        except tk.TclError:
+            pass
+        nx = self.base_x - nb_w + 14
+        ny = self.base_y + 8
+        if nx < 0:
+            nx = self.base_x + self.width - 14
+        nb.geometry(f"{nb_w}x{nb_h}+{nx}+{ny}")
+
+        canvas = tk.Canvas(nb, width=nb_w, height=nb_h, bg=TRANSPARENT_COLOR,
+                           highlightthickness=0, bd=0)
+        canvas.pack()
+        # Notebook body (rounded-ish via two rects)
+        canvas.create_rectangle(6, 8, nb_w - 6, nb_h - 6, fill="#fff8c4",
+                                outline="#3a3a3a", width=2)
+        canvas.create_rectangle(6, 8, nb_w - 6, 20, fill="#e94f4f", outline="")
+        # Spiral binding holes
+        for i in range(6):
+            cx = 16 + i * 18
+            canvas.create_oval(cx - 2, 12, cx + 2, 16, fill="#3a3a3a", outline="")
+        # Faint guide lines
+        for ly in (38, 52, 66):
+            canvas.create_line(14, ly, nb_w - 14, ly, fill="#d8cf9a")
+        text_id = canvas.create_text(14, 30, anchor="nw", text="",
+                                     fill="#1d1d1d", font=("Consolas", 9, "bold"))
+        cursor_id = canvas.create_text(14, 30, anchor="nw", text="|",
+                                       fill="#1d1d1d", font=("Consolas", 9, "bold"))
+
+        self._notebook_win = nb
+        self._notebook_state = {
+            "canvas": canvas,
+            "text_id": text_id,
+            "cursor_id": cursor_id,
+            "phrase": phrase,
+            "i": 0,
+            "saving": False,
+        }
+        self._tick_notebook()
+
+    def _tick_notebook(self):
+        st = getattr(self, "_notebook_state", None)
+        if st is None or self._notebook_win is None:
+            return
+        canvas = st["canvas"]
+        try:
+            if st["i"] < len(st["phrase"]):
+                shown = st["phrase"][: st["i"] + 1]
+                canvas.itemconfigure(st["text_id"], text=shown)
+                # Move blinking cursor to end of text
+                x = 14 + len(shown) * 6
+                canvas.coords(st["cursor_id"], x, 30)
+                # Blink cursor every other tick
+                cur_color = "#1d1d1d" if (st["i"] % 2 == 0) else "#fff8c4"
+                canvas.itemconfigure(st["cursor_id"], fill=cur_color)
+                st["i"] += 1
+                self.after(110, self._tick_notebook)
+                return
+            if not st["saving"]:
+                st["saving"] = True
+                canvas.itemconfigure(st["cursor_id"], text="")
+                # Flash "Saved" badge
+                canvas.create_rectangle(46, 64, 116, 80, fill="#2ec27e",
+                                        outline="#1a7a4f", width=1, tags="saved")
+                canvas.create_text(81, 72, text="💾 Saved!",
+                                   fill="white", font=("Segoe UI", 8, "bold"),
+                                   tags="saved")
+                self.after(900, self._tick_notebook)
+                return
+            self._end_notebook_animation()
+        except tk.TclError:
+            self._end_notebook_animation()
+
+    def _end_notebook_animation(self):
+        try:
+            if self._notebook_win is not None:
+                self._notebook_win.destroy()
+        except Exception:
+            pass
+        self._notebook_win = None
+        self._notebook_state = None
+        if self.state == "notebook":
+            self.state = "idle"
+
     def _animate_zzz(self):
-        """Gentle floating blue Zzz animation for sleep state."""
+        """Float vector Zzz text elements for 100% perfect transparent idle animation."""
         if not self._zzz_anim_running:
             return
-        if not hasattr(self, '_zzz_text_id'):
+        canvas = getattr(self, '_bubble_canvas', None)
+        if canvas is None or not hasattr(self, '_zzz_texts'):
             return
 
-        self._zzz_tick += 1
-        # Slow gentle cycle: 90 frames (~3.6s) for relaxed feel
-        cycle = self._zzz_tick % 90
-        progress = cycle / 90.0
+        self._zzz_tick = (self._zzz_tick + 1) % 60
+        t = self._zzz_tick / 60.0
 
-        # Soft sine wave floating
-        float_y = -int(math.sin(progress * math.pi * 2) * 4)
-        float_x = int(math.sin(progress * math.pi * 1.5) * 2)
+        # 3 Zs floating up, each with its own delayed offset
+        zs = [
+            {"id": self._zzz_texts[0], "x_base": BUBBLE_MINI_SIZE // 2 - 10, "y_base": BUBBLE_MINI_SIZE // 2 + 15, "delay": 0.0},
+            {"id": self._zzz_texts[1], "x_base": BUBBLE_MINI_SIZE // 2 + 2, "y_base": BUBBLE_MINI_SIZE // 2 + 2, "delay": 0.33},
+            {"id": self._zzz_texts[2], "x_base": BUBBLE_MINI_SIZE // 2 - 4, "y_base": BUBBLE_MINI_SIZE // 2 - 12, "delay": 0.66},
+        ]
 
-        # Breathing font size
-        scale = 0.9 + 0.15 * math.sin(progress * math.pi * 2)
-        font_size = max(11, int(14 * scale))
+        accent = THEME.get("accent", "#c4b5fd")
+        secondary = THEME.get("text_secondary", "#8a8499")
+        label_col = THEME.get("text_label", "#5f5a6f")
 
-        # Blue color breathing — from soft blue to bright blue
-        brightness = 0.7 + 0.3 * math.sin(progress * math.pi * 2)
-        color = "#{:02x}{:02x}{:02x}".format(
-            int(74 * brightness),
-            int(158 * brightness),
-            int(255 * brightness)
-        )
+        for z in zs:
+            phase = (t - z["delay"]) % 1.0
+            rise = phase * 24
+            # Gentle horizontal sway
+            sway = math.sin(phase * math.tau * 1.5) * 4
 
-        try:
-            canvas = getattr(self, '_bubble_canvas', None)
-            if canvas is None:
-                return
+            try:
+                if phase > 0.8:
+                    canvas.itemconfigure(z["id"], state="hidden")
+                else:
+                    canvas.itemconfigure(z["id"], state="normal")
+                    # Smooth visual fade by shifting colors
+                    if phase < 0.25:
+                        color = accent
+                    elif phase < 0.55:
+                        color = secondary
+                    else:
+                        color = label_col
+                    canvas.itemconfigure(z["id"], fill=color)
 
-            base_x = BUBBLE_MINI_SIZE // 2
-            base_y = BUBBLE_MINI_SIZE // 2
+                # Apply position
+                canvas.coords(z["id"], z["x_base"] + sway, z["y_base"] - rise)
+            except Exception:
+                pass
 
-            canvas.itemconfigure(
-                self._zzz_text_id,
-                text="Zzz",
-                fill=color,
-                font=("Segoe UI", font_size, "bold")
-            )
-            canvas.coords(
-                self._zzz_text_id,
-                base_x + float_x,
-                base_y + float_y
-            )
-        except tk.TclError:
-            self._zzz_anim_running = False
-            return
-
-        self.after(40, self._animate_zzz)
+        self.after(60, self._animate_zzz)
 
     def _sync_pagination_visibility(self, canvas):
         pass  # Pagination removed — scrollbar handles overflow.
@@ -2537,6 +4002,73 @@ class ClawdPet(tk.Tk):
         import re
         try:
             clean_answer = self._strip_markdown(answer)
+
+            # Detect explicit file mutation commands emitted by the model.
+            write_match = re.search(r'/(?:write|crear-archivo)\s+(.+)', clean_answer, re.IGNORECASE | re.DOTALL)
+            append_match = re.search(r'/(?:append|agregar-archivo)\s+(.+)', clean_answer, re.IGNORECASE | re.DOTALL)
+            mkdir_match = re.search(r'/(?:mkdir|crear-carpeta)\s+(.+)', clean_answer, re.IGNORECASE | re.DOTALL)
+            replace_match = re.search(r'/(?:replace|edit-replace)\s+(.+)', clean_answer, re.IGNORECASE | re.DOTALL)
+            docx_match = re.search(r'/(?:docx|create-docx|crear-docx)\s+(.+)', clean_answer, re.IGNORECASE | re.DOTALL)
+            xlsx_match = re.search(r'/(?:xlsx|create-xlsx|crear-xlsx|excel)\s+(.+)', clean_answer, re.IGNORECASE | re.DOTALL)
+            pptx_match = re.search(r'/(?:pptx|create-pptx|crear-pptx|powerpoint)\s+(.+)', clean_answer, re.IGNORECASE | re.DOTALL)
+            pdf_match = re.search(r'/(?:pdf|create-pdf|crear-pdf)\s+(.+)', clean_answer, re.IGNORECASE | re.DOTALL)
+
+            if write_match or append_match or mkdir_match or replace_match or docx_match or xlsx_match or pptx_match or pdf_match:
+                try:
+                    import claudy_powers as cp
+                    if mkdir_match:
+                        result = cp.create_folder(mkdir_match.group(1).strip())
+                    elif replace_match:
+                        parts = [x.strip() for x in replace_match.group(1).split(" | ", 2)]
+                        result = cp.replace_in_file(parts[0], parts[1], parts[2]) if len(parts) >= 3 else "Uso: /replace <ruta> | <buscar> | <reemplazo>"
+                    elif docx_match:
+                        raw = docx_match.group(1)
+                        p, content = cp.parse_path_content_arg(raw)
+                        result = cp.create_docx(p, content) if p else "Uso: /docx <ruta> | <contenido>"
+                    elif pdf_match:
+                        raw = pdf_match.group(1)
+                        p, content = cp.parse_path_content_arg(raw)
+                        result = cp.create_pdf(p, content) if p else "Uso: /pdf <ruta> | <contenido>"
+                    elif xlsx_match:
+                        raw = xlsx_match.group(1)
+                        p, content = cp.parse_path_content_arg(raw)
+                        import json
+                        try:
+                            data = json.loads(content)
+                        except Exception:
+                            data = [line.split(",") for line in content.split("\n") if line.strip()]
+                        result = cp.create_xlsx(p, data) if p else "Uso: /xlsx <ruta> | <contenido CSV/JSON>"
+                    elif pptx_match:
+                        raw = pptx_match.group(1)
+                        p, content = cp.parse_path_content_arg(raw)
+                        import json
+                        slides = None
+                        title = ""
+                        subtitle = ""
+                        theme = "business"
+                        try:
+                            parsed = json.loads(content)
+                            if isinstance(parsed, dict):
+                                slides = parsed.get("slides")
+                                title = parsed.get("title", "")
+                                subtitle = parsed.get("subtitle", "")
+                                theme = parsed.get("theme", "business")
+                            elif isinstance(parsed, list):
+                                slides = parsed
+                        except Exception:
+                            slides = [{"title": s.strip(), "bullets": ["Detalle"]} for s in content.split("\n") if s.strip()]
+                        result = cp.create_pptx(p, slides, title, subtitle, theme) if p else "Uso: /pptx <ruta> | <contenido JSON>"
+                    else:
+                        raw = (write_match or append_match).group(1)
+                        p, content = cp.parse_path_content_arg(raw)
+                        result = cp.write_file(p, content, append=bool(append_match)) if p else "Uso: /write <ruta> | <contenido>"
+                except Exception as e:
+                    result = f"Error aplicando cambio de archivo: {e}"
+                self._set_response_text(result)
+                status.configure(text="Archivo listo.", fg=THEME["text_secondary"])
+                self._stop_typing_progress(entry)
+                entry.focus_set()
+                return
 
             # Detect explicit /buscar command
             buscar_match = re.search(r'/buscar\s+(.+)', clean_answer)
@@ -2570,6 +4102,85 @@ class ClawdPet(tk.Tk):
                     self.after(0, lambda: self._finish_search_result(result, status, entry))
 
                 threading.Thread(target=file_search_worker, daemon=True).start()
+                return
+
+            # Detect explicit /webfetch commands (can be one or more)
+            webfetch_urls = re.findall(r'/webfetch\s+(\S+)', clean_answer)
+            if webfetch_urls:
+                self._set_response_text(f"Recopilando datos de {len(webfetch_urls)} fuentes...")
+                status.configure(text="Descargando páginas...", fg=THEME["accent"])
+
+                def fetch_worker():
+                    combined_results = ""
+                    for idx, url in enumerate(webfetch_urls, start=1):
+                        try:
+                            import urllib.request
+                            # Clean up the URL from any trailing punctuation/brackets
+                            url_clean = url.strip().strip('"\'()[]').strip()
+                            req = urllib.request.Request(url_clean, headers={"User-Agent": "Mozilla/5.0"})
+                            with urllib.request.urlopen(req, timeout=15) as response:
+                                html = response.read().decode('utf-8', errors='replace')
+                            try:
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(html, "html.parser")
+                                text = soup.get_text(separator="\n")
+                            except Exception:
+                                text = re.sub(r'<[^>]+>', '', html)
+
+                            lines = [l.strip() for l in text.splitlines() if l.strip()]
+                            clean_text = "\n".join(lines)[:6000]
+                            combined_results += f"\n--- CONTENIDO DE FUENTE {idx} ({url_clean}) ---\n{clean_text}\n"
+                        except Exception as e:
+                            combined_results += f"\n--- ERROR AL ACCEDER A {url} ---\n{e}\n"
+
+                    # Now feed the combined data back to the LLM to write the final report!
+                    enhanced_prompt = (
+                        f"A continuación tienes la información recopilada de las fuentes:\n"
+                        f"{combined_results}\n\n"
+                        f"INSTRUCCIONES:\n"
+                        f"1. Con base en esta información y tus conocimientos, redacta e introduce el informe solicitado en su totalidad.\n"
+                        f"2. Utiliza estrictamente el comando `/docx <ruta> | <contenido>` (o `/crear-docx`) en la primera línea de tu respuesta para crear el archivo Word físicamente en el disco.\n"
+                        f"3. La ruta del informe debe ser: '{self._guided_report_data.get('topic', 'Informe')}.docx' (dentro de tu carpeta de documentos o descargas si no se especificó otra).\n"
+                        f"4. Estructura el informe con títulos marcados con #, ##, ### para que la maquetación sea perfecta y profesional.\n"
+                        f"5. NO omitas el comando `/docx` ni expliques el plan, escribe directamente el comando de creación en tu respuesta."
+                    )
+
+                    try:
+                        answer = self.send_quick_message(enhanced_prompt, _skip_skill_action=True)
+                    except Exception as e:
+                        answer = f"Error sintetizando el informe: {e}"
+
+                    self.after(0, lambda: self.finish_quick_answer(answer, status, entry))
+
+                threading.Thread(target=fetch_worker, daemon=True).start()
+                return
+
+            # Detect explicit /leer or /read commands
+            read_match = re.search(r'/(?:read|leer)\s+(\S+)', clean_answer)
+            if read_match:
+                path = read_match.group(1).strip().strip('"\'').strip()
+                self._set_response_text(f"Leyendo archivo: {os.path.basename(path)}...")
+                status.configure(text="Leyendo...", fg=THEME["accent"])
+
+                def read_worker():
+                    try:
+                        import claudy_powers as cp
+                        result = cp.read_file(path)
+                    except Exception as e:
+                        result = f"Error leyendo: {e}"
+
+                    # Feed back to LLM
+                    enhanced_prompt = (
+                        f"Contenido del archivo '{path}':\n\n{result}\n\n"
+                        f"Continúa con la tarea."
+                    )
+                    try:
+                        answer = self.send_quick_message(enhanced_prompt, _skip_skill_action=True)
+                    except Exception as e:
+                        answer = f"Error: {e}"
+                    self.after(0, lambda: self.finish_quick_answer(answer, status, entry))
+
+                threading.Thread(target=read_worker, daemon=True).start()
                 return
 
             # Fallback: AI said it will search but didn't use a command
@@ -2621,7 +4232,26 @@ class ClawdPet(tk.Tk):
                     threading.Thread(target=auto_search_worker, daemon=True).start()
                     return
 
-            self._set_response_text(clean_answer)
+            chat = getattr(self, "_chat_view", None)
+            if chat is not None:
+                try:
+                    chat.hide_typing()
+                    artifact_path = self._extract_artifact_path(clean_answer)
+                    if artifact_path:
+                        self._remember_file_artifact(artifact_path)
+                        chat.add_bot(f"¡Hemos terminado! Se ha creado el archivo:\n{os.path.basename(artifact_path)}")
+                        chat.add_file_card(
+                            filename=os.path.basename(artifact_path),
+                            on_open_file=lambda p=artifact_path: self._open_path_file(p),
+                            on_open_folder=lambda p=artifact_path: self._open_path_location(p),
+                            message="Haz clic en el nombre para abrir la carpeta",
+                        )
+                    else:
+                        chat.add_bot(clean_answer)
+                except Exception:
+                    pass
+            else:
+                self._set_response_text(self._format_exchange(self._last_prompt, clean_answer))
 
             done_text = random.choice([
                 "¿Qué más necesitas?", "Aquí estoy para lo que sea.", "Dime, ¿qué sigue?",
@@ -2636,7 +4266,13 @@ class ClawdPet(tk.Tk):
     def _finish_search_result(self, result, status, entry):
         """Show search result and re-enable input."""
         try:
-            self._set_response_text(self._strip_markdown(result))
+            clean = self._strip_markdown(result)
+            chat = getattr(self, "_chat_view", None)
+            if chat is not None:
+                chat.hide_typing()
+                chat.add_bot(clean)
+            else:
+                self._set_response_text(self._format_exchange(self._last_prompt, clean))
             status.configure(text="Búsqueda completada.", fg=THEME["text_secondary"])
             self._stop_typing_progress(entry)
             entry.focus_set()
@@ -2659,7 +4295,7 @@ class ClawdPet(tk.Tk):
         hist = tk.Toplevel(self)
         hist.title("Historial de conversaciones")
         hist.configure(bg=THEME["bg_input"])
-        hist.geometry("460x680")
+        hist.geometry("460x840")
         hist.attributes("-topmost", True)
         hist.resizable(False, False)
         self.history_win = hist
@@ -2695,31 +4331,163 @@ class ClawdPet(tk.Tk):
             fill=THEME["text_secondary"], font=("Segoe UI", 8),
         )
 
-        # ── Skin picker (anclado al fondo ANTES del message frame para que reciba su espacio) ──
+        # ── API Key Panel (Collapsible) ──
+        api_frame = tk.Frame(
+            shell, bg=THEME["bg_input"],
+            highlightbackground=THEME["accent"], highlightthickness=2, bd=0,
+        )
+        api_frame.pack(side="bottom", fill="x", padx=12, pady=(4, 6))
+
+        api_expanded = [False]
+
+        api_header = tk.Label(
+            api_frame, text="▶  🔑 Claves API (Configuración)",
+            bg=THEME["bg_input"], fg=THEME["accent"],
+            font=("Segoe UI", 10, "bold"), cursor="hand2",
+            anchor="w", padx=10, pady=8
+        )
+        api_header.pack(fill="x")
+
+        api_content = tk.Frame(api_frame, bg=THEME["bg_input"])
+        # api_content is NOT packed by default (collapsed)
+
+        # Load current config to populate entries
+        cfg = self.load_claudy_config()
+        
+        # Helper to get first key or single key
+        def get_prov_key(cfg, prov):
+            prov_cfg = cfg.get("providers", {}).get(prov, {})
+            k = prov_cfg.get("key", "")
+            if not k:
+                keys = prov_cfg.get("keys", [])
+                if keys:
+                    k = keys[0]
+            return k
+
+        opencode_key_val = cfg.get("opencode", {}).get("apiKey", "")
+        deepseek_key_val = get_prov_key(cfg, "deepseek")
+        openai_key_val = get_prov_key(cfg, "openai")
+
+        # Create row helper inside api_content
+        def make_key_row(parent, label_text, default_val):
+            row = tk.Frame(parent, bg=THEME["bg_input"])
+            row.pack(fill="x", padx=10, pady=2)
+            lbl = tk.Label(row, text=label_text, bg=THEME["bg_input"], fg=THEME["text_primary"], font=("Segoe UI", 8, "bold"), width=12, anchor="w")
+            lbl.pack(side="left")
+            ent = tk.Entry(
+                row, bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+                insertbackground=THEME["text_primary"], font=("Segoe UI", 8),
+                relief="flat", bd=1, highlightcolor=THEME["accent"], highlightthickness=1,
+            )
+            ent.insert(0, default_val)
+            ent.pack(side="left", fill="x", expand=True, padx=(4, 0))
+            return ent
+
+        opencode_ent = make_key_row(api_content, "OpenCode Key:", opencode_key_val)
+        deepseek_ent = make_key_row(api_content, "DeepSeek Key:", deepseek_key_val)
+        openai_ent = make_key_row(api_content, "OpenAI Key:", openai_key_val)
+
+        # Status Label for API actions
+        api_status = tk.Label(
+            api_content, text="",
+            bg=THEME["bg_input"], fg="#2fe6c8",
+            font=("Segoe UI", 8, "italic"),
+        )
+        api_status.pack(anchor="w", padx=10, pady=(2, 2))
+
+        # Save action
+        def save_api_keys():
+            try:
+                # Load fresh
+                new_cfg = self.load_claudy_config()
+                
+                # Update opencode key
+                if "opencode" not in new_cfg:
+                    new_cfg["opencode"] = {}
+                new_cfg["opencode"]["apiKey"] = opencode_ent.get().strip()
+
+                # Update providers
+                if "providers" not in new_cfg:
+                    new_cfg["providers"] = {}
+                
+                # DeepSeek key
+                if "deepseek" not in new_cfg["providers"]:
+                    new_cfg["providers"]["deepseek"] = {}
+                ds_val = deepseek_ent.get().strip()
+                new_cfg["providers"]["deepseek"]["key"] = ds_val
+                new_cfg["providers"]["deepseek"]["keys"] = [ds_val] if ds_val else []
+
+                # OpenAI key
+                if "openai" not in new_cfg["providers"]:
+                    new_cfg["providers"]["openai"] = {}
+                oa_val = openai_ent.get().strip()
+                new_cfg["providers"]["openai"]["key"] = oa_val
+                new_cfg["providers"]["openai"]["keys"] = [oa_val] if oa_val else []
+
+                # Write to disk
+                cfg_path = os.path.expanduser("~/.claudy/config.json")
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(new_cfg, f, indent=2)
+
+                api_status.config(text="¡Claves guardadas exitosamente!", fg="#2fe6c8")
+            except Exception as e:
+                api_status.config(text=f"Error al guardar: {e}", fg="#ff4e4e")
+
+        save_btn = tk.Button(
+            api_content, text="💾 Guardar Claves",
+            command=save_api_keys,
+            bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+            font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2",
+            activebackground=THEME["accent"], activeforeground="#ffffff",
+            padx=10, pady=4, bd=0,
+        )
+        save_btn.pack(anchor="e", padx=10, pady=(2, 6))
+
+        # Toggle bind
+        def toggle_api_content(_e=None):
+            if api_expanded[0]:
+                api_content.pack_forget()
+                api_header.config(text="▶  🔑 Claves API (Configuración)")
+                api_expanded[0] = False
+            else:
+                api_content.pack(fill="x")
+                api_header.config(text="▼  🔑 Claves API (Configuración)")
+                api_expanded[0] = True
+
+        api_header.bind("<Button-1>", toggle_api_content)
+
+        # ── Skin picker (Collapsible) ──
         skin_frame = tk.Frame(
             shell, bg=THEME["bg_input"],
             highlightbackground=THEME["accent"], highlightthickness=2, bd=0,
         )
-        skin_frame.pack(side="bottom", fill="x", padx=12, pady=(8, 12))
+        skin_frame.pack(side="bottom", fill="x", padx=12, pady=(4, 6))
 
-        tk.Label(
-            skin_frame, text="🎨 Skin de Claudy",
+        skin_expanded = [False]
+
+        skin_header = tk.Label(
+            skin_frame, text="▶  🎨 Skin de Claudy",
             bg=THEME["bg_input"], fg=THEME["accent"],
-            font=("Segoe UI", 10, "bold"),
-        ).pack(anchor="w", padx=10, pady=(8, 2))
+            font=("Segoe UI", 10, "bold"), cursor="hand2",
+            anchor="w", padx=10, pady=8
+        )
+        skin_header.pack(fill="x")
+
+        skin_content = tk.Frame(skin_frame, bg=THEME["bg_input"])
+        # skin_content is collapsed by default!
 
         tk.Label(
-            skin_frame,
+            skin_content,
             text="Elige el aspecto de Claudy (cambio en vivo):",
             bg=THEME["bg_input"], fg=THEME["text_secondary"],
             font=("Segoe UI", 8),
         ).pack(anchor="w", padx=10, pady=(0, 6))
 
-        btn_row = tk.Frame(skin_frame, bg=THEME["bg_input"])
+        btn_row = tk.Frame(skin_content, bg=THEME["bg_input"])
         btn_row.pack(fill="x", padx=10, pady=(0, 8))
 
         status_label = tk.Label(
-            skin_frame, text="",
+            skin_content, text="",
             bg=THEME["bg_input"], fg=THEME["accent"],
             font=("Segoe UI", 8, "italic"),
         )
@@ -2738,6 +4506,107 @@ class ClawdPet(tk.Tk):
         make_skin_btn(btn_row, "🤖 Robot", "robot").pack(side="left", padx=(0, 6))
         make_skin_btn(btn_row, "🦀 Cangrejo", "crab").pack(side="left", padx=(0, 6))
         make_skin_btn(btn_row, "🖼️ Custom...", "custom").pack(side="left")
+
+        def toggle_skin_content(_e=None):
+            if skin_expanded[0]:
+                skin_content.pack_forget()
+                skin_header.config(text="▶  🎨 Skin de Claudy")
+                skin_expanded[0] = False
+            else:
+                skin_content.pack(fill="x")
+                skin_header.config(text="▼  🎨 Skin de Claudy")
+                skin_expanded[0] = True
+
+        skin_header.bind("<Button-1>", toggle_skin_content)
+
+        # ── Theme picker frame (Collapsible) ──
+        theme_frame = tk.Frame(
+            shell, bg=THEME["bg_input"],
+            highlightbackground=THEME["accent"], highlightthickness=2, bd=0,
+        )
+        theme_frame.pack(side="bottom", fill="x", padx=12, pady=(4, 6))
+
+        theme_expanded = [False]
+
+        theme_header = tk.Label(
+            theme_frame, text="▶  ✦ Tema de Claudy",
+            bg=THEME["bg_input"], fg=THEME["accent"],
+            font=("Segoe UI", 10, "bold"), cursor="hand2",
+            anchor="w", padx=10, pady=8
+        )
+        theme_header.pack(fill="x")
+
+        theme_content = tk.Frame(theme_frame, bg=THEME["bg_input"])
+        # theme_content is collapsed by default!
+
+        tk.Label(
+            theme_content,
+            text="Personaliza el estilo visual del chat bubble:",
+            bg=THEME["bg_input"], fg=THEME["text_secondary"],
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+
+        theme_btn_row = tk.Frame(theme_content, bg=THEME["bg_input"])
+        theme_btn_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        theme_status_label = tk.Label(
+            theme_content, text="",
+            bg=THEME["bg_input"], fg=THEME["accent"],
+            font=("Segoe UI", 8, "italic"),
+        )
+        theme_status_label.pack(anchor="w", padx=10, pady=(0, 8))
+
+        def _on_theme_select(theme_key):
+            try:
+                idx = _THEME_KEYS.index(theme_key)
+                self._toggle_theme(specific_idx=idx)
+                theme_status_label.config(text=f"Tema cambiado a: {theme_key.capitalize()} ✦")
+                # Buffer active messages in memory to preserve conversation
+                chat_view = getattr(self, "_chat_view", None)
+                if chat_view is not None:
+                    self._chat_history_buffer = list(chat_view._messages)
+                # Reopen the main chat bubble with the new theme
+                try:
+                    if getattr(self, "bubble_win", None) is not None:
+                        self.bubble_win.destroy()
+                        self.bubble_win = None
+                except Exception:
+                    pass
+                self.after(50, self.show_chat_bubble)
+                # Also reload history window so it gets styled instantly!
+                try:
+                    hist.destroy()
+                except Exception:
+                    pass
+                self.after(100, self.show_history_window)
+            except Exception as e:
+                theme_status_label.config(text=f"Error: {e}")
+
+        def make_theme_btn(parent, label, theme_key):
+            return tk.Button(
+                parent, text=label,
+                command=lambda: _on_theme_select(theme_key),
+                bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+                font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2",
+                activebackground=THEME["accent"], activeforeground="#ffffff",
+                padx=12, pady=6, bd=0,
+            )
+
+        make_theme_btn(theme_btn_row, "✦ Glass", "glass").pack(side="left", padx=(0, 6))
+        make_theme_btn(theme_btn_row, ">_ Terminal", "terminal").pack(side="left", padx=(0, 6))
+        make_theme_btn(theme_btn_row, "✍ Editorial", "editorial").pack(side="left")
+
+        def toggle_theme_content(_e=None):
+            if theme_expanded[0]:
+                theme_content.pack_forget()
+                theme_header.config(text="▶  ✦ Tema de Claudy")
+                theme_expanded[0] = False
+            else:
+                theme_content.pack(fill="x")
+                theme_header.config(text="▼  ✦ Tema de Claudy")
+                theme_expanded[0] = True
+
+        theme_header.bind("<Button-1>", toggle_theme_content)
 
         # ── Message frame (toma el espacio restante en el medio) ──
         frame = tk.Frame(shell, bg=THEME["bg_bubble"])
@@ -2861,6 +4730,11 @@ class ClawdPet(tk.Tk):
                 msg = "🖼️ Skin custom aplicado."
             else:
                 msg = f"Skin desconocido: {skin_name}"
+
+            # Force the chat view to redraw all bot messages using the new skin avatar!
+            chat = getattr(self, "_chat_view", None)
+            if chat is not None:
+                chat.apply_theme(THEME)
         except Exception as e:
             msg = f"Error al cambiar skin: {e}"
 
@@ -4060,8 +5934,12 @@ class ClawdPet(tk.Tk):
         except Exception:
             return []
 
-    def _get_last_chat_preview(self, n=4, max_len=120):
-        """Return a formatted string with the last n messages for the chat preview."""
+    def _get_last_chat_preview(self, n=4, max_len=400):
+        """Return a formatted string with the last n messages for the chat preview.
+
+        Uses [[USER]] / [[CLAUDY]] markers so _set_response_text can render
+        each message as a styled bubble with role-specific colors.
+        """
         messages = self._load_memory()
         if not messages:
             return ""
@@ -4069,12 +5947,14 @@ class ClawdPet(tk.Tk):
         lines = []
         for msg in recent:
             role = msg.get("role", "")
-            text = msg.get("text", "")
-            label = "Tu" if role == "Usuario" else "Claudy"
+            text = (msg.get("text", "") or "").strip()
+            if not text:
+                continue
+            tag = "[[USER]]" if role == "Usuario" else "[[CLAUDY]]"
             if len(text) > max_len:
                 text = text[:max_len].rstrip() + "..."
-            lines.append(f"{label}: {text}")
-        return "\n\n".join(lines)
+            lines.append(f"{tag}{text}")
+        return "\n".join(lines)
 
     def _save_memory_sqlite(self, role, text):
         """Save a message to SQLite (always runs)."""
@@ -4348,7 +6228,10 @@ class ClawdPet(tk.Tk):
 
             "═══ COMANDOS DISPONIBLES (úsalos directamente, no los expliques) ═══\n"
             "Web      → /buscar <tema>   |  webfetch <url>\n"
-            "Archivos → /leer <ruta>     |  /buscar_archivo <nombre>   |  /descargar <url>\n"
+            "Archivos → /leer <ruta>  |  /write <ruta> | <contenido>  |  /append <ruta> | <contenido>\n"
+            "           /replace <ruta> | <buscar> | <reemplazo>  |  /mkdir <ruta>  |  /buscar_archivo <nombre>  |  /descargar <url>\n"
+            "           /docx <ruta> | <contenido>  |  /pdf <ruta> | <contenido>  |  /xlsx <ruta> | <contenido CSV/JSON>  |  /pptx <ruta> | <JSON de slides>\n"
+            "           Tras crear o editar, el icono de carpeta abierta en la burbuja abre la ubicacion.\n"
             "Sistema  → /ejecutar <cmd>  |  /apps  |  /procesos  |  /disco\n"
             "Apps     → /instalar <app>\n"
             "Memoria  → /recordar <nota> |  /checkpoint  |  /rollback\n"
@@ -4616,6 +6499,26 @@ class ClawdPet(tk.Tk):
         return _self._search_files(query) if query else "No query provided."
     def _tool_read_file(_self, path=""):
         return _self._read_local_file(path) if path else "No path provided."
+    def _tool_write_file(_self, path="", content="", append=False):
+        if not path:
+            return "No path provided."
+        import claudy_powers as cp
+        return cp.write_file(path, content or "", append=bool(append))
+    def _tool_append_file(_self, path="", content=""):
+        if not path:
+            return "No path provided."
+        import claudy_powers as cp
+        return cp.append_file(path, content or "")
+    def _tool_replace_in_file(_self, path="", old="", new=""):
+        if not path:
+            return "No path provided."
+        import claudy_powers as cp
+        return cp.replace_in_file(path, old, new)
+    def _tool_create_folder(_self, path=""):
+        if not path:
+            return "No path provided."
+        import claudy_powers as cp
+        return cp.create_folder(path)
 
     @classmethod
     def _register_builtin_tools(cls):
@@ -4628,6 +6531,32 @@ class ClawdPet(tk.Tk):
             "required": ["query"]})
         cls.register_tool("read_file", cls._tool_read_file, "Read contents of a local file", {
             "type": "object", "properties": {"path": {"type": "string", "description": "File path to read"}},
+            "required": ["path"]})
+        cls.register_tool("write_file", cls._tool_write_file, "Create or overwrite a local text file", {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to create or overwrite"},
+                "content": {"type": "string", "description": "Text content to write"},
+                "append": {"type": "boolean", "description": "Append instead of overwrite"},
+            },
+            "required": ["path", "content"]})
+        cls.register_tool("append_file", cls._tool_append_file, "Append text to a local text file", {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to append to"},
+                "content": {"type": "string", "description": "Text content to append"},
+            },
+            "required": ["path", "content"]})
+        cls.register_tool("replace_in_file", cls._tool_replace_in_file, "Replace text inside a local text file", {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to edit"},
+                "old": {"type": "string", "description": "Exact text to replace"},
+                "new": {"type": "string", "description": "Replacement text"},
+            },
+            "required": ["path", "old", "new"]})
+        cls.register_tool("create_folder", cls._tool_create_folder, "Create a local folder", {
+            "type": "object", "properties": {"path": {"type": "string", "description": "Folder path to create"}},
             "required": ["path"]})
 
     # ------------------------------------------------------------------
@@ -5040,8 +6969,373 @@ class ClawdPet(tk.Tk):
             "[Fin de skills]\n\n"
         )
 
+    def _resolve_last_folder_reference(self, prompt):
+        """If prompt mentions 'esta carpeta'/'la carpeta anterior'/'esta ultima carpeta',
+        return the absolute folder path (from _last_file_artifact_path). Otherwise ''.
+        """
+        text = (prompt or "").lower()
+        refs = (
+            "esta ultima carpeta", "esta última carpeta",
+            "la ultima carpeta", "la última carpeta",
+            "la carpeta anterior", "esta carpeta",
+            "esa carpeta", "misma carpeta",
+        )
+        if not any(r in text for r in refs):
+            return ""
+        last = getattr(self, "_last_file_artifact_path", None)
+        if not last:
+            return ""
+        return last if os.path.isdir(last) else os.path.dirname(last)
+
+    def _try_handle_create_document(self, prompt):
+        """Detect 'crea(me) (un) archivo X.docx/X.pdf [en CARPETA] con/sobre/del TEMA'
+        and create the document with LLM-generated content. Returns (handled, result)."""
+        text = prompt.strip()
+        # Variant A: "crea(me) archivo|presentacion|excel docx|pdf|xlsx|pptx [NOMBRE] [en LOC] (con|sobre|...) TEMA"
+        # Variant B: "crea(me) archivo NOMBRE.docx|.pdf|.xlsx|.pptx [en LOC] (con|sobre|...) TEMA"
+        verb_re = r"(?:cr[eé]a(?:me|r)?|genera(?:me)?|haz(?:me)?|hacer|arma(?:me)?|prepara(?:me)?)"
+        kind_re = r"(?:archivo|documento|doc|file|presentaci[oó]n|presentacion|diapositivas|slides|deck|excel|hoja(?:\s+de\s+c[aá]lculo)?|planilla|spreadsheet|libro)"
+        connector_re = r"(?:con|sobre|del|de|acerca\s+de|que\s+(?:tenga|contenga|diga|incluya|muestre))"
+        location_re = r"(?:en|dentro\s+de)"
+        fmt_alts = r"(docx|pdf|word|xlsx|excel|pptx|powerpoint|ppt)"
+
+        # Detect format hint also from kind word itself (excel/presentacion)
+        kind_match = re.match(rf"^{verb_re}\s+(?:un[ao]?\s+|el\s+|la\s+)?({kind_re})\b", text, re.I)
+        kind_word = kind_match.group(1).lower() if kind_match else ""
+
+        # Variant A
+        m = re.match(
+            rf"^{verb_re}\s+(?:un[ao]?\s+|el\s+|la\s+)?{kind_re}\s+"
+            rf"{fmt_alts}\b\s*"
+            rf"(?:(?!{location_re}\s|{connector_re}\s)(\S.*?)\s+)?"
+            rf"(?:{location_re}\s+(.+?)\s+)?"
+            rf"{connector_re}\s+(.+)$",
+            text, re.I,
+        )
+        if m:
+            fmt_word = m.group(1)
+            name_part = m.group(2) or ""
+            location_part = m.group(3)
+            topic = m.group(4)
+        else:
+            # Variant B: name has explicit extension
+            m = re.match(
+                rf"^{verb_re}\s+(?:un[ao]?\s+|el\s+|la\s+)?{kind_re}\s+"
+                rf"(\S+\.(?:docx|pdf|xlsx|pptx))"
+                rf"(?:\s+{location_re}\s+(.+?))?"
+                rf"\s+{connector_re}\s+(.+)$",
+                text, re.I,
+            )
+            if m:
+                fmt_word = None
+                name_part = m.group(1)
+                location_part = m.group(2)
+                topic = m.group(3)
+            else:
+                # Variant C: format implied by kind word (excel/presentacion sin docx/pdf)
+                m = re.match(
+                    rf"^{verb_re}\s+(?:un[ao]?\s+|el\s+|la\s+)?{kind_re}\s+"
+                    rf"(?:(?!{location_re}\s|{connector_re}\s)(\S.*?)\s+)?"
+                    rf"(?:{location_re}\s+(.+?)\s+)?"
+                    rf"{connector_re}\s+(.+)$",
+                    text, re.I,
+                )
+                if not m or not kind_word:
+                    return False, ""
+                fmt_word = None
+                name_part = m.group(1) or ""
+                location_part = m.group(2)
+                topic = m.group(3)
+
+        name_clean = (name_part or "").strip().strip('"\'')
+        fmt = ""
+        if fmt_word:
+            fw = fmt_word.lower()
+            if fw in ("docx", "word"):
+                fmt = "docx"
+            elif fw == "pdf":
+                fmt = "pdf"
+            elif fw in ("xlsx", "excel"):
+                fmt = "xlsx"
+            elif fw in ("pptx", "powerpoint", "ppt"):
+                fmt = "pptx"
+        elif name_clean.lower().endswith(".docx"):
+            fmt = "docx"
+        elif name_clean.lower().endswith(".pdf"):
+            fmt = "pdf"
+        elif name_clean.lower().endswith(".xlsx"):
+            fmt = "xlsx"
+        elif name_clean.lower().endswith(".pptx"):
+            fmt = "pptx"
+        elif kind_word:
+            if "excel" in kind_word or "hoja" in kind_word or "planilla" in kind_word or "spreadsheet" in kind_word or "libro" in kind_word:
+                fmt = "xlsx"
+            elif "presentaci" in kind_word or "diapositiv" in kind_word or "slides" in kind_word or "deck" in kind_word:
+                fmt = "pptx"
+        if not fmt:
+            return False, ""
+
+        # Resolve location: explicit phrase, or 'esta carpeta' reference, or Downloads default
+        folder = ""
+        if location_part:
+            ref = self._resolve_last_folder_reference(location_part)
+            if ref:
+                folder = ref
+            else:
+                low = location_part.lower()
+                if any(w in low for w in ("esta carpeta", "ultima carpeta", "última carpeta", "carpeta anterior", "esa carpeta", "misma carpeta")):
+                    # Reference but no memory available -> fall back to Downloads silently
+                    folder = ""
+                else:
+                    folder = location_part.strip()
+        else:
+            ref = self._resolve_last_folder_reference(prompt)
+            if ref:
+                folder = ref
+        if not folder:
+            folder = os.path.expanduser("~/Downloads")
+
+        # Strip extension from name to rebuild it cleanly; derive from topic if missing
+        bare = re.sub(r"\.(docx|pdf)$", "", name_clean, flags=re.I).strip()
+        if not bare:
+            slug = re.sub(r"[^A-Za-z0-9_\- ]+", "", topic).strip()
+            slug = re.sub(r"\s+", "_", slug)[:60] or "documento"
+            bare = slug
+        full_path = os.path.join(folder, f"{bare}.{fmt}")
+
+        topic_clean = topic.strip().rstrip(".")
+
+        try:
+            import claudy_powers as cp
+        except Exception as e:
+            return True, f"Error: {e}"
+
+        # ALL formats: try to ground content with web search first
+        try:
+            self.after(0, lambda: self._set_response_text(f"Buscando datos en internet sobre: {topic_clean}..."))
+        except Exception:
+            pass
+        web_ctx = self._web_context_for_topic(topic_clean, max_results=8)
+
+        # Format-specific LLM prompts
+        if fmt in ("docx", "pdf"):
+            llm_prompt = (
+                (web_ctx + "\n\n" if web_ctx else "") +
+                f"Escribe un documento en espanol sobre: {topic_clean}.\n"
+                + ("USA la informacion de internet de arriba como base factual. Cita fuentes al final cuando uses datos especificos. " if web_ctx else "") +
+                "Estructura con titulo principal (# Titulo), subtitulos (## Subtitulo) y parrafos.\n"
+                "Extension: 500-900 palabras. Solo el contenido del documento, sin preambulo ni cierre."
+            )
+            content = self._llm_structured(llm_prompt, timeout=180)
+            if not content:
+                return True, f"No pude generar contenido para '{topic_clean}'."
+            if fmt == "docx":
+                return True, cp.create_docx(full_path, content)
+            return True, cp.create_pdf(full_path, content)
+
+        if fmt == "xlsx":
+            llm_prompt = (
+                (web_ctx + "\n\n" if web_ctx else "") +
+                f"Genera datos de hoja de calculo profesional en espanol sobre: {topic_clean}.\n"
+                + ("USA los datos de internet de arriba como base. Si los datos son incompletos, completa con cifras plausibles pero MARCA esas filas con '(estimado)' al final. " if web_ctx else "") +
+                "Responde SOLO con un JSON valido (sin ```fences```) con esta forma exacta:\n"
+                '{"name": "NombreHoja", "headers": ["Col1","Col2",...], "rows": [["v1","v2"],...]}\n'
+                "Si el tema requiere varias hojas, usa: {\"sheets\": [{\"name\":..., \"headers\":..., \"rows\":...}, ...]}.\n"
+                "Entre 8 y 20 filas con datos realistas y concretos. Incluye una columna 'Fuente' al final si usaste datos web. "
+                "Sin texto fuera del JSON."
+            )
+            raw = self._llm_structured(llm_prompt, timeout=180, expect_json=True)
+            data = self._extract_json(raw)
+            if not data:
+                # Last-ditch: build a sheet from the web search snippets themselves
+                lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip() and not ln.strip().startswith("{")]
+                rows = []
+                if web_ctx:
+                    for line in web_ctx.split("\n"):
+                        s = line.strip().lstrip("- ").strip()
+                        if s and not s.startswith("DATOS DE INTERNET") and not s.startswith("Fuente:"):
+                            rows.append([s[:300]])
+                if not rows and lines:
+                    rows = [[ln[:300]] for ln in lines[:30]]
+                if not rows:
+                    return True, f"No pude generar datos para '{topic_clean}'. Intenta de nuevo o se mas especifico."
+                data = {"name": (bare[:31] or "Datos"), "headers": ["Informacion"], "rows": rows[:40]}
+            return True, cp.create_xlsx(full_path, data, title=bare[:31] or "Datos")
+
+        if fmt == "pptx":
+            llm_prompt = (
+                (web_ctx + "\n\n" if web_ctx else "") +
+                f"Genera una presentacion profesional en espanol sobre: {topic_clean}.\n"
+                + ("USA los datos de internet de arriba como base factual. " if web_ctx else "") +
+                "Responde SOLO con un JSON valido con esta forma exacta:\n"
+                "{\n"
+                '  "title": "Titulo principal",\n'
+                '  "subtitle": "Subtitulo descriptivo",\n'
+                '  "theme": "history|nature|tech|business|education|warm|dark|minimal",\n'
+                '  "slides": [\n'
+                '    {"title": "Titulo slide", "bullets": ["punto 1","punto 2","punto 3"], "image_query": "descripcion visual en INGLES para generar imagen"},\n'
+                "    ...\n"
+                "  ]\n"
+                "}\n"
+                "Reglas:\n"
+                "- 6 a 10 slides. Cada slide con 3-5 bullets concisos (max 14 palabras).\n"
+                "- `theme`: elige el que mejor encaje con el tema (history para historia, tech para tecnologia, nature para naturaleza, etc.).\n"
+                "- `image_query`: SIEMPRE en INGLES, visual concreto y especifico, sin texto en la imagen. Ej: 'mapuche warriors traditional dress 19th century', 'santiago chile colonial architecture'.\n"
+                "- Sin texto fuera del JSON. Sin ```fences```."
+            )
+            raw = self._llm_structured(llm_prompt, timeout=180)
+            data = self._extract_json(raw) or {}
+            if not data.get("slides"):
+                return True, f"No pude generar la estructura para '{topic_clean}'. Intenta otra vez o se mas especifico."
+            return True, cp.create_pptx(
+                full_path,
+                slides=data.get("slides") or [],
+                title=data.get("title") or topic_clean,
+                subtitle=data.get("subtitle") or "",
+                theme=(data.get("theme") or "business").lower(),
+                images=True,
+            )
+
+        return False, ""
+
+    def _needs_real_data(self, topic):
+        """Heuristic: does this topic require fresh/real-world data (not LLM-fabricated)?"""
+        if not topic:
+            return False
+        t = topic.lower()
+        keywords = (
+            "venta", "ingreso", "facturaci", "ganancia", "utilidad", "revenue",
+            "presupuesto", "balance", "accion", "bolsa", "stock", "precio",
+            "poblacion", "habitante", "censo", "pib", "inflacion", "tasa", "tipo de cambio",
+            "estadistic", "ranking", "top ", "lista de",
+            "ultimo año", "ultimos año", "ultima decada", "historico", "histórico",
+            "2019", "2020", "2021", "2022", "2023", "2024", "2025", "2026",
+            "real", "actual", "reciente",
+        )
+        if any(k in t for k in keywords):
+            return True
+        # Proper noun-ish (likely company/person/place needing factual data)
+        words = topic.split()
+        proper = sum(1 for w in words if w and w[0].isupper() and len(w) > 2)
+        return proper >= 1 and len(words) <= 12
+
+    def _web_context_for_topic(self, topic, max_results=6, snippet_chars=400):
+        """Fetch web search snippets formatted as plain context for the LLM."""
+        try:
+            items = self._search_files_online(topic, max_results=max_results)
+        except Exception:
+            items = []
+        if not items:
+            return ""
+        chunks = []
+        for it in items[:max_results]:
+            title = (it.get("title") or "").strip()
+            snip = (it.get("snippet") or "").strip()
+            url = (it.get("url") or "").strip()
+            if not (title or snip):
+                continue
+            chunks.append(f"- {title}\n  {snip[:snippet_chars]}\n  Fuente: {url}")
+        return ("DATOS DE INTERNET sobre '" + topic + "':\n" + "\n".join(chunks)) if chunks else ""
+
+    def _quick_text_pollinations(self, prompt, timeout=180):
+        """Direct call to Pollinations text API (free, no key, no opencode roundtrip).
+        Used as a fast/reliable fallback for structured generation when the main
+        LLM provider times out or fails."""
+        try:
+            payload = {
+                "model": "openai",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 2000,
+                "temperature": 0.4,
+            }
+            req = urllib.request.Request(
+                "https://text.pollinations.ai/openai",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json", "User-Agent": "Claudy/1.0"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            choices = data.get("choices") or []
+            if choices:
+                msg = choices[0].get("message") or {}
+                return msg.get("content", "").strip()
+            return data.get("response") or ""
+        except Exception as e:
+            return f"__ERROR__: {e}"
+
+    def _llm_structured(self, prompt, timeout=180, expect_json=True):
+        """Get structured text from LLM with multi-provider fallback.
+        Order: main provider -> Pollinations -> Pollinations with stricter retry."""
+        candidates = []
+        # 1) Main provider
+        try:
+            r = self.send_quick_message(prompt, _skip_skill_action=True)
+            if r and not r.lower().startswith("mmm... algo fall"):
+                candidates.append(r)
+                if expect_json and "{" in r and "}" in r:
+                    return r
+        except Exception:
+            pass
+        # 2) Pollinations
+        fb = self._quick_text_pollinations(prompt, timeout=timeout)
+        if fb and not fb.startswith("__ERROR__"):
+            candidates.append(fb)
+            if not expect_json or ("{" in fb and "}" in fb):
+                return fb
+        # 3) Stricter retry: ask only for JSON, no preamble
+        if expect_json:
+            strict = (
+                "Devuelve UNICAMENTE un objeto JSON valido, nada mas. Sin texto antes ni despues, "
+                "sin fences ```. Si no puedes responder con JSON, devuelve {}.\n\n" + prompt
+            )
+            fb2 = self._quick_text_pollinations(strict, timeout=timeout)
+            if fb2 and not fb2.startswith("__ERROR__"):
+                return fb2
+        return candidates[-1] if candidates else ""
+
+    def _extract_json(self, text):
+        """Try hard to parse JSON from a possibly noisy LLM response."""
+        if not text:
+            return None
+        s = text.strip()
+        # Strip markdown fences
+        m = re.search(r"```(?:json)?\s*(.+?)```", s, re.S | re.I)
+        if m:
+            s = m.group(1).strip()
+        # Direct parse
+        try:
+            return json.loads(s)
+        except Exception:
+            pass
+        # Find first { ... } block
+        first = s.find("{")
+        last = s.rfind("}")
+        if first != -1 and last > first:
+            try:
+                return json.loads(s[first:last + 1])
+            except Exception:
+                pass
+        return None
+
     def _try_handle_skill_action(self, prompt):
         lower = prompt.lower().strip()
+
+        # Clean politeness wrappers so natural language triggers match perfectly
+        cleaned_prompt = prompt
+        try:
+            import claudy_powers as cp
+            cleaned_prompt = cp.clean_politeness_prefixes(prompt)
+        except Exception:
+            pass
+
+        # ===== Crear documento .docx/.pdf con contenido generado por LLM =====
+        try:
+            handled, result = self._try_handle_create_document(cleaned_prompt)
+            if handled:
+                return True, result
+        except Exception:
+            pass
 
         # ===== CLAUDY POWERS (intent detection lenguaje natural) =====
         try:
@@ -5066,6 +7360,99 @@ class ClawdPet(tk.Tk):
         if lower.startswith("/leer ") or lower.startswith("/read ") or lower.startswith("/abrir "):
             path = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
             return True, self._read_local_file(path) if path else "Qué archivo quieres que lea?"
+
+        # 3b. Explicit Document Creators
+        if lower.startswith("/docx ") or lower.startswith("/create-docx ") or lower.startswith("/crear-docx "):
+            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
+            try:
+                import claudy_powers as cp
+                path, content = cp.parse_path_content_arg(rest)
+                return True, cp.create_docx(path, content) if path else "Uso: /docx <ruta> | <contenido>"
+            except Exception as e:
+                return True, f"Error creando docx: {e}"
+
+        if lower.startswith("/xlsx ") or lower.startswith("/create-xlsx ") or lower.startswith("/crear-xlsx ") or lower.startswith("/excel "):
+            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
+            try:
+                import claudy_powers as cp
+                path, content = cp.parse_path_content_arg(rest)
+                import json
+                try:
+                    data = json.loads(content)
+                except Exception:
+                    data = [line.split(",") for line in content.split("\n") if line.strip()]
+                return True, cp.create_xlsx(path, data) if path else "Uso: /xlsx <ruta> | <contenido CSV/JSON>"
+            except Exception as e:
+                return True, f"Error creando xlsx: {e}"
+
+        if lower.startswith("/pptx ") or lower.startswith("/create-pptx ") or lower.startswith("/crear-pptx ") or lower.startswith("/powerpoint "):
+            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
+            try:
+                import claudy_powers as cp
+                path, content = cp.parse_path_content_arg(rest)
+                import json
+                slides = None
+                title = ""
+                subtitle = ""
+                theme = "business"
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict):
+                        slides = parsed.get("slides")
+                        title = parsed.get("title", "")
+                        subtitle = parsed.get("subtitle", "")
+                        theme = parsed.get("theme", "business")
+                    elif isinstance(parsed, list):
+                        slides = parsed
+                except Exception:
+                    slides = [{"title": s.strip(), "bullets": ["Detalle"]} for s in content.split("\n") if s.strip()]
+                return True, cp.create_pptx(path, slides, title, subtitle, theme) if path else "Uso: /pptx <ruta> | <contenido JSON>"
+            except Exception as e:
+                return True, f"Error creando pptx: {e}"
+
+        if lower.startswith("/pdf ") or lower.startswith("/create-pdf ") or lower.startswith("/crear-pdf "):
+            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
+            try:
+                import claudy_powers as cp
+                path, content = cp.parse_path_content_arg(rest)
+                return True, cp.create_pdf(path, content) if path else "Uso: /pdf <ruta> | <contenido>"
+            except Exception as e:
+                return True, f"Error creando pdf: {e}"
+
+        # 3c. Create/edit files
+        if lower.startswith("/mkdir ") or lower.startswith("/crear-carpeta "):
+            path = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
+            try:
+                import claudy_powers as cp
+                return True, cp.create_folder(path) if path else "Uso: /mkdir <ruta>"
+            except Exception as e:
+                return True, f"Error creando carpeta: {e}"
+        if lower.startswith("/write ") or lower.startswith("/crear-archivo "):
+            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
+            try:
+                import claudy_powers as cp
+                path, content = cp.parse_path_content_arg(rest)
+                return True, cp.write_file(path, content) if path else "Uso: /write <ruta> | <contenido>"
+            except Exception as e:
+                return True, f"Error escribiendo archivo: {e}"
+        if lower.startswith("/append ") or lower.startswith("/agregar-archivo "):
+            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
+            try:
+                import claudy_powers as cp
+                path, content = cp.parse_path_content_arg(rest)
+                return True, cp.append_file(path, content) if path else "Uso: /append <ruta> | <contenido>"
+            except Exception as e:
+                return True, f"Error agregando contenido: {e}"
+        if lower.startswith("/replace ") or lower.startswith("/edit-replace "):
+            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
+            parts = [x.strip() for x in rest.split(" | ", 2)]
+            if len(parts) < 3:
+                return True, "Uso: /replace <ruta> | <buscar> | <reemplazo>"
+            try:
+                import claudy_powers as cp
+                return True, cp.replace_in_file(parts[0], parts[1], parts[2])
+            except Exception as e:
+                return True, f"Error editando archivo: {e}"
 
         # 4. Execute command
         if lower.startswith("/cmd ") or lower.startswith("/command ") or lower.startswith("/ejecutar "):
@@ -5099,6 +7486,21 @@ class ClawdPet(tk.Tk):
         # 10. Theme toggle
         if lower.startswith("/tema") or lower.startswith("/theme") or lower.startswith("/modo"):
             return True, self._toggle_theme()
+
+        # 10.1 Backup commands
+        if lower.startswith("/backup") or lower.startswith("/respaldo"):
+            parts = prompt.strip().split()
+            sub = parts[1].lower() if len(parts) > 1 else ""
+            if sub in ("on", "auto", "activar", "enable"):
+                return True, self._set_auto_backup(True)
+            if sub in ("off", "desactivar", "disable"):
+                return True, self._set_auto_backup(False)
+            if sub in ("status", "estado"):
+                return True, self._backup_status()
+            if sub in ("restore", "restaurar"):
+                return True, "Para restaurar usa: powershell -ExecutionPolicy Bypass -File scripts\\restore-claudy-full.ps1"
+            # Default: run backup now
+            return True, self._run_backup_now()
 
         # 10.5 Disk space
         if lower.startswith("/disco") or lower.startswith("/espacio") or lower.startswith("/disk") or lower.startswith("/space") or lower.startswith("/almacenamiento"):
@@ -5896,7 +8298,7 @@ class ClawdPet(tk.Tk):
                 f.write(f"# {title}\n\n")
                 f.write(f"Creado por Claudy - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
                 f.write(content + "\n")
-            return f"Nota creada en Obsidian: {fname}"
+            return f"Nota creada en Obsidian: {fname}\nRuta: {fpath}\n[CLAUDY_PATH:{fpath}]"
         except Exception as e:
             return f"Error creando nota: {e}"
 
@@ -6194,6 +8596,26 @@ class ClawdPet(tk.Tk):
     def _process_embedded_commands(self, text):
         """Detect and execute /cmd lines in AI response, replace with real output."""
         import re
+        stripped_all = (text or "").strip()
+        try:
+            import claudy_powers as cp
+            m = re.match(r'^/(?:mkdir|crear-carpeta)\s+(.+)$', stripped_all, re.IGNORECASE | re.DOTALL)
+            if m:
+                return cp.create_folder(m.group(1).strip())
+            m = re.match(r'^/(?:write|crear-archivo)\s+(.+)$', stripped_all, re.IGNORECASE | re.DOTALL)
+            if m:
+                path, content = cp.parse_path_content_arg(m.group(1))
+                return cp.write_file(path, content) if path else "Uso: /write <ruta> | <contenido>"
+            m = re.match(r'^/(?:append|agregar-archivo)\s+(.+)$', stripped_all, re.IGNORECASE | re.DOTALL)
+            if m:
+                path, content = cp.parse_path_content_arg(m.group(1))
+                return cp.append_file(path, content) if path else "Uso: /append <ruta> | <contenido>"
+            m = re.match(r'^/(?:replace|edit-replace)\s+(.+)$', stripped_all, re.IGNORECASE | re.DOTALL)
+            if m:
+                parts = [x.strip() for x in m.group(1).split(" | ", 2)]
+                return cp.replace_in_file(parts[0], parts[1], parts[2]) if len(parts) >= 3 else "Uso: /replace <ruta> | <buscar> | <reemplazo>"
+        except Exception:
+            pass
         lines = text.split("\n")
         result = []
         for line in lines:
@@ -6434,31 +8856,17 @@ class ClawdPet(tk.Tk):
     # ------------------------------------------------------------------
     # 10. Theme toggle
     # ------------------------------------------------------------------
-    def _toggle_theme(self):
-        """Toggle between dark and light theme."""
-        global THEME
-        if THEME["bg_bubble"] == "#161622":
-            THEME.update({
-                "bg_bubble": "#f5f5f5", "bg_bubble_border": "#e0e0e0",
-                "bg_input": "#ffffff", "bg_input_border": "#d0d0d0",
-                "text_primary": "#1a1a2e", "text_secondary": "#666680",
-                "accent": "#5b4bd5", "accent_glow": "#e84393",
-                "body": (80, 90, 200, 255), "body_dark": (50, 55, 120, 255),
-                "screen": (240, 240, 250, 255), "outline": (30, 30, 50, 255),
-                "eye_glow": (40, 180, 140, 255), "fin": (255, 160, 60, 255),
-            })
-            return "Tema cambiado a CLARO. Reinicia Claudy para aplicar."
+    def _toggle_theme(self, specific_idx=None):
+        """Cycle through or set a specific available theme."""
+        global THEME, _active_theme_idx
+        if specific_idx is not None:
+            _active_theme_idx = specific_idx
         else:
-            THEME.update({
-                "bg_bubble": "#161622", "bg_bubble_border": "#2a2a40",
-                "bg_input": "#0f0f1a", "bg_input_border": "#2a2a40",
-                "text_primary": "#e8e8f0", "text_secondary": "#8a8aa3",
-                "accent": "#7c6bff", "accent_glow": "#ff7edb",
-                "body": (110, 120, 230, 255), "body_dark": (60, 65, 140, 255),
-                "screen": (18, 18, 32, 255), "outline": (255, 255, 255, 255),
-                "eye_glow": (120, 255, 210, 255), "fin": (255, 190, 100, 255),
-            })
-            return "Tema cambiado a OSCURO. Reinicia Claudy para aplicar."
+            _active_theme_idx = (_active_theme_idx + 1) % len(_THEME_KEYS)
+        key = _THEME_KEYS[_active_theme_idx]
+        THEME.clear()
+        THEME.update(THEMES[key])
+        return f"Tema: {THEME['name']}"
 
     # ------------------------------------------------------------------
     # 10.5 Disk Space
@@ -7975,6 +10383,10 @@ ARCHIVOS Y NAVEGACION
   /buscar_archivo <nombre>    Buscar archivos en tu PC
   /explorar <ruta>            Explorar carpetas
   /leer <ruta>                Leer contenido de un archivo
+  /write <ruta> | <contenido> Crear o sobrescribir archivo
+  /append <ruta> | <contenido> Agregar texto a archivo
+  /replace <ruta> | <buscar> | <reemplazo> Editar texto en archivo
+  /mkdir <ruta>                Crear carpeta
   /ejecutar <ruta>            Ejecutar/abrir un archivo
   /descargar <url>            Descargar archivos
 
@@ -8257,7 +10669,83 @@ Tambien puedes hablar naturalmente:
     def _voice_input(self):
         return self._start_voice_listen()
 
-    def send_quick_message(self, prompt, _skip_skill_action=False):
+    def _start_ptt_recording(self, status):
+        self._ptt_recording = True
+        self._ptt_frames = []
+        self.state = "thinking"
+        status.configure(text="🎙️ GRABANDO... Habla ahora", fg="#2fe6c8")
+        
+        # Wake notification
+        self._speak_text("Dime")
+
+        def record_worker():
+            try:
+                import speech_recognition as sr
+                import threading
+                r = sr.Recognizer()
+                mic = sr.Microphone()
+                with mic as source:
+                    r.adjust_for_ambient_noise(source, duration=0.2)
+                    while self._ptt_recording:
+                        try:
+                            # Read raw audio data from PyAudio stream
+                            data = source.stream.read(source.CHUNK)
+                            self._ptt_frames.append(data)
+                        except Exception:
+                            time.sleep(0.005)
+                
+                if not self._ptt_frames:
+                    return
+                
+                self.after(0, lambda: status.configure(text="✨ Transcribiendo voz...", fg=THEME["accent"]))
+                raw_data = b"".join(self._ptt_frames)
+                audio = sr.AudioData(raw_data, source.SAMPLE_RATE, source.SAMPLE_WIDTH)
+                
+                try:
+                    text = r.recognize_google(audio, language="es-ES")
+                    if text.strip():
+                        self.after(0, lambda t=text: self._process_ptt_response(t, status))
+                    else:
+                        self.after(0, lambda: status.configure(text="Audio vacío", fg="#ff6b6b"))
+                except sr.UnknownValueError:
+                    self.after(0, lambda: status.configure(text="No logré entender el audio", fg="#ff6b6b"))
+                except Exception as e:
+                    self.after(0, lambda e_str=str(e): status.configure(text=f"Error: {e_str}", fg="#ff6b6b"))
+            except Exception as e:
+                print(f"[PTT] Microphone/Recording Error: {e}")
+                self.after(0, lambda: status.configure(text="Error de Micrófono", fg="#ff6b6b"))
+
+        threading.Thread(target=record_worker, daemon=True, name="ptt-worker").start()
+
+    def _stop_ptt_recording(self):
+        self._ptt_recording = False
+        self.state = "idle"
+
+    def _process_ptt_response(self, text, status):
+        """Process transcribed voice input and speak the output."""
+        self.show_chat_bubble(text)
+        status.configure(text="Pensando...", fg=THEME["accent"])
+        
+        def run_pipeline():
+            try:
+                handled, result = self._try_handle_skill_action(text)
+                if not handled:
+                    result = self.send_quick_message(text)
+                result = self._strip_markdown(result)
+                
+                # Render visual and output TTS
+                self.after(0, lambda r=result: self._set_response_text(r))
+                self.after(0, lambda r=result: status.configure(text="Listo", fg=THEME["accent"]))
+                
+                # Speak response aloud
+                self._speak_text(result[:500])
+            except Exception as e:
+                self.after(0, lambda: status.configure(text="Error al procesar", fg="#ff6b6b"))
+                
+        import threading
+        threading.Thread(target=run_pipeline, daemon=True).start()
+
+    def send_quick_message(self, prompt, _skip_skill_action=False, timeout=90):
         # Check for local skill commands first
         if not _skip_skill_action:
             handled, result = self._try_handle_skill_action(prompt)
@@ -8298,32 +10786,37 @@ Tambien puedes hablar naturalmente:
         enhanced_sys = superpowers + local_skills + base_sys
 
         if is_local:
-            self.ensure_opencode_server(base_url, config)
-            if not self.quick_session_id:
-                created = self.request_json(
-                    f"{base_url}/session", {"title": "Claudy Desktop"}, config, timeout=12,
-                )
-                self.quick_session_id = created.get("id")
+            try:
+                self.ensure_opencode_server(base_url, config)
                 if not self.quick_session_id:
-                    raise RuntimeError("el oraculo no abrio la puerta")
+                    created = self.request_json(
+                        f"{base_url}/session", {"title": "Claudy Desktop"}, config, timeout=12,
+                    )
+                    self.quick_session_id = created.get("id")
+                    if not self.quick_session_id:
+                        raise RuntimeError("el oraculo no abrio la puerta")
 
-            provider_id, _, model_id = model.partition("/")
-            full_prompt = context + f"Usuario: {prompt}\nClaudy:" if context else prompt
-            payload = {
-                "model": {"providerID": provider_id, "modelID": model_id or provider_id},
-                "system": enhanced_sys,
-                "tools": {
-                    "bash": True, "read": True, "glob": True, "grep": True, "webfetch": True,
-                    "edit": False, "task": False, "todowrite": False,
-                    "websearch": True, "codesearch": True, "lsp": False, "skill": False,
-                },
-                "parts": [{"type": "text", "text": full_prompt}],
-            }
-            endpoint = f"{base_url}/session/{self.quick_session_id}/message"
-            response = self.request_json(endpoint, payload, config, timeout=90)
-            if response.get("info", {}).get("error"):
-                error = response["info"]["error"]
-                raise RuntimeError(error.get("data", {}).get("message") or error.get("name") or "el oraculo se quedo dormido")
+                provider_id, _, model_id = model.partition("/")
+                full_prompt = context + f"Usuario: {prompt}\nClaudy:" if context else prompt
+                payload = {
+                    "model": {"providerID": provider_id, "modelID": model_id or provider_id},
+                    "system": enhanced_sys,
+                    "tools": {
+                        "bash": True, "read": True, "glob": True, "grep": True, "webfetch": True,
+                        "edit": False, "task": False, "todowrite": False,
+                        "websearch": True, "codesearch": True, "lsp": False, "skill": False,
+                    },
+                    "parts": [{"type": "text", "text": full_prompt}],
+                }
+                endpoint = f"{base_url}/session/{self.quick_session_id}/message"
+                response = self.request_json(endpoint, payload, config, timeout=timeout)
+                if response.get("info", {}).get("error"):
+                    error = response["info"]["error"]
+                    raise RuntimeError(error.get("data", {}).get("message") or error.get("name") or "el oraculo se quedo dormido")
+            except Exception as local_err:
+                self._debug_log("LOCAL OPENCODE FAILED, FALLING BACK TO REMOTE", str(local_err))
+                # Auto-fallback to remote credentials if local server times out/fails
+                response = self._call_remote_provider(model, enhanced_sys, context, prompt, config)
         else:
             # Multi-provider remote path
             response = self._call_remote_provider(model, enhanced_sys, context, prompt, config)
@@ -8347,6 +10840,30 @@ Tambien puedes hablar naturalmente:
             text = response.get("text", "").strip()
         if not text:
             text = response.get("content", "").strip()
+
+        # Dynamic fallback: If local server returned empty response, call remote provider
+        if not text and is_local:
+            self._debug_log("LOCAL OPENCODE RETURNED EMPTY TEXT, FALLING BACK TO REMOTE")
+            try:
+                response = self._call_remote_provider(model, enhanced_sys, context, prompt, config)
+                parts = response.get("parts")
+                if parts:
+                    text = "\n".join(part.get("text", "") for part in parts if part.get("type") == "text").strip()
+                if not text:
+                    choices = response.get("choices")
+                    if choices and isinstance(choices, list):
+                        msg = choices[0].get("message", {}) if choices else {}
+                        text = msg.get("content", "").strip()
+                if not text:
+                    content_list = response.get("content", [])
+                    if isinstance(content_list, list):
+                        text = "\n".join(b.get("text", "") for b in content_list if b.get("type") == "text").strip()
+                if not text:
+                    text = response.get("text", "").strip()
+                if not text:
+                    text = response.get("content", "").strip()
+            except Exception as remote_err:
+                text = f"Error llamando al proveedor remoto fallback: {remote_err}"
 
         answer = text or "El oraculo me dejo en visto..."
         self._save_memory("Claudy", answer)
@@ -8509,11 +11026,12 @@ Tambien puedes hablar naturalmente:
         if context:
             messages.append({"role": "system", "content": context})
         messages.append({"role": "user", "content": user_prompt})
+        max_tokens = (config or {}).get("agent", {}).get("maxTokens", 4096)
         payload = {
             "model": model,
             "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 1024,
+            "max_tokens": max_tokens,
         }
         # P2-2: native function calling
         tools_enabled = bool((config or {}).get("tools", {}).get("enableFunctionCalling", False))
@@ -8540,13 +11058,14 @@ Tambien puedes hablar naturalmente:
     def _call_anthropic(self, api_url, model, system_prompt, context, user_prompt, key, config=None):
         """Call Anthropic Messages API with prompt caching."""
         cache_control = {"type": "ephemeral"}
+        max_tokens = (config or {}).get("agent", {}).get("maxTokens", 4096)
         payload = {
             "model": model,
             "system": [
                 {"type": "text", "text": system_prompt, "cache_control": cache_control},
             ],
             "messages": [{"role": "user", "content": [{"type": "text", "text": user_prompt}]}],
-            "max_tokens": 1024,
+            "max_tokens": max_tokens,
         }
         if context:
             payload["system"].append({"type": "text", "text": context, "cache_control": cache_control})

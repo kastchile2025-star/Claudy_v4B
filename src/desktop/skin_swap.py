@@ -60,9 +60,20 @@ def auto_crop_and_remove_bg(image, bg_tolerance=30):
     print(f"[*] Fondo detectado: RGB{bg_color}")
 
     def is_bg(px):
-        return (abs(px[0] - bg_color[0]) <= bg_tolerance and
-                abs(px[1] - bg_color[1]) <= bg_tolerance and
-                abs(px[2] - bg_color[2]) <= bg_tolerance)
+        # 1) Standard absolute distance from detected edge background color
+        dist_match = (abs(px[0] - bg_color[0]) <= bg_tolerance and
+                      abs(px[1] - bg_color[1]) <= bg_tolerance and
+                      abs(px[2] - bg_color[2]) <= bg_tolerance)
+        if dist_match:
+            return True
+            
+        # 2) Strip any predominantly blue pixels (covers the shadowed blue floor/shadow)
+        # Blue floor is highly blue: Blue (px[2]) is greater than Red (px[0]) and Green (px[1])
+        is_blue_shade = (px[2] > px[0] + 15 and px[2] > px[1] + 15 and px[2] > 40)
+        if is_blue_shade:
+            return True
+            
+        return False
 
     # 1) Convertir fondo a transparente
     for y in range(h):
