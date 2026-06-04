@@ -19,6 +19,18 @@ import urllib.request
 import winreg
 from ctypes import wintypes
 
+# Declare DPI awareness before any window/screen query so work_area and Tk geometry
+# share the same coordinate space (physical pixels). Without this, work_area is read
+# in scaled coords but Tk (auto-enables SystemAware) positions windows in physical
+# pixels, leaving Claudy short of the actual screen edge on high-DPI displays.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_NAME = "Claudy"
 
@@ -55,10 +67,21 @@ except Exception:
     def _route_model(_prompt, _config, fallback): return fallback
 
 try:
-    from PIL import Image, ImageDraw, ImageFilter
+    import secure_store as _secure
+except Exception:
+    _secure = None
+
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow", "--quiet"])
-    from PIL import Image, ImageDraw, ImageFilter
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
+
+try:
+    import webview
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pywebview", "--quiet"])
+    import webview
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSET_FRAMES = [os.path.join(SCRIPT_DIR, f"claudy_orbit_frame_{i}.png") for i in range(6)]
@@ -76,21 +99,53 @@ _SPRITE_COLORS = {
 }
 
 THEMES = {
+    "minimal": {
+        "name": "Obsidian Clean",
+        "bg_bubble": "#0a0a0c",
+        "bg_bubble_border": "#27272a",
+        "bg_input": "#0f0f12",
+        "bg_input_border": "#27272a",
+        "text_primary": "#f4f4f5",
+        "text_secondary": "#a1a1aa",
+        "text_label": "#71717a",
+        "accent": "#ffffff",
+        "accent_glow": "#a1a1aa",
+        "accent_dim": "#27272a",
+        "divider": "#1f1f23",
+        "panel_bg": "#0a0a0c",
+        "panel_soft": "#0f0f12",
+        "message_bot": "#0f0f12",
+        "message_bot_border": "#27272a",
+        "header_bg": "#0a0a0c",
+        "header_chip": "#0f0f12",
+        "button_bg": "#0a0a0c",
+        "button_fg": "#a1a1aa",
+        "button_hover": "#18181b",
+        "style": "minimal",
+        **_SPRITE_COLORS,
+    },
     "glass": {
         "name": "Nocturne",
-        # Tinted near-black (chroma toward accent hue).
-        "bg_bubble": "#0f0e14",
-        "bg_bubble_border": "#2a2733",
-        "bg_input": "#15131c",
-        "bg_input_border": "#2a2733",
-        "text_primary": "#ece9f5",
-        "text_secondary": "#8a8499",
-        "text_label": "#5f5a6f",
-        # Accent: violet desaturado (no purple AI por defecto).
-        "accent": "#c4b5fd",
-        "accent_glow": "#f6c9ff",
-        "accent_dim": "#3a3349",
-        "divider": "#1d1b26",
+        "bg_bubble": "#070b1e",
+        "bg_bubble_border": "#304f9e",
+        "bg_input": "#0d1637",
+        "bg_input_border": "#4866d7",
+        "text_primary": "#f7f7ff",
+        "text_secondary": "#cabdff",
+        "text_label": "#8fa4ff",
+        "accent": "#c02dff",
+        "accent_glow": "#58c7ff",
+        "accent_dim": "#18234f",
+        "divider": "#4f2cc8",
+        "panel_bg": "#050817",
+        "panel_soft": "#0b1231",
+        "message_bot": "#1a1838",
+        "message_bot_border": "#6a37d7",
+        "header_bg": "#081128",
+        "header_chip": "#0a1331",
+        "button_bg": "#18163a",
+        "button_fg": "#e5deff",
+        "button_hover": "#2a1f63",
         "style": "glass",
         **_SPRITE_COLORS,
     },
@@ -127,11 +182,37 @@ THEMES = {
         "style": "editorial",
         **_SPRITE_COLORS,
     },
+    "vintage": {
+        "name": "Pergamino",
+        "bg_bubble": "#3d3429",
+        "bg_bubble_border": "#5a4e3d",
+        "bg_input": "#2e2820",
+        "bg_input_border": "#6b5d4a",
+        "text_primary": "#2c1810",
+        "text_secondary": "#6b5744",
+        "input_fg": "#e6d5b8",
+        "text_label": "#8a7b68",
+        "accent": "#8b4513",
+        "accent_glow": "#a0522d",
+        "accent_dim": "#5a4e3d",
+        "divider": "#a89878",
+        "panel_bg": "#d4c5a0",
+        "panel_soft": "#c4b590",
+        "message_bot": "#cbb98f",
+        "message_bot_border": "#a89878",
+        "header_bg": "#b0a080",
+        "header_chip": "#2e2820",
+        "button_bg": "#a89878",
+        "button_fg": "#2c1810",
+        "button_hover": "#c4b590",
+        "style": "vintage",
+        **_SPRITE_COLORS,
+    },
 }
 
-# Active theme — start with glass
+# Active theme — start with glass (Nocturne)
 _THEME_KEYS = list(THEMES.keys())
-_active_theme_idx = 0
+_active_theme_idx = 1
 THEME = dict(THEMES[_THEME_KEYS[_active_theme_idx]])
 
 # Typography scale — clear hierarchy
@@ -145,9 +226,12 @@ MEMORY_MAX_MESSAGES = 200
 MEMORY_CONTEXT_MESSAGES = 20
 MEMORY_CONTEXT_CHARS = 6000
 
-BUBBLE_WIDTH = 360
-BUBBLE_HEIGHT = 420
+BUBBLE_WIDTH = 880
+BUBBLE_HEIGHT = 630
 BUBBLE_MINI_SIZE = 72
+# Ancho extra (px lógicos) que gana la ventana de chat al abrir cada panel lateral.
+CALENDAR_PANEL_W = 330   # se abre hacia la DERECHA
+HISTORY_PANEL_W = 330    # se abre hacia la IZQUIERDA
 MOON_FRAME_COUNT = 6
 # Idle sprite: beautiful animated moon with Zzz and stars.
 MOON_FRAMES = [os.path.join(SCRIPT_DIR, f"claudy_moon_frame_{i}.png") for i in range(MOON_FRAME_COUNT)]
@@ -312,6 +396,368 @@ class RECT(ctypes.Structure):
 work_area = RECT()
 user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work_area), 0)
 
+# pywebview's window APIs (create_window, move) treat coordinates as DPI-unaware
+# logical pixels, while this process is DPI-aware (work_area + Tk geometries are
+# in physical pixels). Compute the system DPI scale so we can translate physical
+# coords → pywebview-logical coords before calling webview.move() / sizing.
+def _dpi_scale():
+    try:
+        hdc = user32.GetDC(0)
+        try:
+            LOGPIXELSX = 88
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, LOGPIXELSX)
+        finally:
+            user32.ReleaseDC(0, hdc)
+        return max(1.0, dpi / 96.0)
+    except Exception:
+        return 1.0
+DPI_SCALE = _dpi_scale()
+
+def physical_to_webview(x, y):
+    """Convert DPI-aware physical pixels → pywebview's logical pixels."""
+    return int(round(x / DPI_SCALE)), int(round(y / DPI_SCALE))
+
+# Actual physical size the WebView occupies on screen. pywebview creates the
+# window at BUBBLE_WIDTH x BUBBLE_HEIGHT logical pixels; WebView2 renders that
+# at roughly logical * DPI_SCALE physical pixels MINUS some chrome overhead
+# that's invisible but counted by the OS. Empirically (Win11, WebView2 ~1.0.27xx
+# at 125% scaling) the overhead is ~18 px wide / ~47 px tall — i.e. the visible
+# render is shorter than the naive DPI projection. Subtracting it here makes the
+# computed chat footprint match what the user actually sees, so the pet_gap is
+# honored instead of being absorbed by the over-estimated height.
+_CHAT_CHROME_W = int(round(18 * DPI_SCALE / 1.25))  # scale chrome with DPI too
+_CHAT_CHROME_H = int(round(47 * DPI_SCALE / 1.25))
+CHAT_WEBVIEW_PHYS_W = int(round(BUBBLE_WIDTH * DPI_SCALE)) - _CHAT_CHROME_W
+CHAT_WEBVIEW_PHYS_H = int(round(BUBBLE_HEIGHT * DPI_SCALE)) - _CHAT_CHROME_H
+
+import uuid
+
+class WebViewApi:
+    def __init__(self, pet):
+        self._pet = pet
+        self._callbacks = {}
+
+    def set_focused(self, focused):
+        self._pet._webview_focused = focused
+        # When the webview loses focus (e.g., user clicked another window),
+        # kick off the focus check so panels and bubble auto-hide.
+        if not focused and getattr(self._pet, "_webview_visible", False):
+            try:
+                self._pet.after(150, self._pet._check_bubble_focus)
+            except Exception:
+                pass
+
+    def _register_callback(self, cid, cb):
+        if cid:
+            self._callbacks[cid] = cb
+
+    def trigger_callback(self, cid, *args):
+        cb = self._callbacks.get(cid)
+        if cb:
+            threading.Thread(target=cb, args=args, daemon=True).start()
+
+    def send_message(self, message):
+        def _run():
+            self._pet._handle_web_submit(message)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def new_conversation(self):
+        def _run():
+            self._pet._handle_web_new_conversation()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def select_product(self, product_name):
+        def _run():
+            self._pet._handle_web_product_switch(product_name)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def analyze_folder(self):
+        def _run():
+            self._pet._handle_web_analyze_folder()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def pick_attachment(self):
+        def _run():
+            self._pet._handle_web_pick_attachment()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def open_last_location(self):
+        def _run():
+            self._pet._open_last_file_location()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def minimize_window(self):
+        self._pet.after(0, self._pet.hide_bubble)
+
+    def show_settings(self):
+        """Open the history/settings window (alarms, themes, skins, API keys)."""
+        self._pet.after(0, self._pet.show_history_window)
+
+    # ── Google Calendar bridge ────────────────────────────────────────────
+    def _gcal(self):
+        import google_calendar as gcal
+        return gcal
+
+    def get_calendar_status(self):
+        try:
+            return self._gcal().status()
+        except Exception as e:
+            return {"connected": False, "reason": str(e)}
+
+    def get_calendar_events(self):
+        try:
+            return self._gcal().list_upcoming()
+        except Exception as e:
+            return {"connected": False, "reason": str(e), "events": []}
+
+    def calendar_connect(self):
+        """Lanza el flujo OAuth (abre navegador 1 vez). Bloquea hasta autorizar."""
+        try:
+            return self._gcal().connect()
+        except Exception as e:
+            return {"connected": False, "reason": str(e)}
+
+    def create_calendar_event(self, payload):
+        try:
+            p = payload or {}
+            attendees = p.get("attendees") or []
+            if isinstance(attendees, str):
+                attendees = [a.strip() for a in attendees.replace(";", ",").split(",") if a.strip()]
+            return self._gcal().create_event(
+                summary=p.get("summary") or "Reunión",
+                start_iso=p.get("start"),
+                end_iso=p.get("end"),
+                description=p.get("description", ""),
+                attendees=attendees,
+                location=p.get("location", ""),
+                add_meet=bool(p.get("addMeet")),
+            )
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+
+    def set_calendar_open(self, is_open):
+        """Abre/cierra el panel Calendario (derecha): ensancha/reposiciona la ventana."""
+        self._pet._calendar_open = bool(is_open)
+        self._pet.after(0, lambda: self._pet._resize_webview_for_panels())
+        return True
+
+    # ── Panel Historial (izquierda) ───────────────────────────────────────
+    def set_history_open(self, is_open):
+        """Abre/cierra el panel Historial (izquierda): ensancha/reposiciona la ventana."""
+        self._pet._history_panel_open = bool(is_open)
+        self._pet.after(0, lambda: self._pet._resize_webview_for_panels())
+        return True
+
+    def get_history_archive(self, limit=200):
+        """Devuelve el historial eterno de conversaciones para el panel."""
+        try:
+            msgs = self._pet._load_memory() or []
+            out = []
+            for m in msgs:
+                role = m.get("role")
+                shown = self._pet._tidy_history_text(role, m.get("text") or "")
+                if shown is None:
+                    continue  # ruido interno: no mostrar
+                out.append({
+                    "role": "user" if role == "Usuario" else "claudy",
+                    "text": shown[:2000],
+                    "time": m.get("time", "") or "",
+                })
+            # Límite tras compactar/filtrar: así se ven los últimos N mensajes limpios.
+            if limit:
+                out = out[-int(limit):]
+            return out
+        except Exception as e:
+            return []
+
+    def open_settings_window(self):
+        """Abre la ventana clásica de Ajustes (alarmas, temas, skins, API keys)."""
+        self._pet.after(0, self._pet.show_history_window)
+        return True
+
+    def speak_message(self, message):
+        def _run():
+            self._pet._speak_text(message)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def set_voice_enabled(self, enabled):
+        """Toggle global TTS desde el botón de voz del chat."""
+        self._pet._voice_enabled = bool(enabled)
+        return self._pet._voice_enabled
+
+    def get_voice_enabled(self):
+        return bool(getattr(self._pet, "_voice_enabled", False))
+
+    def get_drive_status(self):
+        return getattr(self._pet, "_drive_connected", True)
+
+    def get_telegram_status(self):
+        """Estado de conexión con Telegram para el indicador del sidebar.
+        Devuelve el último valor verificado al instante y, si está viejo (>30s),
+        dispara una re-verificación en segundo plano (no bloquea la UI)."""
+        pet = self._pet
+        try:
+            last = getattr(pet, "_telegram_last_check", 0)
+            if time.time() - last > 30:
+                pet._telegram_last_check = time.time()  # evita ráfagas de checks
+                threading.Thread(target=pet._verify_telegram_connection, daemon=True).start()
+        except Exception:
+            pass
+        return getattr(pet, "_telegram_connected", False)
+
+    def get_history(self):
+        raw_msgs = getattr(self._pet, "_current_session_msgs", []) or []
+        serializable = []
+        for m in raw_msgs:
+            serializable.append({
+                "role": m.get("role", "system"),
+                "text": m.get("text", "") or "",
+                "ts": m.get("ts", time.time()),
+                "fileCard": m.get("fileCard", None),
+                "optionsCard": m.get("optionsCard", None),
+                "summaryCard": m.get("summaryCard", None),
+            })
+        return serializable
+
+
+class WebViewStatusWrapper:
+    def __init__(self, pet):
+        self.pet = pet
+
+    def configure(self, text=None, fg=None, **kwargs):
+        if text is not None:
+            self.pet._eval_in_web(f"updateStatusText({json.dumps(text)})")
+
+
+class WebViewEntryWrapper:
+    def __init__(self, pet):
+        self.pet = pet
+        self._val = ""
+
+    def get(self, *args):
+        return self._val
+
+    def delete(self, first, last=None):
+        self._val = ""
+        self.pet._eval_in_web("try { clearInputField(); } catch(e) {}")
+
+    def insert(self, index, text):
+        self._val = text
+        self.pet._eval_in_web(f"try {{ insertInputText({json.dumps(text)}); }} catch(e) {{}}")
+
+    def focus_set(self):
+        self.pet._eval_in_web("try { focusInputField(); } catch(e) {}")
+
+    def config(self, **kwargs):
+        pass
+
+
+class WebViewChatWrapper:
+    def __init__(self, pet):
+        self.pet = pet
+        self._messages = list(getattr(pet, "_current_session_msgs", []) or [])
+
+    def add_user(self, text, ts=None):
+        ts = ts or time.time()
+        self._messages.append({"role": "user", "text": text, "ts": ts})
+        self.pet._current_session_msgs = list(self._messages)
+        self.pet._eval_in_web(f"try {{ addUserMessage({json.dumps(text)}, {ts}); }} catch(e) {{}}")
+
+    def add_bot(self, text, ts=None):
+        ts = ts or time.time()
+        self._messages.append({"role": "bot", "text": text, "ts": ts})
+        self.pet._current_session_msgs = list(self._messages)
+        self.pet._eval_in_web(f"try {{ addBotMessage({json.dumps(text)}, {ts}); }} catch(e) {{}}")
+
+    def begin_stream(self, ts=None):
+        ts = ts or time.time()
+        self.pet._eval_in_web(f"try {{ beginBotStream({ts}); }} catch(e) {{}}")
+
+    def update_stream(self, text):
+        self.pet._eval_in_web(f"try {{ updateBotStream({json.dumps(text)}); }} catch(e) {{}}")
+
+    def end_stream(self, text, ts=None):
+        ts = ts or time.time()
+        self._messages.append({"role": "bot", "text": text, "ts": ts})
+        self.pet._current_session_msgs = list(self._messages)
+        self.pet._eval_in_web(f"try {{ endBotStream({json.dumps(text)}, {ts}); }} catch(e) {{}}")
+
+    def add_system(self, text):
+        self._messages.append({"role": "system", "text": text, "ts": time.time()})
+        self.pet._current_session_msgs = list(self._messages)
+        self.pet._eval_in_web(f"try {{ addSystemMessage({json.dumps(text)}); }} catch(e) {{}}")
+
+    def show_typing(self):
+        self.pet._eval_in_web("try { showTypingIndicator(); } catch(e) {}")
+
+    def hide_typing(self):
+        self.pet._eval_in_web("try { hideTypingIndicator(); } catch(e) {}")
+
+    def clear(self):
+        self._messages.clear()
+        self.pet._current_session_msgs = []
+        self.pet._eval_in_web("try { clearChat(); } catch(e) {}")
+
+    def add_options(self, options, on_select):
+        callback_id = f"opt_cb_{uuid.uuid4().hex}"
+        self.pet.js_api._register_callback(callback_id, on_select)
+        self._messages.append({
+            "role": "bot",
+            "ts": time.time(),
+            "optionsCard": {"options": options, "callbackId": callback_id, "active": True}
+        })
+        self.pet._current_session_msgs = list(self._messages)
+        self.pet._eval_in_web(f"try {{ addOptionsCard({json.dumps(options)}, {json.dumps(callback_id)}); }} catch(e) {{}}")
+
+    def add_summary_card(self, topic, depth, images, references, style, language):
+        self._messages.append({
+            "role": "bot",
+            "ts": time.time(),
+            "summaryCard": {"topic": topic, "depth": depth, "images": images, "references": references, "style": style, "language": language}
+        })
+        self.pet._current_session_msgs = list(self._messages)
+        self.pet._eval_in_web(f"try {{ addSummaryCard({json.dumps(topic)}, {json.dumps(depth)}, {json.dumps(images)}, {json.dumps(references)}, {json.dumps(style)}, {json.dumps(language)}); }} catch(e) {{}}")
+
+    def add_file_card(self, filename, on_open_file=None, on_open_folder=None, message="Listo. Archivo generado"):
+        open_file_id = f"file_cb_{uuid.uuid4().hex}" if on_open_file else None
+        open_folder_id = f"folder_cb_{uuid.uuid4().hex}" if on_open_folder else None
+        
+        if on_open_file:
+            self.pet.js_api._register_callback(open_file_id, on_open_file)
+        if on_open_folder:
+            self.pet.js_api._register_callback(open_folder_id, on_open_folder)
+
+        self._messages.append({
+            "role": "bot",
+            "ts": time.time(),
+            "fileCard": {"filename": filename, "message": message, "openFileId": open_file_id, "openFolderId": open_folder_id}
+        })
+        self.pet._current_session_msgs = list(self._messages)
+        self.pet._eval_in_web(f"try {{ addFileCard({json.dumps(filename)}, {json.dumps(message)}, {json.dumps(open_file_id)}, {json.dumps(open_folder_id)}); }} catch(e) {{}}")
+
+    def load_history(self, messages):
+        self.clear()
+        for m in messages:
+            role = m.get("role", "")
+            text = m.get("text", "")
+            ts = m.get("ts", time.time())
+            fileCard = m.get("fileCard", None)
+            optionsCard = m.get("optionsCard", None)
+            summaryCard = m.get("summaryCard", None)
+            
+            if fileCard:
+                self.add_file_card(fileCard["filename"], None, None, fileCard["message"])
+            elif optionsCard:
+                self.add_options(optionsCard["options"], lambda x: None)
+            elif summaryCard:
+                self.add_summary_card(summaryCard["topic"], summaryCard["depth"], summaryCard["images"], summaryCard["references"], summaryCard["style"], summaryCard["language"])
+            elif role in ("user", "Usuario") or role == "user":
+                self.add_user(text, ts)
+            elif role in ("bot", "Claudy") or role == "bot":
+                self.add_bot(text, ts)
+            else:
+                self.add_system(text)
+
 
 class ClawdPet(tk.Tk):
     BUBBLES = [
@@ -330,60 +776,26 @@ class ClawdPet(tk.Tk):
         self.configure(bg=TRANSPARENT_COLOR)
         self.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
 
-        # ===== One-time 3D Crab Skin Migration =====
-        try:
-            img_3d_path = "C:\\Users\\asus\\.gemini\\antigravity\\brain\\3b517328-c08b-49ef-bf4b-964cd9e198f6\\media__1779411206528.png"
-            migration_flag = os.path.join(SCRIPT_DIR, "crab_3d_migrated.flag")
-            
-            is_migrated_v2 = False
-            if os.path.exists(migration_flag):
-                with open(migration_flag, "r") as f:
-                    if "v2" in f.read():
-                        is_migrated_v2 = True
-            
-            if os.path.exists(img_3d_path) and not is_migrated_v2:
-                import sys
-                import shutil
-                if SCRIPT_DIR not in sys.path:
-                    sys.path.insert(0, SCRIPT_DIR)
-                import skin_swap
-                
-                # 1) Generate the 6 beautiful animated frames in the crab backup folder
-                backup_dir = os.path.join(SCRIPT_DIR, "backup_original")
-                os.makedirs(backup_dir, exist_ok=True)
-                skin_swap.create_animated_frames(img_3d_path, backup_dir, frame_size=128)
-                
-                # 2) Copy those frames to active directory
-                for i in range(6):
-                    shutil.copy(
-                        os.path.join(backup_dir, f"claudy_orbit_frame_{i}.png"),
-                        os.path.join(SCRIPT_DIR, f"claudy_orbit_frame_{i}.png")
-                    )
-                
-                # 3) Write flags to signal that the active skin is now crab
-                flag_path = os.path.join(SCRIPT_DIR, "custom_skin.flag")
-                with open(flag_path, "w") as f:
-                    f.write("source: backup_original (crab)\n")
-                with open(migration_flag, "w") as f:
-                    f.write("3D Crab migration v2 completed successfully!\n")
-        except Exception as e:
-            print(f"Error migrating 3D crab skin: {e}")
+        # ===== One-time 3D Crab Skin Migration (hilo daemon — no bloquea arranque) =====
+        threading.Thread(target=self._migrate_skin_if_needed, daemon=True, name="skin-migration").start()
 
-        # Load pet frames using PIL to threshold the alpha channel (eliminates pink outlines/fringe caused by transparent color blending)
+        # Load frame 0 immediately so the pet appears fast, then load rest lazily
         self.frames = []
+        self._frames_loaded = False
         try:
-            from PIL import ImageTk
-            for path in ASSET_FRAMES:
-                if os.path.exists(path):
-                    pil_img = Image.open(path).convert("RGBA")
-                    r, g, b, a = pil_img.split()
-                    binary_a = a.point(lambda p: 255 if p > 30 else 0)
-                    pil_img.putalpha(binary_a)
-                    self.frames.append(ImageTk.PhotoImage(pil_img))
-                else:
-                    self.frames.append(tk.PhotoImage(file=path))
+            first_path = ASSET_FRAMES[0]
+            if os.path.exists(first_path):
+                pil_img = Image.open(first_path).convert("RGBA")
+                r, g, b, a = pil_img.split()
+                binary_a = a.point(lambda p: 255 if p > 30 else 0)
+                pil_img.putalpha(binary_a)
+                self.frames.append(ImageTk.PhotoImage(pil_img))
+            else:
+                self.frames.append(tk.PhotoImage(file=first_path))
         except Exception:
-            self.frames = [tk.PhotoImage(file=path) for path in ASSET_FRAMES]
+            self.frames = [tk.PhotoImage(file=ASSET_FRAMES[0])]
+        # Schedule lazy loading of frames 1-5 after the window is visible
+        self.after(50, self._load_remaining_frames)
 
         self.frame_index = 0
         self.img = self.frames[self.frame_index]
@@ -395,14 +807,34 @@ class ClawdPet(tk.Tk):
         self.width = self.winfo_reqwidth()
         self.height = self.winfo_reqheight()
 
-        self.base_x = work_area.right - self.width - 20
-        self.base_y = work_area.bottom - self.height - 14
+        self.base_x = work_area.right - self.width
+        self.base_y = work_area.bottom - self.height
         self.geometry(f"{self.width}x{self.height}+{self.base_x}+{self.base_y}")
 
         self.tick = 0
         self.state = "idle"
+        # ---- Motion system: squash&stretch, throw physics, wander, per-skin profiles ----
+        self._skin_name = self._detect_skin_name()
+        self._facing = 1
+        self._render_x = float(self.base_x)
+        self._render_y = float(self.base_y)
+        self._prev_render_y = float(self.base_y)
+        self._base_xf = float(self.base_x)
+        self._base_yf = float(self.base_y)
+        self._throw_active = False
+        self._vx = 0.0
+        self._vy = 0.0
+        self._drag_vx = 0.0
+        self._drag_vy = 0.0
+        self._wander_active = False
+        self._wander_tx = self.base_x
+        self._pil_frames = None
+        self._scale_cache = {}
+        self._cur_scaled_img = None
+        self.after(60, self._rebuild_pil_frames)
         self.bubble_win = None
         self.bubble_interactive = False
+        self._context_popup = None
         self._notebook_win = None
         self._notebook_state = None
         self.quick_session_id = None
@@ -410,6 +842,8 @@ class ClawdPet(tk.Tk):
         self.history_win = None
         self._current_model = None  # Override model from /model command
         self._voice_enabled = False  # /voice on|off — TTS toggle
+        self._streaming_enabled = False  # /stream on|off — live token streaming in the bubble
+        self._streamed = False
         self._plan_mode = False  # /plan on|off — solo planea, no ejecuta
         self._checkpoint_history = []  # F3.1 stack para undo/redo
         self._checkpoint_undone = []
@@ -433,6 +867,8 @@ class ClawdPet(tk.Tk):
 
         self._telegram_bot_app = None
         self._telegram_allowed_users = set()
+        self._telegram_connected = False   # ¿el token es aceptado por Telegram?
+        self._telegram_last_check = 0      # throttle de la verificación getMe
 
         self._cron_jobs = []
         self._cron_file = os.path.join(os.path.expanduser("~"), ".claudy", "cron.json")
@@ -444,6 +880,22 @@ class ClawdPet(tk.Tk):
         self._gateway_port = 8720
         self._gateway_bind_ip = "127.0.0.1"
         self._gateway_auth_token = None
+
+        # Self-improving skills loop (Hermes-style): guard + auto-refine threshold
+        self._refining_skill = False
+        self._skill_refine_threshold = 5  # auto-refine after N uses since last refine
+
+        # Google Drive connection monitor
+        self._drive_connected = True
+        self._bubble_canvas = None
+        self.after(4000, self._check_google_drive)
+
+        # Webview initialization
+        self.webview_win = None
+        self.js_api = WebViewApi(self)
+        self._webview_visible = False
+        self._webview_thread = None
+        self._webview_ready = False  # True once HTML is fully loaded in the webview
 
         self.animate()
 
@@ -462,46 +914,125 @@ class ClawdPet(tk.Tk):
         self.menu = tk.Menu(
             self,
             tearoff=0,
-            bg=THEME["bg_bubble"],
-            fg=THEME["text_primary"],
-            activebackground=THEME["accent"],
-            activeforeground="#ffffff",
-            bd=0,
+            bg="#05091d",
+            fg="#f7f9ff",
+            activebackground="#172862",
+            activeforeground="#58c7ff",
+            disabledforeground="#6574a8",
+            bd=1,
             relief="flat",
-            font=("Segoe UI", 10),
+            borderwidth=1,
+            activeborderwidth=0,
+            font=("Bahnschrift SemiBold", 10),
         )
-        self.menu.add_command(label="Hablar aqui", command=lambda: self.show_chat_bubble("Que tienes en mente?"))
-        self.menu.add_command(label="Abrir terminal", command=self.launch_claudy)
-        self.menu.add_separator()
-        auto_start_label = "Desactivar inicio automatico" if self._is_auto_start_enabled() else "Activar inicio automatico"
-        self.menu.add_command(label=auto_start_label, command=self._toggle_auto_start_menu)
-        self.menu.add_command(label="Ocultar a bandeja", command=self._hide_to_tray)
-        self.menu.add_command(label="Cerrar", command=self.destroy)
-        self.label.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
+        self._rebuild_context_menu()
+        self.label.bind("<Button-3>", self._show_context_popup)
 
-        # Initialize system tray icon.
+
+        # Initialize system tray icon. — 200ms: aparece más rápido en la bandeja
         self._tray_icon = None
-        self.after(1000, self._create_tray_icon)
+        self._in_tray = False
+        self._chat_open_before_tray = False
+        self._portfolio_mode = False
+        self.after(200, self._create_tray_icon)
         # Start Telegram bot if configured
         self.after(1500, self._start_telegram_if_configured)
         # Start Discord bot if configured
         self.after(2500, self._start_discord_if_configured)
         # Start Cron engine
         self.after(3000, self._start_cron_engine)
-        # Start Gateway HTTP server
-        self.after(500, self._start_gateway)
+        # Start Gateway HTTP server — inmediato en hilo daemon
+        self.after(0, self._start_gateway)
         # Initialize SQLite memory
         self.after(2000, self._init_memory_db)
+        # Encrypt config secrets at rest (idempotent, safe)
+        self.after(2200, self._secure_migrate_config)
         # Register built-in tools
         self._register_builtin_tools()
         # Initialize Kanban board
         self.after(3500, self._init_kanban_db)
-        # Saludo inicial: abrir bubble con presentacion + pregunta abierta
-        self.after(4000, self._show_welcome_bubble)
+        # Saludo inicial — 3000ms: espera al webview loaded antes de abrir
+        self.after(3000, self._show_welcome_bubble_when_ready)
         # Hotkey global Alt+Space para abrir/cerrar el bubble desde cualquier app
         self.after(5000, self._register_global_hotkey)
         # Loop de comportamientos idle dinamicos (bostezo, mirada, baile, etc.)
         self.after(12000, self._start_idle_behaviors)
+        # Alarm badge — floating icon above Claudy when alarms are active
+        self._alarm_badge_win = None
+        self.after(4500, self._alarm_badge_refresh)
+
+    def destroy(self):
+        self._is_exiting = True
+        try:
+            super().destroy()
+        except Exception:
+            pass
+        if getattr(self, "webview_win", None) is not None:
+            try:
+                self.webview_win.destroy()
+            except Exception:
+                pass
+        import os
+        os._exit(0)
+
+    def _migrate_skin_if_needed(self):
+        """One-time 3D Crab skin migration — runs in a daemon thread so it never blocks startup."""
+        try:
+            img_3d_path = "C:\\Users\\asus\\.gemini\\antigravity\\brain\\3b517328-c08b-49ef-bf4b-964cd9e198f6\\media__1779411206528.png"
+            migration_flag = os.path.join(SCRIPT_DIR, "crab_3d_migrated.flag")
+
+            is_migrated_v2 = False
+            if os.path.exists(migration_flag):
+                with open(migration_flag, "r") as f:
+                    if "v2" in f.read():
+                        is_migrated_v2 = True
+
+            if os.path.exists(img_3d_path) and not is_migrated_v2:
+                if SCRIPT_DIR not in sys.path:
+                    sys.path.insert(0, SCRIPT_DIR)
+                import skin_swap
+
+                backup_dir = os.path.join(SCRIPT_DIR, "backup_original")
+                os.makedirs(backup_dir, exist_ok=True)
+                skin_swap.create_animated_frames(img_3d_path, backup_dir, frame_size=128)
+
+                for i in range(6):
+                    shutil.copy(
+                        os.path.join(backup_dir, f"claudy_orbit_frame_{i}.png"),
+                        os.path.join(SCRIPT_DIR, f"claudy_orbit_frame_{i}.png")
+                    )
+
+                flag_path = os.path.join(SCRIPT_DIR, "custom_skin.flag")
+                with open(flag_path, "w") as f:
+                    f.write("source: backup_original (crab)\n")
+                with open(migration_flag, "w") as f:
+                    f.write("3D Crab migration v2 completed successfully!\n")
+        except Exception as e:
+            print(f"Error migrating 3D crab skin: {e}")
+
+    def _load_remaining_frames(self):
+        """Lazily load frames 1-5 after the pet window is already visible with frame 0."""
+        try:
+            for path in ASSET_FRAMES[1:]:
+                if os.path.exists(path):
+                    pil_img = Image.open(path).convert("RGBA")
+                    r, g, b, a = pil_img.split()
+                    binary_a = a.point(lambda p: 255 if p > 30 else 0)
+                    pil_img.putalpha(binary_a)
+                    self.frames.append(ImageTk.PhotoImage(pil_img))
+                else:
+                    self.frames.append(tk.PhotoImage(file=path))
+            self._frames_loaded = True
+        except Exception as e:
+            print(f"[lazy frames] error: {e}")
+            # Fallback: fill remaining with tk.PhotoImage
+            while len(self.frames) < len(ASSET_FRAMES):
+                idx = len(self.frames)
+                try:
+                    self.frames.append(tk.PhotoImage(file=ASSET_FRAMES[idx]))
+                except Exception:
+                    break
+            self._frames_loaded = True
 
     def _register_global_hotkey(self):
         def _worker():
@@ -532,8 +1063,294 @@ class ClawdPet(tk.Tk):
             return
         self.show_chat_bubble()
 
+    def _generate_web_avatar(self):
+        """Convert the chroma-key sprite (#ff00ff background) to a PNG with real
+        alpha transparency so it renders cleanly in the webview HTML."""
+        try:
+            src = os.path.join(SCRIPT_DIR, "claudy_orbit_frame_0.png")
+            dst = os.path.join(SCRIPT_DIR, "claudy_web_avatar.png")
+            # Only regenerate if source is newer than destination
+            if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+                return
+            img = Image.open(src).convert("RGBA")
+            pixels = img.load()
+            w, h = img.size
+            # Replace magenta (#ff00ff) pixels with full transparency
+            for x in range(w):
+                for y in range(h):
+                    r, g, b, a = pixels[x, y]
+                    if r > 240 and g < 15 and b > 240:
+                        pixels[x, y] = (0, 0, 0, 0)
+            img.save(dst, "PNG")
+        except Exception as e:
+            print(f"[web avatar] error: {e}")
+
+    def _resize_webview_for_panels(self):
+        """Ensancha/restaura la ventana de chat según los paneles abiertos:
+        Historial crece hacia la IZQUIERDA y Calendario hacia la DERECHA, dejando
+        la columna del chat anclada en su posición. Best-effort: nunca rompe el chat."""
+        win = getattr(self, "webview_win", None)
+        if win is None:
+            return
+        logical_w, logical_h, phys_x, phys_y, _, _ = self._webview_layout_for_panels()
+        try:
+            win.resize(logical_w, logical_h)
+        except Exception:
+            pass
+        try:
+            win.move(*physical_to_webview(phys_x, phys_y))
+        except Exception:
+            pass
+
+    def _webview_layout_for_panels(self):
+        """Return logical size plus physical position/footprint for open side panels.
+
+        The chat column keeps its normal anchor when there is room. If the calendar
+        would spill off the right edge, the whole WebView slides left; when a panel
+        closes, the clamp naturally lets it slide right again.
+        """
+        hist = HISTORY_PANEL_W if getattr(self, "_history_panel_open", False) else 0
+        cal = CALENDAR_PANEL_W if getattr(self, "_calendar_open", False) else 0
+        requested_logical_w = BUBBLE_WIDTH + hist + cal
+        work_w = max(1, work_area.right - work_area.left)
+        max_logical_w = max(BUBBLE_WIDTH, int((work_w + _CHAT_CHROME_W) / DPI_SCALE))
+        logical_w = min(requested_logical_w, max_logical_w)
+        logical_h = BUBBLE_HEIGHT
+
+        phys_w = int(round(logical_w * DPI_SCALE)) - _CHAT_CHROME_W
+        phys_h = CHAT_WEBVIEW_PHYS_H
+
+        base_x, base_y = self.bubble_position(CHAT_WEBVIEW_PHYS_W, CHAT_WEBVIEW_PHYS_H)
+        desired_x = base_x - int(round(hist * DPI_SCALE))
+        desired_y = base_y
+
+        if desired_x + phys_w > work_area.right:
+            desired_x = work_area.right - phys_w
+        if desired_x < work_area.left:
+            desired_x = work_area.left
+        if desired_y + phys_h > work_area.bottom:
+            desired_y = work_area.bottom - phys_h
+        if desired_y < work_area.top:
+            desired_y = work_area.top
+
+        return logical_w, logical_h, int(desired_x), int(desired_y), int(phys_w), int(phys_h)
+
+    def _run_webview_main_thread(self):
+        try:
+            # Generate web-friendly avatar with real transparency (no magenta chroma key)
+            self._generate_web_avatar()
+            
+            html_path = os.path.abspath(os.path.join(SCRIPT_DIR, "chat.html"))
+            html_url = f"file:///{html_path.replace(chr(92), '/')}"
+            
+            # Create window VISIBLE but OFF-SCREEN (-9999, -9999).
+            # Using hidden=True + later show() causes black window on Windows
+            # because WebView2 doesn't render transparent frameless windows
+            # that were initially hidden.
+            # pywebview treats width/height as DPI-unaware logical pixels.
+            # Pass BUBBLE_WIDTH/HEIGHT directly so WebView2 renders the HTML at
+            # its designed CSS pixel size. The window will end up *physically*
+            # ~BUBBLE_WIDTH*DPI_SCALE x BUBBLE_HEIGHT*DPI_SCALE — see CHAT_WEBVIEW_PHYS_W/H.
+            self.webview_win = webview.create_window(
+                title="Claudy Chat",
+                url=html_url,
+                width=BUBBLE_WIDTH,
+                height=BUBBLE_HEIGHT,
+                frameless=True,
+                transparent=True,
+                background_color='#000000',
+                js_api=self.js_api,
+                hidden=False,
+                on_top=True,
+                x=-9999,
+                y=-9999
+            )
+            
+            # Signal when the HTML content is fully loaded and rendered
+            def _on_webview_loaded():
+                self._webview_ready = True
+                print("[webview] HTML loaded successfully — _webview_ready = True")
+            self.webview_win.events.loaded += _on_webview_loaded
+            
+            def _on_webview_closing():
+                if getattr(self, "_is_exiting", False):
+                    print("[webview] Exiting application, allowing webview to close.")
+                    return True
+                print("[webview] Close event intercepted — calling hide_bubble() instead.")
+                self.after(0, self.hide_bubble)
+                return False
+            self.webview_win.events.closing += _on_webview_closing
+            
+            # Start pywebview loop
+            print("[webview] Starting webview.start() on main thread...")
+            webview.start()
+        except Exception as e:
+            print(f"[webview init] error starting webview: {e}")
+            self.webview_win = None
+
+    def _eval_in_web(self, script):
+        if getattr(self, "webview_win", None) is not None:
+            try:
+                self.webview_win.evaluate_js(script)
+            except Exception as e:
+                pass
+
+    def _handle_web_submit(self, prompt):
+        # El input del webview es un textarea (permite saltos con Shift+Enter), pero
+        # se inyecta en un Entry de una sola línea. Colapsamos los saltos a espacios
+        # para que el prompt completo llegue intacto al dispatch (no se trunque).
+        if prompt:
+            prompt = " ".join(prompt.split())
+        self.after(0, lambda: self._trigger_submit_with_text(prompt))
+
+    def _handle_web_new_conversation(self):
+        try:
+            self._compress_and_save_to_obsidian()
+        except Exception as ex:
+            print(f"[nueva conv] compress error: {ex}")
+        self._current_session_msgs = []
+        self._chat_view = WebViewChatWrapper(self)
+        self._chat_view.clear()
+        self._chat_view.add_system("Hola Felipe, ¿en qué te ayudo?")
+        self._eval_in_web("focusInputField()")
+
+    def _handle_web_product_switch(self, product_name):
+        self._active_product = product_name
+        self._portfolio_mode = (product_name == "Mi Portafolio")
+        try:
+            from qcore_products import build_context_prompt, PRODUCT_CONTEXTS
+            self._product_context = build_context_prompt(product_name)
+            pinfo = PRODUCT_CONTEXTS.get(product_name, {})
+            desc = pinfo.get("description", "")
+            mods = pinfo.get("modules", [])
+            summary_lines = [f"🔄 Contexto: **{product_name}** ({pinfo.get('tag', '')})", f"_{desc}_"]
+            if mods:
+                summary_lines.append(f"\n📦 {len(mods)} módulos disponibles:")
+                for m in mods[:8]:
+                    summary_lines.append(f"  • {m}")
+                if len(mods) > 8:
+                    summary_lines.append(f"  ... y {len(mods) - 8} más")
+            if pinfo.get("port"):
+                summary_lines.append(f"\n💡 Di 'inicia {product_name.lower()}' para lanzar en puerto {pinfo['port']}")
+            summary = "\n".join(summary_lines)
+        except Exception:
+            self._product_context = f"Producto activo: {product_name}"
+            summary = f"Contexto cambiado a: {product_name}"
+            
+        self._chat_view = WebViewChatWrapper(self)
+        self._chat_view.add_system(summary)
+
+    def _handle_web_analyze_folder(self):
+        def _dialog():
+            self._is_picking_file = True
+            try:
+                from tkinter import filedialog
+                path = filedialog.askdirectory(title="Carpeta para analizar (recursivo)")
+                self._is_picking_file = False
+                if not path:
+                    return
+                
+                status = WebViewStatusWrapper(self)
+                self._chat_view = WebViewChatWrapper(self)
+                self._chat_entry = WebViewEntryWrapper(self)
+                self._status_label = status
+                
+                self._chat_view.show_typing()
+                status.configure(text="Iniciando analisis...")
+                
+                def _run():
+                    try:
+                        result = self._analyze_folder_deep(path, status)
+                    except Exception as e:
+                        result = (f"Error: {e}", "")
+                        
+                    def _show_result():
+                        analysis_text, saved_path = result if isinstance(result, tuple) else (result, "")
+                        self._chat_view.hide_typing()
+                        self._chat_view.add_bot(analysis_text)
+                        if saved_path and os.path.exists(saved_path):
+                            self._remember_file_artifact(saved_path)
+                            self._chat_view.add_file_card(
+                                filename=os.path.basename(saved_path),
+                                on_open_file=lambda p=saved_path: self._open_path_file(p),
+                                on_open_folder=lambda p=saved_path: self._open_path_location(p),
+                                message="Abrir reporte completo"
+                            )
+                        status.configure(text="Enter envía | Esc cierra")
+                    self.after(0, _show_result)
+                threading.Thread(target=_run, daemon=True).start()
+            except Exception as e:
+                self._is_picking_file = False
+                print(f"[webview folder picker] error: {e}")
+        self.after(0, _dialog)
+
+    def _handle_web_pick_attachment(self):
+        def _dialog():
+            self._is_picking_file = True
+            try:
+                from tkinter import filedialog
+                paths = filedialog.askopenfilenames(
+                    title="Adjuntar archivo para analizar",
+                    filetypes=[
+                        ("Archivos compatibles", "*.pdf *.docx *.xlsx *.xls *.pptx *.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                        ("PDF", "*.pdf"),
+                        ("Word", "*.docx"),
+                        ("Excel", "*.xlsx *.xls"),
+                        ("PowerPoint", "*.pptx"),
+                        ("Imagenes", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                        ("Todos los archivos", "*.*"),
+                    ],
+                )
+                self._is_picking_file = False
+                if not paths:
+                    return
+                    
+                status = WebViewStatusWrapper(self)
+                entry = WebViewEntryWrapper(self)
+                self._chat_view = WebViewChatWrapper(self)
+                self._status_label = status
+                self._chat_entry = entry
+                
+                question = self._entry_attachment_question(entry)
+                for path in list(paths)[:6]:
+                    self._analyze_attachment_file(path, status, None, question=question)
+                if len(paths) > 6:
+                    self._chat_view.add_system("Para no saturar la sesion, analizare solo los primeros 6 archivos.")
+            except Exception as e:
+                self._is_picking_file = False
+                print(f"[webview attachment picker] error: {e}")
+        self.after(0, _dialog)
+
+    def _trigger_submit_with_text(self, text):
+        entry = getattr(self, "_chat_entry_widget", None)
+        submit_fn = getattr(self, "_submit_fn", None)
+        if entry and submit_fn:
+            try:
+                if hasattr(entry, "original_delete"):
+                    entry.original_delete(0, tk.END)
+                else:
+                    entry.delete(0, tk.END)
+                if hasattr(entry, "original_insert"):
+                    entry.original_insert(0, text)
+                else:
+                    entry.insert(0, text)
+            except Exception as e:
+                print(f"[webview trigger submit] text inject error: {e}")
+            try:
+                submit_fn()
+            except Exception as e:
+                print(f"[webview trigger submit] run submit error: {e}")
+
+    def _show_welcome_bubble_when_ready(self, _attempts=0):
+        """Wait for the webview HTML to be fully loaded before showing the welcome chat.
+        Retries every 250ms for up to ~8 seconds, then opens anyway (Tkinter fallback)."""
+        MAX_ATTEMPTS = 32  # 32 * 250ms = 8 seconds max wait
+        if not self._webview_ready and _attempts < MAX_ATTEMPTS:
+            self.after(250, lambda: self._show_welcome_bubble_when_ready(_attempts + 1))
+            return
+        self._show_welcome_bubble()
+
     def _show_welcome_bubble(self):
-        import random
         saludos = [
             "Hola, soy Claudy, tu asistente personal. ¿En qué andas hoy?",
             "Buenas, soy Claudy. ¿Qué tema te tiene la cabeza ocupada hoy?",
@@ -545,6 +1362,162 @@ class ClawdPet(tk.Tk):
             self.show_chat_bubble(text=random.choice(saludos))
         except Exception:
             pass
+
+    def _restart_app(self):
+        """Re-launch pet.py with the current Python interpreter, then close this instance."""
+        import sys
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 8)
+            subprocess.Popen(
+                [sys.executable, __file__] + sys.argv[1:],
+                creationflags=flags,
+                close_fds=True,
+            )
+        except Exception as e:
+            print(f"Restart error: {e}")
+        self.destroy()
+
+
+    def _alarm_badge_refresh(self):
+        """Check for pending alarms every 5s and show/hide the badge icon."""
+        try:
+            alarms = self._load_alarms()
+            # Filter only future alarms
+            import time as _t
+            pending = [a for a in alarms if a.get("fire", 0) > _t.time()]
+            if pending:
+                self._alarm_badge_show(len(pending))
+            else:
+                self._alarm_badge_hide()
+        except Exception:
+            self._alarm_badge_hide()
+        # Schedule next refresh
+        self.after(5000, self._alarm_badge_refresh)
+
+    def _alarm_badge_show(self, count=1):
+        """Create or update the floating alarm badge above Claudy."""
+        # Compute position: centered above the pet sprite
+        try:
+            pet_x = self.winfo_x()
+            pet_y = self.winfo_y()
+            pet_w = self.winfo_width()
+        except Exception:
+            return
+
+        badge_size = 28
+        bx = pet_x + pet_w // 2 - badge_size // 2
+        by = pet_y - badge_size - 4  # 4px gap above pet
+
+        if self._alarm_badge_win is None or not self._alarm_badge_win.winfo_exists():
+            win = tk.Toplevel(self)
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.configure(bg=TRANSPARENT_COLOR)
+            win.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+            self._alarm_badge_win = win
+
+            # Pulsing circular badge
+            canvas = tk.Canvas(
+                win,
+                width=badge_size, height=badge_size,
+                bg=TRANSPARENT_COLOR,
+                highlightthickness=0,
+            )
+            canvas.pack()
+            self._alarm_badge_canvas = canvas
+
+            # Click → show alarm list in chat
+            def _on_badge_click(e):
+                msg = self._alarm_list()
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    if not (self.bubble_win and self.bubble_win.winfo_exists()):
+                        self.show_chat_bubble()
+                    chat.add_bot(msg)
+                else:
+                    self.show_chat_bubble(msg)
+
+            canvas.bind("<Button-1>", _on_badge_click)
+            canvas.bind("<Enter>", lambda e: canvas.configure(cursor="hand2"))
+            canvas.bind("<Leave>", lambda e: canvas.configure(cursor=""))
+
+            # Start pulse animation
+            self._alarm_badge_pulse = 0
+            self._alarm_badge_animate()
+        else:
+            win = self._alarm_badge_win
+
+        # Update label (count)
+        self._alarm_badge_count = count
+        win.geometry(f"{badge_size}x{badge_size}+{bx}+{by}")
+        win.deiconify()
+
+    def _alarm_badge_animate(self):
+        """Pulsing glow animation for the alarm badge."""
+        if self._alarm_badge_win is None or not self._alarm_badge_win.winfo_exists():
+            return
+        try:
+            canvas = self._alarm_badge_canvas
+            canvas.delete("all")
+            pulse = getattr(self, "_alarm_badge_pulse", 0)
+            count = getattr(self, "_alarm_badge_count", 1)
+            size = 28
+
+            # Reposition to follow pet each frame
+            try:
+                pet_x = self.winfo_x()
+                pet_y = self.winfo_y()
+                pet_w = self.winfo_width()
+                bx = pet_x + pet_w // 2 - size // 2
+                by = pet_y - size - 4
+                self._alarm_badge_win.geometry(f"{size}x{size}+{bx}+{by}")
+            except Exception:
+                pass
+
+            # Pulse: alternate between bright/dim using sine
+            import math as _m
+            glow = 0.65 + 0.35 * _m.sin(pulse * 0.2)
+            r = int(255 * glow)
+            g = int(80 * glow)
+            fill_col = f"#{r:02x}{g:02x}00"
+
+            # Outer glow ring (pulsing radius)
+            glow_r = int(11 + 3 * _m.sin(pulse * 0.2))
+            canvas.create_oval(
+                size // 2 - glow_r - 2, size // 2 - glow_r - 2,
+                size // 2 + glow_r + 2, size // 2 + glow_r + 2,
+                fill=fill_col, outline="",
+            )
+            # Solid circle
+            canvas.create_oval(
+                size // 2 - 11, size // 2 - 11,
+                size // 2 + 11, size // 2 + 11,
+                fill="#ff4500", outline="#ff8c00", width=1,
+            )
+            # Bell icon
+            canvas.create_text(
+                size // 2, size // 2,
+                text="⏰", font=("Segoe UI", 11), fill="white",
+            )
+            # Count badge (if > 1)
+            if count > 1:
+                canvas.create_oval(size - 10, 0, size, 10, fill="#ff0000", outline="")
+                canvas.create_text(size - 5, 5, text=str(count), font=("Segoe UI", 6, "bold"), fill="white")
+
+            self._alarm_badge_pulse = pulse + 1
+        except Exception:
+            pass
+        self.after(80, self._alarm_badge_animate)
+
+
+    def _alarm_badge_hide(self):
+        """Hide the alarm badge if no pending alarms."""
+        if self._alarm_badge_win and self._alarm_badge_win.winfo_exists():
+            try:
+                self._alarm_badge_win.withdraw()
+            except Exception:
+                pass
+
 
     def _advance_frame(self, speed=4, mode="loop"):
         """Update self.frame_index with ping-pong or loop, respecting speed."""
@@ -586,14 +1559,223 @@ class ClawdPet(tk.Tk):
         pull = (220 - dist) / 220.0 * max_pull
         return int(dx / dist * pull), int(dy / dist * pull)
 
-    def _is_crab(self):
-        """Detecta si el skin actual es cangrejo."""
+    # ------------------------------------------------------------------
+    # Motion system: per-skin profiles, squash & stretch, throw, wander
+    # ------------------------------------------------------------------
+    def _detect_skin_name(self):
+        """Read the skin flag once; returns 'crab' | 'custom' | 'robot'."""
         try:
             flag = os.path.join(SCRIPT_DIR, "custom_skin.flag")
             if not os.path.exists(flag):
-                return False
+                return "robot"
             with open(flag, "r", encoding="utf-8", errors="replace") as f:
-                return "crab" in f.read().lower()
+                txt = f.read().lower()
+            return "crab" if "crab" in txt else "custom"
+        except Exception:
+            return "robot"
+
+    def _skin_kind(self):
+        return getattr(self, "_skin_name", None) or "robot"
+
+    def _motion_profile(self):
+        """Per-skin motion constants (easing, physics, wander)."""
+        if self._skin_kind() == "crab":
+            return {
+                "interval": 40, "ease": 0.40, "squash_gain": 0.009, "max_stretch": 0.08,
+                "friction": 0.90, "restitution": 0.50, "gravity": 0.0,
+                "wander_speed": 3.4, "wander_chance": 0.32,
+            }
+        return {
+            "interval": 40, "ease": 0.35, "squash_gain": 0.011, "max_stretch": 0.11,
+            "friction": 0.92, "restitution": 0.55, "gravity": 0.0,
+            "wander_speed": 2.2, "wander_chance": 0.13,
+        }
+
+    def _rebuild_pil_frames(self):
+        """(Re)load PIL source frames for squash/stretch from the current skin PNGs."""
+        frames = []
+        for p in ASSET_FRAMES:
+            try:
+                im = Image.open(p).convert("RGBA")
+                _r, _g, _b, a = im.split()
+                im.putalpha(a.point(lambda v: 255 if v > 30 else 0))
+                frames.append(im)
+            except Exception:
+                frames.append(None)
+        self._pil_frames = frames
+        self._scale_cache = {}
+
+    def _pil_frame(self, idx):
+        if not self._pil_frames:
+            self._rebuild_pil_frames()
+        if not self._pil_frames or idx >= len(self._pil_frames):
+            return None
+        return self._pil_frames[idx]
+
+    def _scaled_label_image(self, idx, sx, sy, flip):
+        """ImageTk image (canvas-sized) with the sprite scaled and anchored
+        bottom-center, optionally mirrored. Cached by bucketed params."""
+        src = self._pil_frame(idx)
+        if src is None:
+            return None
+        W, H = self.width, self.height
+        key = (idx, round(sx, 2), round(sy, 2), bool(flip))
+        cached = self._scale_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            nw = max(1, int(round(W * sx)))
+            nh = max(1, min(H, int(round(H * sy))))
+            im = src
+            if flip:
+                flip_const = getattr(getattr(Image, "Transpose", Image), "FLIP_LEFT_RIGHT", 0)
+                im = im.transpose(flip_const)
+            im = im.resize((nw, nh), resample)
+            canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            canvas.paste(im, ((W - nw) // 2, H - nh), im)
+            photo = ImageTk.PhotoImage(canvas)
+        except Exception:
+            return None
+        if len(self._scale_cache) > 240:
+            self._scale_cache.clear()
+        self._scale_cache[key] = photo
+        return photo
+
+    def _apply_sprite_transform(self, vy, prof):
+        """Squash & stretch driven by vertical velocity + horizontal facing flip."""
+        flip = self._facing < 0
+        s = max(-prof["max_stretch"], min(prof["max_stretch"], -vy * prof["squash_gain"]))
+        sy = 1.0 + s
+        sx = 1.0 - s * 0.6
+        if abs(sy - 1.0) < 0.025 and not flip:
+            try:
+                if 0 <= self.frame_index < len(self.frames):
+                    self.label.configure(image=self.frames[self.frame_index])
+            except Exception:
+                pass
+            return
+        img = self._scaled_label_image(self.frame_index, sx, sy, flip)
+        if img is not None:
+            self._cur_scaled_img = img
+            try:
+                self.label.configure(image=img)
+            except Exception:
+                pass
+
+    def _begin_throw(self, vx, vy):
+        """Start inertial throw from a drag flick (small flicks just clamp)."""
+        mag = (vx * vx + vy * vy) ** 0.5
+        if mag < 2.0:
+            try:
+                self._snap_to_edge()
+            except Exception:
+                pass
+            return
+        cap = 60.0
+        if mag > cap:
+            vx = vx / mag * cap
+            vy = vy / mag * cap
+        self._base_xf = float(self.base_x)
+        self._base_yf = float(self.base_y)
+        self._vx = float(vx)
+        self._vy = float(vy)
+        self._throw_active = True
+        self._wander_active = False
+        self._facing = 1 if vx >= 0 else -1
+
+    def _step_throw(self, prof):
+        if not getattr(self, "_throw_active", False):
+            return
+        self._vx *= prof["friction"]
+        self._vy = self._vy * prof["friction"] + prof["gravity"]
+        self._base_xf += self._vx
+        self._base_yf += self._vy
+        left = work_area.left
+        right = work_area.right - self.width
+        top = work_area.top
+        bottom = work_area.bottom - self.height
+        if self._base_xf <= left:
+            self._base_xf = left
+            self._vx = -self._vx * prof["restitution"]
+        elif self._base_xf >= right:
+            self._base_xf = right
+            self._vx = -self._vx * prof["restitution"]
+        if self._base_yf <= top:
+            self._base_yf = top
+            self._vy = -self._vy * prof["restitution"]
+        elif self._base_yf >= bottom:
+            self._base_yf = bottom
+            self._vy = -self._vy * prof["restitution"]
+        self.base_x = int(round(self._base_xf))
+        self.base_y = int(round(self._base_yf))
+        if abs(self._vx) < 0.6 and abs(self._vy) < 0.6:
+            self._throw_active = False
+            self.base_x = int(round(max(left, min(self._base_xf, right))))
+            self.base_y = int(round(max(top, min(self._base_yf, bottom))))
+            self._base_xf = float(self.base_x)
+            self._base_yf = float(self.base_y)
+            try:
+                self._sync_minimized_bubble()
+            except Exception:
+                pass
+
+    def _start_wander(self):
+        """Pick a destination on screen and walk to it (autonomous locomotion)."""
+        try:
+            import random as _r
+            if getattr(self, "_throw_active", False) or self.bubble_interactive:
+                return
+            left = work_area.left
+            right = max(left, work_area.right - self.width)
+            tx = self.base_x
+            for _ in range(6):
+                cand = _r.randint(left, right)
+                if abs(cand - self.base_x) >= 80:
+                    tx = cand
+                    break
+            self._wander_tx = tx
+            self._wander_active = True
+            self._base_xf = float(self.base_x)
+            self._facing = 1 if tx >= self.base_x else -1
+            if self._skin_kind() == "crab":
+                self.state = "scuttle" if _r.random() < 0.4 else "crab_walk"
+            else:
+                self.state = "walk"
+            self._state_start_tick = self.tick
+        except Exception:
+            pass
+
+    def _step_wander(self, prof):
+        if getattr(self, "_throw_active", False):
+            self._wander_active = False
+            return
+        if not getattr(self, "_wander_active", False):
+            return
+        if self.state not in ("walk", "crab_walk", "scuttle"):
+            self._wander_active = False
+            return
+        dx = self._wander_tx - self._base_xf
+        step = prof["wander_speed"]
+        if abs(dx) <= step:
+            self._base_xf = float(self._wander_tx)
+            self._wander_active = False
+            self.state = "idle"
+        else:
+            self._base_xf += step if dx > 0 else -step
+            self._facing = 1 if dx > 0 else -1
+        right = max(work_area.left, work_area.right - self.width)
+        self._base_xf = max(work_area.left, min(self._base_xf, right))
+        self.base_x = int(round(self._base_xf))
+
+    def _is_crab(self):
+        """Detecta si el skin actual es cangrejo (cacheado, sin I/O por frame)."""
+        name = getattr(self, "_skin_name", None)
+        if name is not None:
+            return name == "crab"
+        try:
+            self._skin_name = self._detect_skin_name()
+            return self._skin_name == "crab"
         except Exception:
             return False
 
@@ -641,7 +1823,9 @@ class ClawdPet(tk.Tk):
         if state in ("idle", "yawn", "look", "sleeping"):
             cur_dx, cur_dy = self._cursor_offset(max_pull=3)
 
-        # --- Motion per state ---
+        # --- Per-state motion: each branch only computes (offset_x, offset_y).
+        #     Physics, wander, easing and squash/stretch are applied once below. ---
+        offset_x, offset_y = 0, 0
         if state == "idle":
             offset_y = int(math.sin(self.tick / 30) * 2.5)
             offset_x = int(math.cos(self.tick / 50) * 1)
@@ -654,103 +1838,60 @@ class ClawdPet(tk.Tk):
                 offset_y -= 5
             offset_x += cur_dx
             offset_y += cur_dy
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "hover":
-            # Energetic, playful wiggle + gentle floating (feels alive and premium when cursor enters)
             offset_y = int(math.sin(self.tick / 6) * 4.5) - 4
             offset_x = int(math.sin(self.tick / 3) * 2.5)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "thinking":
-            offset_y = int(math.sin(self.tick / 6) * 4)
+            offset_y = int(math.sin(self.tick / 6) * 4) - 2
             offset_x = int(math.cos(self.tick / 8) * 3)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y - 2}")
-            self.tick += 1
         elif state == "happy":
             offset_y = -int(abs(math.sin(self.tick / 4)) * 9)
             offset_x = int(math.sin(self.tick / 7) * 2)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "talking":
-            # Animated bouncing sway with smooth head-bobbing speech feel
             offset_x = int(math.sin(self.tick / 4) * 4.5)
             offset_y = -int(abs(math.sin(self.tick / 3.5)) * 5)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "wave":
-            # Bigger horizontal wave
             offset_x = int(math.sin(self.tick / 4) * 8)
             offset_y = int(abs(math.sin(self.tick / 8)) * -2)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "dance":
-            # Hip sway + small bob, like a beat
-            beat = self.tick // 6
-            x_amp = 6
-            offset_x = int(math.sin(self.tick / 4) * x_amp)
+            offset_x = int(math.sin(self.tick / 4) * 6)
             offset_y = -int(abs(math.sin(self.tick / 3)) * 6)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "sleeping":
-            # Slow, rhythmic, deep breathing wave
             offset_y = int(math.sin(self.tick / 40) * 3.0) + 2
-            offset_x = int(math.cos(self.tick / 80) * 1.0)
-            offset_x += cur_dx
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
+            offset_x = int(math.cos(self.tick / 80) * 1.0) + cur_dx
         elif state == "surprised":
-            # Sharp upward jump then settle
             elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
             if elapsed < 10:
                 offset_y = -int(elapsed * 1.6)
             else:
                 offset_y = -int(max(0, 16 - (elapsed - 10) * 1.5))
-            self.geometry(f"+{self.base_x}+{self.base_y + offset_y}")
-            self.tick += 1
+            offset_x = 0
         elif state == "yawn":
-            # Slow stretch up then down
             elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
             offset_y = int(-abs(math.sin(elapsed / 24)) * 6) + cur_dy
             offset_x = cur_dx
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "look":
-            # Look around: slow horizontal scan
             offset_x = int(math.sin(self.tick / 20) * 5)
             offset_y = int(math.cos(self.tick / 40) * 1.5)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "shy":
-            # Small backward shrink (simulated with downward drift)
             offset_y = int(math.sin(self.tick / 8) * 1) + 4
             offset_x = -3
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "notebook":
-            # Subtle typing nod: tiny vertical bobs synced to key taps
             offset_y = int(abs(math.sin(self.tick / 2.2)) * 2)
             offset_x = int(math.sin(self.tick / 5) * 1)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
-        # --- Crab-specific motions ---
+        elif state == "walk":
+            # Walking bob; horizontal travel handled by _step_wander (base_x).
+            offset_y = int(abs(math.sin(self.tick / 4)) * -3)
+            offset_x = int(math.sin(self.tick / 7) * 1)
+        # --- Crab-specific motions (lateral travel handled by _step_wander) ---
         elif state == "crab_walk":
-            # Sideways march: zigzag amplio en X, mini-bobbing en Y
-            elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
-            direction = getattr(self, "_crab_dir", 1)
-            offset_x = int(math.sin(self.tick / 6) * 2) + direction * (elapsed // 6) % 24 - 12
-            offset_y = int(abs(math.sin(self.tick / 3)) * -3)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
+            offset_x = int(math.sin(self.tick / 3) * 2)
+            offset_y = int(abs(math.sin(self.tick / 2.5)) * -3)
         elif state == "pinch":
-            # Pinzas al aire: rebote vertical agresivo + temblor horizontal
             elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
             offset_y = -int(abs(math.sin(elapsed / 3)) * 10)
             offset_x = int(math.sin(self.tick / 1.5) * 4)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "hide":
-            # Esconderse: hundirse rapido en Y, vibracion leve, luego asomarse
             elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
             if elapsed < 8:
                 offset_y = int(elapsed * 2)
@@ -759,38 +1900,53 @@ class ClawdPet(tk.Tk):
             else:
                 offset_y = max(0, 16 - int((elapsed - 30) * 1.5))
             offset_x = int(math.sin(self.tick / 5) * 1)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "bubble":
-            # Burbujear: rebote suave hacia arriba como si soltara burbujas
             offset_y = -int(abs(math.sin(self.tick / 8)) * 4)
             offset_x = int(math.sin(self.tick / 12) * 2)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "dig":
-            # Cavar: oscilacion fuerte X-Y rapida, simula movimiento de patas escarbando
             offset_x = int(math.sin(self.tick / 2) * 5)
             offset_y = int(math.cos(self.tick / 2) * 3) + 2
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         elif state == "scuttle":
-            # Carrera lateral rapida (huida) — un solo trip ida y vuelta
-            elapsed = self.tick - getattr(self, "_state_start_tick", self.tick)
-            phase = (elapsed % 60) / 60.0
-            if phase < 0.5:
-                offset_x = int(phase * 60) - 15
-            else:
-                offset_x = int((1.0 - phase) * 60) - 15
+            offset_x = int(math.sin(self.tick / 2) * 3)
             offset_y = int(abs(math.sin(self.tick / 2)) * -4)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
-            self.tick += 1
         else:
-            # Unknown state: fall back to idle motion
             offset_y = int(math.sin(self.tick / 30) * 2.5)
             offset_x = int(math.cos(self.tick / 50) * 1)
-            self.geometry(f"+{self.base_x + offset_x}+{self.base_y + offset_y}")
+
+        # --- Unified motion commit: physics + wander + easing + squash/stretch ---
+        prof = self._motion_profile()
+        if state == "bounce":
+            # run_bounce owns the geometry while bouncing; just keep ticking.
             self.tick += 1
-        self.after(40, self.animate)
+            self.after(prof["interval"], self.animate)
+            return
+        try:
+            self._step_throw(prof)
+            self._step_wander(prof)
+        except Exception:
+            pass
+        target_x = self.base_x + offset_x
+        target_y = self.base_y + offset_y
+        if getattr(self, "_dragging", False):
+            # Stick exactly to the cursor while dragging (no idle bob).
+            self._render_x = float(self.base_x)
+            self._render_y = float(self.base_y)
+        elif getattr(self, "_throw_active", False):
+            self._render_x = float(target_x)
+            self._render_y = float(target_y)
+        else:
+            ease = prof["ease"]
+            self._render_x += (target_x - self._render_x) * ease
+            self._render_y += (target_y - self._render_y) * ease
+        try:
+            vy = self._render_y - self._prev_render_y
+            self._prev_render_y = self._render_y
+            self._apply_sprite_transform(vy, prof)
+        except Exception:
+            pass
+        self.geometry(f"+{int(round(self._render_x))}+{int(round(self._render_y))}")
+        self.tick += 1
+        self.after(prof["interval"], self.animate)
 
     def _set_state_briefly(self, new_state, duration_ms=1200):
         """Set a transient state, then return to idle (unless interrupted)."""
@@ -818,6 +1974,12 @@ class ClawdPet(tk.Tk):
             if self.state == "idle" and not self.bubble_interactive:
                 # Probabilities tuned to feel alive but not annoying
                 pick = _r.random()
+                # Autonomous wander: walk to a new spot on screen
+                _prof = self._motion_profile()
+                if _r.random() < _prof["wander_chance"]:
+                    self._start_wander()
+                    self.after(_r.randint(14000, 30000), self._start_idle_behaviors)
+                    return
                 # Robot skin: occasionally pull out a notebook and type
                 if (not self._is_crab()) and _r.random() < 0.18:
                     self._start_notebook_animation()
@@ -892,6 +2054,17 @@ class ClawdPet(tk.Tk):
     def on_click(self, _event=None):
         if self._dragging:
             return
+
+        # Prevent immediate reopening if closed by focus loss just now
+        hidden_at = getattr(self, "_bubble_hidden_at", 0)
+        if time.time() - hidden_at < 0.35:
+            return
+
+        # If webview is open, toggle it closed
+        if getattr(self, "_webview_visible", False):
+            self.hide_bubble()
+            return
+
         # Surprised: micro-reaction al click
         try:
             self._set_state_briefly("surprised", 600)
@@ -918,7 +2091,150 @@ class ClawdPet(tk.Tk):
         self.run_bounce(0)
 
     def on_double_click(self, _event=None):
-        self.launch_claudy()
+        # Open or focus the modern chat bubble instead of launching command-line CLI
+        self.show_chat_bubble()
+
+    def _rebuild_context_menu(self):
+        """Rebuild the desktop context menu using the Claudy AI visual style."""
+        try:
+            self.menu.delete(0, "end")
+        except Exception:
+            return
+        self.menu.configure(
+            bg="#05091d",
+            fg="#f7f9ff",
+            activebackground="#172862",
+            activeforeground="#58c7ff",
+            disabledforeground="#6574a8",
+            relief="flat",
+            bd=1,
+            borderwidth=1,
+            activeborderwidth=0,
+            font=("Bahnschrift SemiBold", 10),
+        )
+        auto_start_label = "Desactivar inicio automatico" if self._is_auto_start_enabled() else "Activar inicio automatico"
+        items = [
+            ("Hablar aqui", lambda: self.show_chat_bubble("Que tienes en mente?")),
+            ("Abrir terminal", self.launch_claudy),
+            None,
+            (auto_start_label, self._toggle_auto_start_menu),
+            ("Ocultar a bandeja", self._hide_to_tray),
+            None,
+            ("Reiniciar", self._restart_app),
+            ("Cerrar", self.destroy),
+        ]
+        for item in items:
+            if item is None:
+                self.menu.add_separator()
+            else:
+                label, command = item
+                self.menu.add_command(label=label, command=command)
+
+    def _context_menu_items(self):
+        auto_start_label = "Desactivar inicio automatico" if self._is_auto_start_enabled() else "Activar inicio automatico"
+        return [
+            ("Hablar aqui", lambda: self.show_chat_bubble("Que tienes en mente?"), "primary"),
+            ("Abrir terminal", self.launch_claudy, "primary"),
+            None,
+            (auto_start_label, self._toggle_auto_start_menu, "normal"),
+            ("Ocultar a bandeja", self._hide_to_tray, "normal"),
+            None,
+            ("Reiniciar", self._restart_app, "normal"),
+            ("Cerrar", self.destroy, "danger"),
+        ]
+
+    def _hide_context_popup(self, _event=None):
+        popup = getattr(self, "_context_popup", None)
+        self._context_popup = None
+        if popup is not None:
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+
+    def _show_context_popup(self, event):
+        self._hide_context_popup()
+        try:
+            popup = tk.Toplevel(self)
+            popup.overrideredirect(True)
+            popup.attributes("-topmost", True)
+            popup.configure(bg="#58c7ff")
+
+            frame = tk.Frame(
+                popup,
+                bg="#05091d",
+                bd=0,
+                highlightbackground="#58c7ff",
+                highlightthickness=1,
+            )
+            frame.pack(fill="both", expand=True, padx=1, pady=1)
+
+            def add_row(label, command, kind="normal"):
+                normal_bg = "#05091d"
+                hover_bg = "#172862"
+                fg = "#f7f9ff"
+                if kind == "danger":
+                    hover_bg = "#1f367e"
+                    fg = "#58c7ff"
+                row = tk.Label(
+                    frame,
+                    text=label,
+                    bg=normal_bg,
+                    fg=fg,
+                    anchor="w",
+                    padx=22,
+                    pady=5,
+                    font=("Bahnschrift SemiBold", 10),
+                    cursor="hand2",
+                )
+                row.pack(fill="x")
+
+                def on_enter(_e):
+                    row.configure(bg=hover_bg, fg="#ffffff" if kind != "danger" else "#58c7ff")
+
+                def on_leave(_e):
+                    row.configure(bg=normal_bg, fg=fg)
+
+                def on_click(_e):
+                    self._hide_context_popup()
+                    try:
+                        command()
+                    except Exception as ex:
+                        print(f"[context menu] action error: {ex}")
+
+                row.bind("<Enter>", on_enter)
+                row.bind("<Leave>", on_leave)
+                row.bind("<Button-1>", on_click)
+
+            def add_separator():
+                sep = tk.Frame(frame, bg="#223a80", height=1)
+                sep.pack(fill="x", padx=0, pady=2)
+
+            for item in self._context_menu_items():
+                if item is None:
+                    add_separator()
+                else:
+                    add_row(*item)
+
+            popup.update_idletasks()
+            w = popup.winfo_reqwidth()
+            h = popup.winfo_reqheight()
+            x = max(work_area.left + 8, min(event.x_root, work_area.right - w - 8))
+            y = max(work_area.top + 8, min(event.y_root, work_area.bottom - h - 8))
+            popup.geometry(f"{w}x{h}+{x}+{y}")
+            popup.bind("<Escape>", self._hide_context_popup)
+            # Do not close on FocusOut: borderless Tk popups can lose focus
+            # immediately on Windows, making the menu disappear before a click.
+            popup.after(50, popup.focus_force)
+            self._context_popup = popup
+        except Exception:
+            try:
+                self.menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                try:
+                    self.menu.grab_release()
+                except Exception:
+                    pass
 
     def _toggle_auto_start_menu(self):
         """Toggle auto-start and update the menu label."""
@@ -928,25 +2244,57 @@ class ClawdPet(tk.Tk):
         else:
             self._enable_auto_start()
             self._show_notification("Claudy", "Inicio automatico activado")
-        # Rebuild menu with updated label.
-        self.menu.delete(0, "end")
-        self.menu.add_command(label="Hablar aqui", command=lambda: self.show_chat_bubble("Que tienes en mente?"))
-        self.menu.add_command(label="Abrir terminal", command=self.launch_claudy)
-        self.menu.add_separator()
-        auto_start_label = "Desactivar inicio automatico" if self._is_auto_start_enabled() else "Activar inicio automatico"
-        self.menu.add_command(label=auto_start_label, command=self._toggle_auto_start_menu)
-        self.menu.add_command(label="Ocultar a bandeja", command=self._hide_to_tray)
-        self.menu.add_command(label="Cerrar", command=self.destroy)
+        self._rebuild_context_menu()
 
     def _hide_to_tray(self):
-        """Hide the floating sprite into the system tray icon."""
+        """Oculta TODO (chat + sprite) en la bandeja del sistema."""
+        # Recordar si el chat estaba abierto para restaurarlo al mostrar.
+        self._chat_open_before_tray = bool(
+            (getattr(self, "webview_win", None) and getattr(self, "_webview_visible", False))
+            or getattr(self, "bubble_win", None)
+        )
+        # Cerrar el chat (mueve el webview fuera de pantalla y destruye la burbuja).
+        try:
+            self.hide_bubble()
+        except Exception:
+            pass
+        # Ocultar el badge de alarmas si está visible.
+        try:
+            self._alarm_badge_hide()
+        except Exception:
+            pass
+        # Ocultar el sprite.
         self.withdraw()
-        if self.bubble_win:
+        self._in_tray = True
+        self._refresh_tray_menu()
+        self._show_notification("Claudy", "Oculto en la bandeja. Click en el icono para mostrar.")
+
+    def _show_from_tray(self):
+        """Restaura Claudy desde la bandeja: vuelve el sprite y, si el chat estaba
+        abierto al ocultar, lo reabre."""
+        self._in_tray = False
+        self._refresh_tray_menu()
+        try:
+            self.deiconify()
+            self.lift()
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
+        if getattr(self, "_chat_open_before_tray", False):
+            self._chat_open_before_tray = False
             try:
-                self.bubble_win.withdraw()
+                self.show_chat_bubble()
             except Exception:
                 pass
-        self._show_notification("Claudy", "Oculto en la bandeja. Click derecho en el icono para mostrar.")
+
+    def _refresh_tray_menu(self):
+        """Refresca el menú nativo de la bandeja para reflejar el estado actual."""
+        icon = getattr(self, "_tray_icon", None)
+        if icon is not None:
+            try:
+                icon.update_menu()
+            except Exception:
+                pass
 
     def _on_drag_start(self, event):
         self._dragging = True
@@ -954,6 +2302,12 @@ class ClawdPet(tk.Tk):
         self._drag_start_y = event.y_root
         self._drag_offset_x = event.x
         self._drag_offset_y = event.y
+        self._drag_last_x = event.x_root
+        self._drag_last_y = event.y_root
+        self._drag_vx = 0.0
+        self._drag_vy = 0.0
+        self._throw_active = False
+        self._wander_active = False
         self._cancel_idle_timer()
 
     def _on_drag_motion(self, event):
@@ -964,8 +2318,25 @@ class ClawdPet(tk.Tk):
         self.geometry(f"+{new_x}+{new_y}")
         self.base_x = new_x
         self.base_y = new_y
+        # Keep render + physics position in sync while dragging, and track velocity
+        self._base_xf = float(new_x)
+        self._base_yf = float(new_y)
+        self._render_x = float(new_x)
+        self._render_y = float(new_y)
+        self._prev_render_y = float(new_y)
+        self._drag_vx = 0.55 * self._drag_vx + 0.45 * (event.x_root - getattr(self, "_drag_last_x", event.x_root))
+        self._drag_vy = 0.55 * self._drag_vy + 0.45 * (event.y_root - getattr(self, "_drag_last_y", event.y_root))
+        self._drag_last_x = event.x_root
+        self._drag_last_y = event.y_root
         # Keep the minimized Zzz bubble glued to the pet as it moves
         self._sync_minimized_bubble()
+        # If the webview chat is open, reposition it above the new Claudy position
+        if getattr(self, "_webview_visible", False) and getattr(self, "webview_win", None) is not None:
+            try:
+                wx, wy = self.bubble_position(CHAT_WEBVIEW_PHYS_W, CHAT_WEBVIEW_PHYS_H)
+                self.webview_win.move(*physical_to_webview(wx, wy))
+            except Exception:
+                pass
 
     def _on_drag_release(self, event):
         if not self._dragging:
@@ -977,37 +2348,26 @@ class ClawdPet(tk.Tk):
             # Fue un click, no un drag
             self.on_click()
             return
-        if self._snap_enabled:
-            self._snap_to_edge()
+        # Throw with inertia; tiny flicks just clamp to screen bounds.
+        self._begin_throw(self._drag_vx, self._drag_vy)
 
     def _snap_to_edge(self):
+        """Clamp Claudy inside screen bounds only — no forced edge-snapping.
+        This lets the user place Claudy anywhere on screen and have it stay there."""
         x = self.winfo_x()
         y = self.winfo_y()
         w = self.winfo_width()
         h = self.winfo_height()
-        screen_w = work_area.right - work_area.left
-        screen_h = work_area.bottom - work_area.top
-        margin = self._snap_margin
+        margin = 0  # allow Claudy to sit flush with screen edges
 
-        # Snap to bottom-right corner (default resting position).
-        if x + w > screen_w - margin:
-            x = screen_w - w - 10
-        if y + h > screen_h - margin:
-            y = screen_h - h - 10
-        # Snap to left edge.
-        if x < work_area.left + margin:
-            x = work_area.left + 10
-        # Snap to top edge.
-        if y < work_area.top + margin:
-            y = work_area.top + 10
-        # Snap to right edge.
-        if x + w > screen_w - margin:
-            x = screen_w - w - 10
+        # Clamp to screen boundaries (using work_area coords)
+        x = max(work_area.left + margin, min(x, work_area.right - w - margin))
+        y = max(work_area.top + margin, min(y, work_area.bottom - h - margin))
 
         self.base_x = x
         self.base_y = y
         self.geometry(f"+{x}+{y}")
-        # Re-sync the Zzz bubble after snapping
+        # Re-sync the Zzz bubble after clamping
         self._sync_minimized_bubble()
 
     # ------------------------------------------------------------------
@@ -1081,25 +2441,14 @@ class ClawdPet(tk.Tk):
             icon_image = PILImage.new("RGBA", (16, 16), (124, 107, 255, 255))
 
         def _show_all():
-            try:
-                self.deiconify()
-                self.lift()
-                if self.bubble_win:
-                    self.bubble_win.deiconify()
-            except Exception:
-                pass
+            self._show_from_tray()
 
         def _hide_all():
-            try:
-                self.withdraw()
-                if self.bubble_win:
-                    self.bubble_win.withdraw()
-            except Exception:
-                pass
+            self._hide_to_tray()
 
         def _toggle_all():
             try:
-                if self.state() == "withdrawn":
+                if getattr(self, "_in_tray", False) or self.state() == "withdrawn":
                     _show_all()
                 else:
                     _hide_all()
@@ -1134,8 +2483,9 @@ class ClawdPet(tk.Tk):
 
         menu = pystray.Menu(
             pystray.MenuItem("Mostrar", on_toggle_tray, default=True, visible=False),
-            pystray.MenuItem("Mostrar", on_show_tray),
-            pystray.MenuItem("Ocultar", on_hide_tray),
+            # "Mostrar" solo cuando está oculto; "Ocultar" solo cuando está visible.
+            pystray.MenuItem("Mostrar", on_show_tray, visible=lambda item: getattr(self, "_in_tray", False)),
+            pystray.MenuItem("Ocultar", on_hide_tray, visible=lambda item: not getattr(self, "_in_tray", False)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Inicio automatico", on_toggle_auto_start, checked=lambda _: self._is_auto_start_enabled()),
             pystray.Menu.SEPARATOR,
@@ -1261,14 +2611,111 @@ class ClawdPet(tk.Tk):
         else:
             self.state = "idle"
 
+    def _check_google_drive(self):
+        """Check if Google Drive virtual folder is available in real-time."""
+        is_connected = False
+        try:
+            drive_path = r"G:\Mi unidad"
+            is_connected = os.path.isdir(drive_path)
+            
+            # Update UI if bubble_canvas is active
+            canvas = getattr(self, "_bubble_canvas", None)
+            if canvas:
+                try:
+                    # Find elements by tag
+                    dots = canvas.find_withtag("drive_status_dot")
+                    texts = canvas.find_withtag("drive_status_text")
+                    
+                    dot_color = "#00ff99" if is_connected else "#ff3838"
+                    text_val = "Drive OK" if is_connected else "Drive OFF"
+                    text_color = "#ffffff" if is_connected else "#ff8888"
+                    
+                    for dot in dots:
+                        canvas.itemconfig(dot, fill=dot_color)
+                    for txt in texts:
+                        canvas.itemconfig(txt, text=text_val, fill=text_color)
+                except Exception as e:
+                    print(f"[drive check UI update] error: {e}")
+                    
+            # Handle warnings and notifications if status changed
+            was_connected = getattr(self, "_drive_connected", True)
+            self._drive_connected = is_connected
+            self._eval_in_web(f"updateDriveConnected({json.dumps(is_connected)})")
+            
+            if was_connected and not is_connected:
+                # Transition to disconnected: Show warnings
+                try:
+                    self.show_thought("⚠️ ¡Alerta! Google Drive se ha desconectado.\nPor favor, verifica la conexión para no perder datos.")
+                    chat = getattr(self, "_chat_view", None)
+                    if chat:
+                        chat.add_system("⚠️ ADVERTENCIA: Se ha detectado una desconexión de Google Drive. Algunas funcionalidades comerciales y de contexto podrían no funcionar.")
+                except Exception as ne:
+                    print(f"[drive disconnect notification] error: {ne}")
+            elif not was_connected and is_connected:
+                # Transition to reconnected
+                try:
+                    self.show_thought("✅ Google Drive restablecido con éxito.")
+                    chat = getattr(self, "_chat_view", None)
+                    if chat:
+                        chat.add_system("✅ Conexión con Google Drive restablecida.")
+                except Exception as ne:
+                    print(f"[drive reconnect notification] error: {ne}")
+        except Exception as e:
+            print(f"[check_google_drive] error: {e}")
+            self._drive_connected = False
+            # Try to force UI to OFF on check exception
+            canvas = getattr(self, "_bubble_canvas", None)
+            if canvas:
+                try:
+                    dots = canvas.find_withtag("drive_status_dot")
+                    texts = canvas.find_withtag("drive_status_text")
+                    for dot in dots:
+                        canvas.itemconfig(dot, fill="#ff3838")
+                    for txt in texts:
+                        canvas.itemconfig(txt, text="Drive OFF", fill="#ff8888")
+                except Exception:
+                    pass
+        finally:
+            # Poll again every 5000 ms (5 seconds) — guaranteed to run
+            self.after(5000, self._check_google_drive)
+
     def hide_bubble(self):
         self._cancel_idle_timer()
         self._stop_zzz_animation()
         if self.bubble_win:
-            self.bubble_win.destroy()
+            try:
+                self.bubble_win.destroy()
+            except Exception:
+                pass
             self.bubble_win = None
+        if self.webview_win:
+            try:
+                # Move off-screen instead of hide() to keep WebView2 rendered
+                self.webview_win.move(-9999, -9999)
+            except Exception:
+                pass
+        self._webview_visible = False
+        self._bubble_hidden_at = time.time()
+        self._bubble_canvas = None
+        self._chat_view = None
         self.bubble_interactive = False
         self.bubble_minimized = False
+        # Restore Claudy topmost now that the webview is hidden
+        try:
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
+            
+        # Restore pre-chat pet position if saved
+        if hasattr(self, "_pre_chat_pet_x") and self._pre_chat_pet_x is not None:
+            try:
+                self.geometry(f"+{self._pre_chat_pet_x}+{self._pre_chat_pet_y}")
+                self.base_x = self._pre_chat_pet_x
+                self.base_y = self._pre_chat_pet_y
+            except Exception:
+                pass
+            self._pre_chat_pet_x = None
+            self._pre_chat_pet_y = None
 
     def _on_bubble_focus_out(self, _event=None):
         # Delay check so focus can settle on the new widget
@@ -1276,6 +2723,10 @@ class ClawdPet(tk.Tk):
 
     def _check_bubble_focus(self):
         if not self.bubble_win:
+            return
+
+        if getattr(self, "_webview_focused", False) or getattr(self, "_is_picking_file", False):
+            self.after(200, self._check_bubble_focus)
             return
 
         # Grace period after opening: avoid auto-closing the welcome bubble
@@ -1299,10 +2750,16 @@ class ClawdPet(tk.Tk):
         my = self.winfo_pointery()
 
         # Bubble bounds
-        bx1 = self.bubble_win.winfo_rootx()
-        by1 = self.bubble_win.winfo_rooty()
-        bx2 = bx1 + self.bubble_win.winfo_width()
-        by2 = by1 + self.bubble_win.winfo_height()
+        if getattr(self, "webview_win", None) is not None and getattr(self, "_webview_visible", False):
+            bx1, by1 = self.bubble_position(CHAT_WEBVIEW_PHYS_W, CHAT_WEBVIEW_PHYS_H)
+            bx2 = bx1 + CHAT_WEBVIEW_PHYS_W
+            by2 = by1 + CHAT_WEBVIEW_PHYS_H
+        else:
+            bx1 = self.bubble_win.winfo_rootx()
+            by1 = self.bubble_win.winfo_rooty()
+            bx2 = bx1 + self.bubble_win.winfo_width()
+            by2 = by1 + self.bubble_win.winfo_height()
+
         if bx1 <= mx <= bx2 and by1 <= my <= by2:
             return
 
@@ -1326,7 +2783,19 @@ class ClawdPet(tk.Tk):
             except tk.TclError:
                 pass
 
-        # Cursor is outside both; minimize bubble (keep conversation alive)
+        # Cursor is outside both; close side panels and hide/minimize the chat.
+        # Webview chat: close the in-HTML panels (Calendar/History) AND hide the
+        # whole window. minimize() only resizes the (withdrawn) Tk bubble, so it
+        # would leave the webview on-screen — for the webview we must hide_bubble().
+        if getattr(self, "webview_win", None) is not None and getattr(self, "_webview_visible", False):
+            try:
+                # Fire-and-forget JS to hide the panels in the React state
+                self.webview_win.evaluate_js("window.__claudy_close_panels && window.__claudy_close_panels();")
+            except Exception:
+                pass
+            self.hide_bubble()
+            return
+
         if self.bubble_minimized:
             return
         minimize_fn = getattr(self, "_minimize_bubble", None)
@@ -1339,19 +2808,59 @@ class ClawdPet(tk.Tk):
         self.hide_bubble()
 
     def bubble_position(self, width, height):
-        margin = 14
-        # base_x/base_y are tracked manually on init, drag, and snap.
-        # They are always the pet's resting position in absolute screen coords.
-        # This is more reliable than winfo_rootx() under overrideredirect(True).
+        margin = 18      # screen-edge breathing room
+        pet_gap = 4      # gap between Claudy and the bubble/chat
         pet_x = self.base_x
         pet_y = self.base_y
         pet_w = self.width
         pet_h = self.height
-        x = pet_x + pet_w // 2 - width // 2
-        # Place bubble so its bottom (tail) sits just above the pet
-        y = pet_y - height + 30
+
+        if width >= 500:
+            # Large chat window: position ABOVE the pet so Claudy stays visible
+            # below it. Anchor horizontally to the pet's side: if pet is near the
+            # right edge, align chat's right edge with pet's right edge (and vice
+            # versa). Fall back to side-by-side only when the chat is taller than
+            # the available vertical space above the pet.
+            available_above = pet_y - work_area.top - pet_gap
+            if height <= available_above:
+                # Anchor to whichever side the pet is closer to, so the chat
+                # doesn't get clamped off-screen on the opposite edge.
+                space_left = pet_x - work_area.left
+                space_right = work_area.right - (pet_x + pet_w)
+                if space_right <= space_left:
+                    # Pet is near right edge → align chat's right edge to pet's right edge
+                    x = (pet_x + pet_w) - width
+                else:
+                    # Pet near left edge → align chat's left edge to pet's left edge
+                    x = pet_x
+                y = pet_y - height - pet_gap
+            else:
+                # Chat doesn't fit above → fall back to side-by-side
+                space_left = pet_x - work_area.left
+                space_right = work_area.right - (pet_x + pet_w)
+                if space_left >= space_right:
+                    x = pet_x - width - pet_gap
+                else:
+                    x = pet_x + pet_w + pet_gap
+                y = pet_y + pet_h - height
+        else:
+            # Position small thought bubble ABOVE Claudy, centered horizontally
+            x = pet_x + pet_w // 2 - width // 2
+            y = pet_y - height - pet_gap
+
+            # If it doesn't fit above, try beside (left, then right)
+            if y < work_area.top + margin:
+                y = work_area.top + margin
+                left_x = pet_x - width - pet_gap
+                right_x = pet_x + pet_w + pet_gap
+                if left_x >= work_area.left + margin:
+                    x = left_x
+                elif right_x + width <= work_area.right - margin:
+                    x = right_x
+
+        # Clamp to screen edges
         x = max(work_area.left + margin, min(x, work_area.right - width - margin))
-        y = max(work_area.top + margin, y)
+        y = max(work_area.top + margin, min(y, work_area.bottom - height - margin))
         return x, y
 
     def minimized_position(self, size):
@@ -1409,25 +2918,156 @@ class ClawdPet(tk.Tk):
             self._draw_bubble_terminal(canvas, w, h, bg, border)
         elif style == "editorial":
             self._draw_bubble_editorial(canvas, w, h, bg, border)
+        elif style == "minimal":
+            self._draw_bubble_minimal(canvas, w, h, bg, border)
+        elif style == "vintage":
+            self._draw_bubble_vintage(canvas, w, h, bg, border)
         else:
             self._draw_bubble_glass(canvas, w, h, bg, border)
 
+    def _draw_bubble_vintage(self, canvas, w, h, bg, border):
+        """Parchment paper background with grid lines and leather frame."""
+        try:
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            radius = 16
+
+            # 1. Leather/wood outer frame (dark brown rounded rect)
+            frame_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            frame_mask = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(frame_mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+            frame_fill = Image.new("RGBA", (w, h), (61, 52, 41, 255))  # #3d3429
+            frame_fill.putalpha(frame_mask)
+            img = Image.alpha_composite(img, frame_fill)
+
+            # 2. Inner parchment paper area (inset 8px)
+            inset = 8
+            paper_w, paper_h = w - inset * 2, h - inset * 2
+            paper = Image.new("RGBA", (paper_w, paper_h), (0, 0, 0, 0))
+            paper_mask = Image.new("L", (paper_w, paper_h), 0)
+            ImageDraw.Draw(paper_mask).rounded_rectangle(
+                (0, 0, paper_w - 1, paper_h - 1), radius=radius - 4, fill=255)
+            # Paper color with subtle noise
+            paper_base = Image.new("RGBA", (paper_w, paper_h), (212, 197, 160, 255))  # #d4c5a0
+            paper_base.putalpha(paper_mask)
+            img.paste(paper_base, (inset, inset), paper_base)
+
+            # 3. Grid lines on paper
+            draw = ImageDraw.Draw(img)
+            grid_color = (204, 190, 156, 255)  # very faint
+            grid_spacing = 20
+            for gx in range(inset + grid_spacing, w - inset, grid_spacing):
+                draw.line([(gx, inset + 4), (gx, h - inset - 4)], fill=grid_color, width=1)
+            for gy in range(inset + grid_spacing, h - inset, grid_spacing):
+                draw.line([(inset + 4, gy), (w - inset - 4, gy)], fill=grid_color, width=1)
+
+            # 4. Leather frame border (2px)
+            draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius,
+                                   outline=(90, 78, 61, 255), width=2)
+            # Inner border on paper edge
+            draw.rounded_rectangle((inset - 1, inset - 1, w - inset, h - inset),
+                                   radius=radius - 4, outline=(160, 145, 115, 255), width=1)
+
+            # 5. Corner studs (small circles at corners)
+            stud_r = 4
+            stud_color = (120, 105, 82, 200)
+            for sx, sy in [(14, 14), (w - 15, 14), (14, h - 15), (w - 15, h - 15)]:
+                draw.ellipse((sx - stud_r, sy - stud_r, sx + stud_r, sy + stud_r),
+                             fill=stud_color, outline=(80, 70, 55, 255))
+
+            tk_img = ImageTk.PhotoImage(img)
+            self._bg_photo_image_ref = tk_img
+            canvas.create_image(0, 0, anchor="nw", image=tk_img, tags=("bubble_bg",))
+        except Exception:
+            canvas.create_rectangle(0, 0, w, h, fill="#d4c5a0", outline="#5a4e3d", width=2,
+                                    tags=("bubble_bg",))
+
+    def _draw_bubble_minimal(self, canvas, w, h, bg, border):
+        """Matte solid background with clean 1px border — Obsidian Clean theme."""
+        try:
+            bg_rgb = (10, 10, 12)  # #0a0a0c
+            border_rgb = (39, 39, 42)  # #27272a
+            radius = 24
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            mask = Image.new("L", (w, h), 0)
+            mask_d = ImageDraw.Draw(mask)
+            mask_d.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+            fill_layer = Image.new("RGBA", (w, h), (*bg_rgb, 255))
+            fill_layer.putalpha(mask)
+            img = Image.alpha_composite(img, fill_layer)
+            draw_on = ImageDraw.Draw(img)
+            draw_on.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius,
+                                      outline=(*border_rgb, 255), width=1)
+            tk_img = ImageTk.PhotoImage(img)
+            self._bg_photo_image_ref = tk_img
+            canvas.create_image(0, 0, anchor="nw", image=tk_img, tags=("bubble_bg",))
+        except Exception:
+            canvas.create_rectangle(0, 0, w, h, fill=bg, outline=border, width=1,
+                                    tags=("bubble_bg",))
+
     def _draw_bubble_glass(self, canvas, w, h, bg, border):
-        # Layered shadow + halo + glass surface + top highlight
-        for offset, stipple in ((6, "gray12"), (3, "gray25")):
-            sh = self._rounded_bubble_path(w, h, 22, tail_h=10, tail_w=18)
-            sh = [(x + 1, y + offset) for x, y in sh]
-            canvas.create_polygon(sh, smooth=True, fill="#000000", outline="",
-                                  stipple=stipple, tags=("bubble_bg",))
-        halo = self._rounded_bubble_path(w, h, 22, tail_h=10, tail_w=18)
-        canvas.create_polygon(halo, smooth=True, fill="", outline=THEME["accent"],
-                              width=2, stipple="gray25", tags=("bubble_bg",))
-        pts = self._rounded_bubble_path(w, h, 22, tail_h=10, tail_w=18)
-        canvas.create_polygon(pts, smooth=True, fill=bg, outline=border, width=1,
-                              tags=("bubble_bg",))
-        hl_pts = [(24, 4), (w - 24, 4), (w - 18, 10), (18, 10)]
-        canvas.create_polygon(hl_pts, smooth=True, fill="#ffffff", outline="",
-                              stipple="gray12", tags=("bubble_bg",))
+        # Premium neon shell: deep gradient, vignette, dotted texture and soft dual glow.
+        try:
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+
+            top_rgb = _hex_to_rgb("#07142d")
+            bottom_rgb = _hex_to_rgb("#070814")
+            accent_left = _hex_to_rgb(THEME.get("accent_glow", "#58c7ff"))
+            accent_right = _hex_to_rgb(THEME.get("accent", "#c02dff"))
+
+            for y in range(h):
+                t = y / h
+                r = int(top_rgb[0] + (bottom_rgb[0] - top_rgb[0]) * t)
+                g = int(top_rgb[1] + (bottom_rgb[1] - top_rgb[1]) * t)
+                b = int(top_rgb[2] + (bottom_rgb[2] - top_rgb[2]) * t)
+                d.line([(0, y), (w, y)], fill=(r, g, b, 255))
+
+            for i in range(0, w, 12):
+                for j in range(0, h, 12):
+                    blend = i / max(1, w - 1)
+                    dot_rgb = (
+                        int(accent_left[0] * (1 - blend) + accent_right[0] * blend),
+                        int(accent_left[1] * (1 - blend) + accent_right[1] * blend),
+                        int(accent_left[2] * (1 - blend) + accent_right[2] * blend),
+                    )
+                    d.ellipse((i, j, i + 1, j + 1), fill=(*dot_rgb, 28))
+
+            vignette = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            vd = ImageDraw.Draw(vignette)
+            vd.ellipse((-w * 0.25, -h * 0.1, w * 0.55, h * 0.7), fill=(*accent_left, 48))
+            vd.ellipse((w * 0.45, h * 0.05, w * 1.15, h * 0.95), fill=(*accent_right, 42))
+            vignette = vignette.filter(ImageFilter.GaussianBlur(52))
+            img = Image.alpha_composite(img, vignette)
+
+            mask = Image.new("L", (w, h), 0)
+            mask_d = ImageDraw.Draw(mask)
+            radius = 34
+            mask_d.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+            img.putalpha(mask)
+
+            glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            gd = ImageDraw.Draw(glow)
+            gd.rounded_rectangle((6, 6, w - 7, h - 7), radius=radius,
+                                 outline=(*accent_left, 160), width=4)
+            gd.rounded_rectangle((10, 10, w - 11, h - 11), radius=radius - 4,
+                                 outline=(*accent_right, 140), width=3)
+            glow = glow.filter(ImageFilter.GaussianBlur(10))
+            img = Image.alpha_composite(glow, img)
+
+            draw_on_img = ImageDraw.Draw(img)
+            border_rgb = _hex_to_rgb(border)
+            draw_on_img.rounded_rectangle((6, 6, w - 7, h - 7), radius=radius,
+                                          outline=(*border_rgb, 255), width=2)
+            draw_on_img.rounded_rectangle((14, 14, w - 15, h - 15), radius=26,
+                                          outline=(*_hex_to_rgb(THEME.get("divider", "#4f2cc8")), 135), width=1)
+
+            tk_img = ImageTk.PhotoImage(img)
+            self._bg_photo_image_ref = tk_img
+            canvas.create_image(0, 0, anchor="nw", image=tk_img, tags=("bubble_bg",))
+        except Exception:
+            outer = self._rounded_bubble_path(w, h, 22, tail_h=0, tail_w=0)
+            canvas.create_polygon(outer, smooth=True, fill=bg, outline=border, width=2,
+                                  tags=("bubble_bg",))
 
     def _draw_bubble_terminal(self, canvas, w, h, bg, border):
         # Sharp rectangle, scanlines, double border, CRT corner glow
@@ -1479,25 +3119,58 @@ class ClawdPet(tk.Tk):
         bub.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
 
         # Measure text to auto-size.
-        temp = tk.Label(bub, text=text, font=("Segoe UI", 10, "bold"), wraplength=220)
+        temp = tk.Label(bub, text=text, font=("Bahnschrift SemiBold", 10), wraplength=220)
         temp.update_idletasks()
         tw, th = temp.winfo_reqwidth(), temp.winfo_reqheight()
         temp.destroy()
 
-        pad_x, pad_y = 24, 18
+        pad_x, pad_y = 28, 20
         width = max(160, tw + pad_x * 2)
         height = max(70, th + pad_y * 2 + 10)
 
         canvas = tk.Canvas(bub, width=width, height=height, bg=TRANSPARENT_COLOR, highlightthickness=0, bd=0)
         canvas.pack()
 
-        self._draw_bubble(canvas, width, height, THEME["bg_bubble"], THEME["bg_bubble_border"])
+        try:
+            img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            gd = ImageDraw.Draw(glow)
+            gd.rounded_rectangle((4, 4, width - 5, height - 5), radius=22,
+                                 outline=(192, 45, 255, 150), width=4)
+            glow = glow.filter(ImageFilter.GaussianBlur(7))
+            img = Image.alpha_composite(img, glow)
+            d = ImageDraw.Draw(img)
+            d.rounded_rectangle((8, 8, width - 9, height - 9), radius=20,
+                                fill=(5, 9, 29, 245), outline=(88, 199, 255, 190), width=1)
+            d.ellipse((18, height - 16, 28, height - 6), fill=(5, 9, 29, 230),
+                      outline=(88, 199, 255, 160), width=1)
+            # Pre-composite onto magenta background so semi-transparent pixels
+            # don't bleed pink through Tkinter's -transparentcolor.
+            bg_layer = Image.new("RGBA", (width, height), (255, 0, 255, 255))
+            composited = Image.alpha_composite(bg_layer, img)
+            # Convert to RGB (drop alpha) since we're using chroma-key transparency
+            final = composited.convert("RGB")
+            # Snap near-magenta pixels to exact #FF00FF so chroma-key works
+            px = final.load()
+            for _y in range(final.height):
+                for _x in range(final.width):
+                    r, g, b = px[_x, _y]
+                    if r > 200 and g < 55 and b > 200:
+                        px[_x, _y] = (255, 0, 255)
+            tk_img = ImageTk.PhotoImage(final)
+            self._thought_bg_ref = tk_img
+            canvas.create_image(0, 0, anchor="nw", image=tk_img)
+        except Exception:
+            canvas.create_polygon(
+                self._rounded_bubble_path(width, height, 22, tail_h=0, tail_w=0),
+                smooth=True, fill="#05091d", outline="#58c7ff", width=1,
+            )
 
         canvas.create_text(
             width // 2, height // 2 - 4,
             text=text, width=width - pad_x * 2,
-            fill=THEME["text_primary"],
-            font=("Segoe UI", 10, "bold"),
+            fill="#f7f9ff",
+            font=("Bahnschrift SemiBold", 10),
             justify="center",
         )
 
@@ -1523,12 +3196,18 @@ class ClawdPet(tk.Tk):
                 self.bubble_win.geometry(f"{w}x{h}+{cx}+{cy}")
                 self.bubble_win.lift()
                 self.bubble_win.attributes("-topmost", True)
+                self.lift()
+                self.attributes("-topmost", True)
             except tk.TclError:
                 self.bubble_win = None
             return
 
         self.bubble_interactive = True
         self.bubble_minimized = False
+        if not hasattr(self, "_active_product"):
+            self._active_product = "General"
+        if not hasattr(self, "_current_session_msgs"):
+            self._current_session_msgs = []
 
         # Load conversation history if no explicit text provided
         if text is None:
@@ -1548,40 +3227,275 @@ class ClawdPet(tk.Tk):
 
         canvas = tk.Canvas(bub, width=width, height=height, bg=TRANSPARENT_COLOR, highlightthickness=0, bd=0)
         canvas.pack(fill="both", expand=True)
-        self._draw_bubble(canvas, width, height, THEME["bg_bubble"], THEME["bg_bubble_border"])
+
+        # Dashboard layout inspired by the Claudy AI mockup.
+        side_x0, side_x1 = 18, 278
+        main_x0, main_x1 = 294, width - 18
+        chat_theme = dict(THEME)
+        chat_theme.update({
+            "bg_bubble": "#030714",
+            "bg_bubble_border": "#5b35d8",
+            "bg_input": "#071026",
+            "bg_input_border": "#20315f",
+            "header_bg": "#071026",
+            "header_chip": "#071026",
+            "panel_bg": "#030714",
+            "panel_soft": "#091333",
+            "message_bot": "#101a42",
+            "message_bot_border": "#324b9a",
+            "button_bg": "#0b1538",
+            "button_fg": "#dbe6ff",
+            "button_hover": "#172862",
+            "text_primary": "#f7f9ff",
+            "text_secondary": "#9fb2ff",
+            "text_label": "#9fb2ff",
+            "input_fg": "#f7f9ff",
+            "accent": "#7b3cff",
+            "accent_glow": "#58c7ff",
+            "accent_dim": "#17245a",
+            "divider": "#273c85",
+            "style": "glass",
+        })
+        self._dashboard_chat_theme = chat_theme
+
+        def rounded_panel(x0, y0, x1, y1, radius=18, fill="#05091d", outline="#5b35d8", width_px=1):
+            points = [
+                x0 + radius, y0, x1 - radius, y0,
+                x1, y0, x1, y0 + radius,
+                x1, y1 - radius, x1, y1,
+                x1 - radius, y1, x0 + radius, y1,
+                x0, y1, x0, y1 - radius,
+                x0, y0 + radius, x0, y0,
+            ]
+            return canvas.create_polygon(
+                points, smooth=True, splinesteps=12,
+                fill=fill, outline=outline, width=width_px,
+                tags=("bubble_bg",)
+            )
+
+        try:
+            bg_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            bg_draw = ImageDraw.Draw(bg_img)
+            bg_draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=24,
+                                      fill=(3, 7, 20, 245), outline=(91, 53, 216, 255), width=2)
+            bg_draw.rounded_rectangle((8, 8, width - 9, height - 9), radius=18,
+                                      outline=(88, 199, 255, 120), width=1)
+            glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            glow_draw = ImageDraw.Draw(glow)
+            glow_draw.rounded_rectangle((2, 2, width - 3, height - 3), radius=24,
+                                        outline=(192, 45, 255, 130), width=4)
+            glow = glow.filter(ImageFilter.GaussianBlur(8))
+            bg_img = Image.alpha_composite(glow, bg_img)
+            dashboard_bg = ImageTk.PhotoImage(bg_img)
+            self._dashboard_bg_ref = dashboard_bg
+            canvas.create_image(0, 0, anchor="nw", image=dashboard_bg, tags=("bubble_bg",))
+        except Exception:
+            canvas.create_rectangle(0, 0, width, height, fill="#030714", outline="#5b35d8",
+                                    width=2, tags=("bubble_bg",))
+        rounded_panel(side_x0, 18, side_x1, height - 18, 22, "#05091d", "#5b35d8", 2)
+        rounded_panel(main_x0, 18, main_x1, height - 18, 22, "#05091d", "#5b35d8", 2)
+        rounded_panel(main_x0, 18, main_x1, 92, 20, "#071026", "#20315f", 1)
+        rounded_panel(main_x0 + 8, 108, main_x1 - 8, 486, 20, "#030714", "#273c85", 1)
+        rounded_panel(main_x0 + 12, 500, main_x1 - 12, 562, 22, "#071026", "#00c8ff", 2)
+
+        for i in range(26):
+            sx = main_x0 + 42 + (i * 73) % (main_x1 - main_x0 - 84)
+            sy = 126 + (i * 47) % 330
+            fill = "#7c6bff" if i % 3 else "#37d8ff"
+            canvas.create_oval(sx, sy, sx + 2, sy + 2, fill=fill, outline="", tags=("bubble_bg",))
 
         # History button (left) – tiny toggle icon.
         # Brand label \u2014 small uppercase tag (left).
-        brand_lbl = tk.Label(
-            bub, text="CLAUDY", bg=THEME["bg_bubble"], fg=THEME["accent"],
-            font=("Segoe UI", 8, "bold"), padx=0, pady=0,
+        # Draw Claudy header avatar (or fallback to text "AI")
+        claudy_avatar_drawn = False
+        try:
+            from PIL import Image, ImageTk, ImageDraw
+            claudy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claudy_orbit_frame_0.png")
+            if os.path.exists(claudy_path):
+                img = Image.open(claudy_path).convert("RGBA")
+                size = (44, 44)
+                img = img.resize(size, Image.Resampling.LANCZOS)
+                mask = Image.new("L", size, 0)
+                draw = ImageDraw.Draw(mask)
+                draw.ellipse((0, 0, size[0] - 1, size[1] - 1), fill=255)
+                output = Image.new("RGBA", size, (0, 0, 0, 0))
+                output.paste(img, (0, 0), mask=mask)
+                self._claudy_header_photo = ImageTk.PhotoImage(output)
+                canvas.create_image(48, 50, anchor="nw", image=self._claudy_header_photo, tags=("bubble_bg",))
+                claudy_avatar_drawn = True
+        except Exception as e:
+            print(f"[claudy header avatar] error: {e}")
+
+        if not claudy_avatar_drawn:
+            canvas.create_oval(48, 50, 92, 94, outline="#8d4dff", width=3, fill="#0a1835", tags=("bubble_bg",))
+            canvas.create_text(70, 72, text="AI", fill="#58c7ff", font=("Arial Black", 13), tags=("bubble_bg",))
+        else:
+            canvas.create_oval(48, 50, 92, 94, outline="#8d4dff", width=3, fill="", tags=("bubble_bg",))
+        brand_id = canvas.create_text(
+            96, 56, anchor="nw", text="CLAUDY",
+            fill="#ffffff", font=("Arial Black", 15), tags=("bubble_bg",)
         )
-        brand_id = canvas.create_window(20, 18, anchor="nw", window=brand_lbl)
-        # Live status dot
-        status_dot = tk.Label(
-            bub, text="\u25cf", bg=THEME["bg_bubble"], fg="#5ee6a1",
-            font=("Segoe UI", 7), padx=0, pady=0,
+        subtitle_id = canvas.create_text(
+            96, 82, anchor="nw", text="Tu asistente IA",
+            fill="#b8c6ff", font=("Bahnschrift", 8), tags=("bubble_bg",)
         )
-        status_dot_id = canvas.create_window(76, 19, anchor="nw", window=status_dot)
+        self._bubble_canvas = canvas
+        rounded_panel(34, 128, 262, 182, 14, "#091333", "#24366e", 1)
+        canvas.create_text(58, 144, anchor="nw", text="En linea", fill="#ffffff", font=("Bahnschrift SemiBold", 10), tags=("bubble_bg",))
+        canvas.create_text(58, 166, anchor="nw", text="Memoria activa", fill="#9fb2ff", font=("Bahnschrift", 9), tags=("bubble_bg",))
+        canvas.create_oval(44, 146, 52, 154, fill="#00ff99", outline="", tags=("bubble_bg",))
+
+        # Real-time Google Drive Status indicator
+        drive_status_color = "#00ff99" if getattr(self, "_drive_connected", True) else "#ff3838"
+        drive_status_text = "Drive OK" if getattr(self, "_drive_connected", True) else "Drive OFF"
+        drive_text_color = "#ffffff" if getattr(self, "_drive_connected", True) else "#ff8888"
+        
+        canvas.create_oval(154, 146, 162, 154, fill=drive_status_color, outline="", tags=("bubble_bg", "drive_status_dot"))
+        canvas.create_text(168, 144, anchor="nw", text=drive_status_text, fill=drive_text_color, font=("Bahnschrift SemiBold", 10), tags=("bubble_bg", "drive_status_text"))
+        nueva_bg = rounded_panel(34, 204, 262, 238, 16, "#803cff", "#58c7ff", 1)
+        nueva_txt = canvas.create_text(148, 221, text="+ Nueva conversacion", fill="#ffffff", font=("Bahnschrift SemiBold", 10), tags=("bubble_bg",))
+        def _nueva_conversacion(_e=None):
+            # 1. Compress current session and save to Obsidian
+            try:
+                self._compress_and_save_to_obsidian()
+            except Exception as ex:
+                print(f"[nueva conv] compress error: {ex}")
+            # 2. Clear current session messages
+            self._current_session_msgs = []
+            # 3. Clear chat view and show greeting
+            chat = getattr(self, "_chat_view", None)
+            if chat:
+                chat.clear()
+                chat.add_system("Hola Felipe, \u00bfen qu\u00e9 te ayudo?")
+            try:
+                status.configure(text="Nueva conversacion iniciada", fg="#58c7ff")
+            except Exception:
+                pass
+        for _item in (nueva_bg, nueva_txt):
+            canvas.tag_bind(_item, "<Button-1>", _nueva_conversacion)
+            canvas.tag_bind(_item, "<Enter>", lambda _e: canvas.configure(cursor="hand2"))
+            canvas.tag_bind(_item, "<Leave>", lambda _e: canvas.configure(cursor=""))
+        canvas.create_text(34, 270, anchor="nw", text="PRODUCTOS QCORE", fill="#58c7ff", font=("Bahnschrift SemiBold", 8), tags=("bubble_bg",))
+        _qcore_products = [
+            ("SmartStudent", "EDU", "#6c5ce7"),
+            ("Roadix", "AUTO", "#00b894"),
+            ("Luxium", "CORE", "#e17055"),
+            ("UnitCore", "CLIN", "#0984e3"),
+            ("Campaign Studio", "MKT", "#fdcb6e"),
+            ("Mission Control", "OPS", "#a29bfe"),
+        ]
+        self._product_btns = []
+        for idx, (title, tag, color) in enumerate(_qcore_products):
+            y = 296 + idx * 36
+            row_fill = "#211064" if idx == 0 else "#060c22"
+            row_id = rounded_panel(30, y, 266, y + 30, 12, row_fill, "#182752", 1)
+            dot_id = canvas.create_oval(38, y + 10, 48, y + 20, fill=color, outline="", tags=("bubble_bg",))
+            txt_id = canvas.create_text(54, y + 7, anchor="nw", text=title, fill="#ffffff" if idx == 0 else "#c7d2ff",
+                               font=("Bahnschrift SemiBold", 8), tags=("bubble_bg",))
+            tag_id = canvas.create_text(254, y + 8, anchor="ne", text=tag, fill=color,
+                               font=("Bahnschrift SemiBold", 8), tags=("bubble_bg",))
+            # Click handler → switch context to this product with full knowledge
+            def _switch_product(_e=None, name=title, c=color):
+                self._active_product = name
+                # Load rich product context
+                try:
+                    from qcore_products import build_context_prompt, PRODUCT_CONTEXTS
+                    self._product_context = build_context_prompt(name)
+                    pinfo = PRODUCT_CONTEXTS.get(name, {})
+                    # Build a nice summary for the chat
+                    desc = pinfo.get("description", "")
+                    mods = pinfo.get("modules", [])
+                    summary_lines = [f"🔄 Contexto: **{name}** ({pinfo.get('tag', '')})", f"_{desc}_"]
+                    if mods:
+                        summary_lines.append(f"\n📦 {len(mods)} módulos disponibles:")
+                        for m in mods[:8]:
+                            summary_lines.append(f"  • {m}")
+                        if len(mods) > 8:
+                            summary_lines.append(f"  ... y {len(mods) - 8} más")
+                    if pinfo.get("port"):
+                        summary_lines.append(f"\n💡 Di 'inicia {name.lower()}' para lanzar en puerto {pinfo['port']}")
+                    summary = "\n".join(summary_lines)
+                except Exception:
+                    self._product_context = f"Producto activo: {name}"
+                    summary = f"Contexto cambiado a: {name}"
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    chat.add_system(summary)
+                try:
+                    status.configure(text=f"Producto: {name}", fg=c)
+                except Exception:
+                    pass
+            for item in (row_id, dot_id, txt_id, tag_id):
+                canvas.tag_bind(item, "<Button-1>", _switch_product)
+                canvas.tag_bind(item, "<Enter>", lambda _e, c=color: canvas.configure(cursor="hand2"))
+                canvas.tag_bind(item, "<Leave>", lambda _e: canvas.configure(cursor=""))
+            self._product_btns.append((title, tag, color))
+        rounded_panel(30, height - 90, 266, height - 30, 16, "#071026", "#24366e", 1)
+        # Draw avatar image (or fallback to text "JC")
+        avatar_drawn = False
+        try:
+            from PIL import Image, ImageTk, ImageDraw
+            avatar_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "avatar_developer.png")
+            if os.path.exists(avatar_path):
+                img = Image.open(avatar_path).convert("RGBA")
+                size = (34, 34)
+                img = img.resize(size, Image.Resampling.LANCZOS)
+                mask = Image.new("L", size, 0)
+                draw = ImageDraw.Draw(mask)
+                draw.ellipse((0, 0, size[0] - 1, size[1] - 1), fill=255)
+                output = Image.new("RGBA", size, (0, 0, 0, 0))
+                output.paste(img, (0, 0), mask=mask)
+                self._avatar_photo = ImageTk.PhotoImage(output)
+                canvas.create_image(42, height - 80, anchor="nw", image=self._avatar_photo, tags=("bubble_bg",))
+                avatar_drawn = True
+        except Exception as e:
+            print(f"[avatar] error: {e}")
+
+        if not avatar_drawn:
+            canvas.create_oval(42, height - 80, 76, height - 46, outline="#58c7ff", fill="#12194a", width=2, tags=("bubble_bg",))
+            canvas.create_text(59, height - 63, text="JC", fill="#58c7ff", font=("Bahnschrift SemiBold", 10), tags=("bubble_bg",))
+        else:
+            canvas.create_oval(42, height - 80, 76, height - 46, outline="#58c7ff", fill="", width=2, tags=("bubble_bg",))
+        canvas.create_text(88, height - 76, anchor="nw", text="Felipe Castro", fill="#ffffff",
+                           font=("Bahnschrift SemiBold", 10), tags=("bubble_bg",))
+        canvas.create_text(88, height - 56, anchor="nw", text="jorge.castro@qcorespa.com", fill="#9fb2ff",
+                           font=("Bahnschrift", 8), tags=("bubble_bg",))
+
+        canvas.create_text(main_x0 + 56, 42, anchor="nw", text="Asistente IA",
+                           fill="#ffffff", font=("Bahnschrift SemiBold", 16), tags=("bubble_bg",))
+        canvas.create_text(main_x0 + 56, 68, anchor="nw", text="Modelo Neural v4.0  •  Precision Avanzada",
+                           fill="#aebdff", font=("Bahnschrift", 9), tags=("bubble_bg",))
+        canvas.create_text(main_x0 + 24, 55, text="✦", fill="#58c7ff", font=("Segoe UI Symbol", 24), tags=("bubble_bg",))
+        status_dot_id = canvas.create_text(
+            side_x0 + 248, 138, anchor="nw", text="\u25cf",
+            fill="#5ee6a1", font=("Segoe UI", 9, "bold"), tags=("bubble_bg",)
+        )
         # History button
         history_btn = tk.Label(
-            bub, text="\u2630", bg=THEME["bg_bubble_border"], fg=THEME["text_primary"],
-            font=("Segoe UI", 9), cursor="hand2",
-            padx=5, pady=2, relief="flat", bd=0,
-            highlightbackground=THEME["accent"], highlightthickness=0,
+            bub, text="\u2630", bg=chat_theme["button_bg"], fg=chat_theme["accent_glow"],
+            font=("Segoe UI Symbol", 13), cursor="hand2",
+            padx=6, pady=4, relief="flat", bd=0,
+            highlightbackground=chat_theme["accent"], highlightthickness=2,
         )
-        history_id = canvas.create_window(width - 168, 14, anchor="nw", window=history_btn)
+        history_id = canvas.create_window(main_x1 - 174, 36, anchor="nw", width=30, height=28, window=history_btn)
         history_btn.bind("<Button-1>", lambda _e: self.show_history_window())
-        history_btn.bind("<Enter>", lambda _e: history_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
-        history_btn.bind("<Leave>", lambda _e: history_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
+        history_btn.bind("<Enter>", lambda _e: (
+            history_btn.config(fg=chat_theme["accent_glow"], bg=chat_theme["button_hover"], highlightbackground=chat_theme["accent"]),
+            status.configure(text="Ver historial de chat (Ventana independiente)", fg=chat_theme["accent_glow"])
+        ))
+        history_btn.bind("<Leave>", lambda _e: (
+            history_btn.config(fg=chat_theme["button_fg"], bg=chat_theme["button_bg"], highlightbackground=chat_theme["bg_input_border"]),
+            status.configure(text="Enter envia  |  Shift+Enter salto  |  Esc cierra  |  Espacio 2s habla", fg=chat_theme["text_label"])
+        ))
 
         # Folder analyzer button: pick a folder, analyze deep, save to Obsidian.
         folder_btn = tk.Label(
-            bub, text="\U0001F4C1", bg=THEME["bg_bubble_border"], fg=THEME["text_primary"],
-            font=("Segoe UI Emoji", 10), cursor="hand2",
-            padx=4, pady=1, relief="flat", bd=0,
+            bub, text="\U0001F4C1", bg=chat_theme["button_bg"], fg=chat_theme["accent_glow"],
+            font=("Segoe UI Emoji", 12), cursor="hand2",
+            padx=6, pady=4, relief="flat", bd=0,
+            highlightbackground=chat_theme["accent"], highlightthickness=2,
         )
-        folder_id = canvas.create_window(width - 138, 14, anchor="nw", window=folder_btn)
+        folder_id = canvas.create_window(main_x1 - 138, 36, anchor="nw", width=30, height=28, window=folder_btn)
 
         def _on_analyze_folder(_e=None):
             from tkinter import filedialog
@@ -1597,22 +3511,48 @@ class ClawdPet(tk.Tk):
                 try:
                     result = self._analyze_folder_deep(path, status)
                 except Exception as e:
-                    result = f"Error: {e}"
-                self.after(0, lambda: self._set_response_text(result))
-                self.after(0, lambda: status.configure(text="Enter envia  ·  Esc cierra", fg=THEME["text_secondary"]))
+                    result = (f"Error: {e}", "")
+                def _show_result():
+                    analysis_text, saved_path = result if isinstance(result, tuple) else (result, "")
+                    chat = getattr(self, "_chat_view", None)
+                    if chat is not None:
+                        try:
+                            chat.hide_typing()
+                        except Exception:
+                            pass
+                        chat.add_bot(analysis_text)
+                        if saved_path and os.path.exists(saved_path):
+                            self._remember_file_artifact(saved_path)
+                            chat.add_file_card(
+                                filename=os.path.basename(saved_path),
+                                on_open_file=lambda p=saved_path: self._open_path_file(p),
+                                on_open_folder=lambda p=saved_path: self._open_path_location(p),
+                                message="Abrir reporte completo",
+                            )
+                    else:
+                        self._set_response_text(analysis_text)
+                    status.configure(text="Enter envia  ·  Esc cierra", fg=chat_theme["text_secondary"])
+                self.after(0, _show_result)
             threading.Thread(target=_run, daemon=True).start()
 
         folder_btn.bind("<Button-1>", _on_analyze_folder)
-        folder_btn.bind("<Enter>", lambda _e: folder_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
-        folder_btn.bind("<Leave>", lambda _e: folder_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
+        folder_btn.bind("<Enter>", lambda _e: (
+            folder_btn.config(fg=chat_theme["accent_glow"], bg=chat_theme["button_hover"], highlightbackground=chat_theme["accent"]),
+            status.configure(text="Analizar carpeta profundamente con IA", fg=chat_theme["accent_glow"])
+        ))
+        folder_btn.bind("<Leave>", lambda _e: (
+            folder_btn.config(fg=chat_theme["button_fg"], bg=chat_theme["button_bg"], highlightbackground=chat_theme["bg_input_border"]),
+            status.configure(text="Enter envia  |  Shift+Enter salto  |  Esc cierra  |  Espacio 2s habla", fg=chat_theme["text_label"])
+        ))
 
         # Open last file/folder location button.
         open_location_btn = tk.Label(
-            bub, text="\U0001F4C2", bg=THEME["bg_bubble_border"], fg=THEME["text_secondary"],
-            font=("Segoe UI Emoji", 10), cursor="hand2",
-            padx=4, pady=1, relief="flat", bd=0,
+            bub, text="\U0001F4C2", bg=chat_theme["button_bg"], fg=chat_theme["accent_glow"],
+            font=("Segoe UI Emoji", 12), cursor="hand2",
+            padx=6, pady=4, relief="flat", bd=0,
+            highlightbackground=chat_theme["accent"], highlightthickness=2,
         )
-        open_location_id = canvas.create_window(width - 108, 14, anchor="nw", window=open_location_btn)
+        open_location_id = canvas.create_window(main_x1 - 102, 36, anchor="nw", width=30, height=28, window=open_location_btn)
         self._open_location_btn = open_location_btn
         open_location_btn.bind("<Button-1>", lambda _e: self._open_last_file_location())
         open_location_btn.bind("<Enter>", lambda _e: self._set_open_location_hover(True))
@@ -1621,23 +3561,38 @@ class ClawdPet(tk.Tk):
 
         # Clear visible area button (history stays saved on disk).
         clear_btn = tk.Label(
-            bub, text="\U0001F9F9", bg=THEME["bg_bubble_border"], fg=THEME["text_primary"],
-            font=("Segoe UI Emoji", 10), cursor="hand2",
-            padx=4, pady=1, relief="flat", bd=0,
+            bub, text="\U0001F9F9", bg=chat_theme["button_bg"], fg=chat_theme["accent_glow"],
+            font=("Segoe UI Emoji", 12), cursor="hand2",
+            padx=6, pady=4, relief="flat", bd=0,
+            highlightbackground=chat_theme["accent"], highlightthickness=2,
         )
-        clear_id = canvas.create_window(width - 78, 14, anchor="nw", window=clear_btn)
+        clear_id = canvas.create_window(main_x1 - 66, 36, anchor="nw", width=30, height=28, window=clear_btn)
         clear_btn.bind("<Button-1>", lambda _e: (self._chat_view.clear() if getattr(self, "_chat_view", None) else self._set_response_text("")))
-        clear_btn.bind("<Enter>", lambda _e: clear_btn.config(fg=THEME["accent"], bg=THEME["bg_input"]))
-        clear_btn.bind("<Leave>", lambda _e: clear_btn.config(fg=THEME["text_primary"], bg=THEME["bg_bubble_border"]))
+        clear_btn.bind("<Enter>", lambda _e: (
+            clear_btn.config(fg=chat_theme["accent_glow"], bg=chat_theme["button_hover"], highlightbackground=chat_theme["accent"]),
+            status.configure(text="Limpiar conversación en pantalla", fg=chat_theme["accent_glow"])
+        ))
+        clear_btn.bind("<Leave>", lambda _e: (
+            clear_btn.config(fg=chat_theme["button_fg"], bg=chat_theme["button_bg"], highlightbackground=chat_theme["bg_input_border"]),
+            status.configure(text="Enter envia  |  Shift+Enter salto  |  Esc cierra  |  Espacio 2s habla", fg=chat_theme["text_label"])
+        ))
+
         # Minimize button.
         minimize_btn = tk.Label(
-            bub, text="\u2013", bg=THEME["bg_bubble"], fg=THEME["text_primary"],
-            font=("Segoe UI", 14, "bold"), cursor="hand2",
-            padx=4, pady=0,
+            bub, text="\u2212", bg=chat_theme["button_bg"], fg=chat_theme["accent_glow"],
+            font=("Bahnschrift SemiBold", 14), cursor="hand2",
+            padx=6, pady=3, relief="flat", bd=0,
+            highlightbackground=chat_theme["accent"], highlightthickness=2,
         )
-        minimize_id = canvas.create_window(width - 14, 14, anchor="ne", window=minimize_btn)
-        minimize_btn.bind("<Enter>", lambda _e: minimize_btn.config(fg=THEME["accent"]))
-        minimize_btn.bind("<Leave>", lambda _e: minimize_btn.config(fg=THEME["text_primary"]))
+        minimize_id = canvas.create_window(main_x1 - 28, 36, anchor="nw", width=22, height=26, window=minimize_btn)
+        minimize_btn.bind("<Enter>", lambda _e: (
+            minimize_btn.config(fg=chat_theme["accent_glow"], bg=chat_theme["button_hover"]),
+            status.configure(text="Minimizar ventana de chat", fg=chat_theme["accent_glow"])
+        ))
+        minimize_btn.bind("<Leave>", lambda _e: (
+            minimize_btn.config(fg=chat_theme["text_primary"], bg=chat_theme["header_bg"]),
+            status.configure(text="Enter envia  |  Shift+Enter salto  |  Esc cierra  |  Espacio 2s habla", fg=chat_theme["text_label"])
+        ))
 
         # Modern canvas-based chat view (bubbles, avatars, timestamps, animations).
         try:
@@ -1645,28 +3600,34 @@ class ClawdPet(tk.Tk):
         except Exception:
             ChatView = None
         if ChatView is not None:
-            chat = ChatView(bub, theme=THEME, width=width - 32, height=270)
+            chat_shell = tk.Frame(
+                bub, bg=chat_theme["panel_bg"], bd=0, highlightthickness=0,
+                highlightbackground=chat_theme["divider"], highlightcolor=chat_theme["divider"]
+            )
+            chat = ChatView(chat_shell, theme=chat_theme, width=main_x1 - main_x0 - 48, height=342)
+            chat.pack(fill="both", expand=True, padx=12, pady=12)
             self._chat_view = chat
             self._response_text_widget = None  # no legacy text widget
-            # Load history.
-            try:
-                if getattr(self, "_chat_history_buffer", None) is not None:
-                    chat.load_history(self._chat_history_buffer)
-                    self._chat_history_buffer = None
-                else:
-                    history = self._load_memory()[-12:] if hasattr(self, "_load_memory") else []
-                    chat.load_history(history)
-            except Exception:
-                pass
-            # If a starting prompt text was provided (and no history), show as system.
-            if not chat._messages and text:
-                chat.add_system(text)
-            header_id = canvas.create_window(16, 44, anchor="nw", width=width - 32, height=270, window=chat)
+            # Fresh start: only show greeting. Memory stays in SQLite/Obsidian.
+            # If re-opened mid-session, restore current session messages.
+            if getattr(self, "_chat_history_buffer", None) is not None:
+                chat.load_history(self._chat_history_buffer)
+                self._chat_history_buffer = None
+            elif getattr(self, "_current_session_msgs", None):
+                chat.load_history(self._current_session_msgs)
+            else:
+                chat.add_system("Hola Felipe, \u00bfen qu\u00e9 te ayudo?")
+            header_id = canvas.create_window(main_x0 + 16, 122, anchor="nw",
+                                             width=main_x1 - main_x0 - 32, height=348,
+                                             window=chat_shell)
         else:
             # Fallback: legacy text widget if chat_view fails to import.
-            response_frame = tk.Frame(bub, bg=THEME["bg_bubble"], bd=0, highlightthickness=0)
+            response_frame = tk.Frame(
+                bub, bg=chat_theme["panel_bg"], bd=0, highlightthickness=0,
+                highlightbackground=chat_theme["divider"], highlightcolor=chat_theme["divider"]
+            )
             response_text = tk.Text(
-                response_frame, bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+                response_frame, bg=chat_theme["panel_bg"], fg=chat_theme["text_primary"],
                 font=FONT_BODY, wrap="word", state="disabled",
                 highlightthickness=0, bd=0, padx=14, pady=10, relief="flat",
             )
@@ -1674,7 +3635,9 @@ class ClawdPet(tk.Tk):
             self._response_text_widget = response_text
             self._chat_view = None
             self._set_response_text(text)
-            header_id = canvas.create_window(16, 44, anchor="nw", width=width - 32, height=270, window=response_frame)
+            header_id = canvas.create_window(main_x0 + 16, 122, anchor="nw",
+                                             width=main_x1 - main_x0 - 32, height=348,
+                                             window=response_frame)
 
         # Dummy references for minimize/expand (pagination removed).
         prev_id = None
@@ -1685,16 +3648,23 @@ class ClawdPet(tk.Tk):
         self._bubble_canvas = canvas
 
         # Input area — simple placeholder via direct entry manipulation.
-        _PLACEHOLDER = "Escribe aqui..."
+        _PLACEHOLDER = "Escribe tu mensaje..."
+
+        attach_bg_id = rounded_panel(main_x0 + 28, 512, main_x0 + 70, 556, 14, "#0b1538", "#22386f", 1)
+        attach_icon_id = canvas.create_text(main_x0 + 49, 534, text="\U0001F4CE", fill="#ffffff",
+                                            font=("Segoe UI Emoji", 14), tags=("bubble_bg",))
+        mic_bg_id = rounded_panel(main_x1 - 158, 512, main_x1 - 116, 556, 14, "#0b1538", "#22386f", 1)
+        mic_icon_id = canvas.create_text(main_x1 - 137, 534, text="\U0001F399", fill="#ffffff",
+                                         font=("Segoe UI Emoji", 14), tags=("bubble_bg",))
 
         entry = tk.Text(
             bub,
-            bg=THEME["bg_input"], fg=THEME["text_secondary"],
-            insertbackground=THEME["accent"], insertwidth=2,
-            relief="flat", font=FONT_INPUT,
-            highlightthickness=1, highlightbackground=THEME["bg_input_border"],
-            highlightcolor=THEME["accent"], bd=0,
-            wrap="word", padx=6, pady=6,
+            bg="#0a1530", fg="#ffffff",
+            insertbackground="#58c7ff", insertwidth=3,
+            relief="flat", font=("Bahnschrift", 12),
+            highlightthickness=1, highlightbackground="#3d5aab",
+            highlightcolor="#58c7ff", bd=0,
+            wrap="word", padx=10, pady=10,
         )
 
         # Override standard entry methods to make tk.Text act exactly like tk.Entry
@@ -1720,7 +3690,40 @@ class ClawdPet(tk.Tk):
         entry.insert = text_insert
 
         entry.insert(0, _PLACEHOLDER)
-        entry_id = canvas.create_window(20, 314, anchor="nw", width=width - 40, height=48, window=entry)
+        entry.config(fg="#5a78cc")
+        entry_id = canvas.create_window(main_x0 + 86, 512, anchor="nw",
+                                        width=main_x1 - main_x0 - 214, height=44,
+                                        window=entry)
+        _btn_bg = "#8a2be2"
+        _btn_fg = "#ffffff"
+        _btn_hover = "#58c7ff"
+        send_btn = tk.Label(
+            bub, text="ENVIAR", bg=_btn_bg, fg=_btn_fg,
+            font=("Arial Black", 10), cursor="hand2",
+            padx=10, pady=8, relief="flat", bd=0,
+            highlightbackground="#58c7ff", highlightthickness=2,
+        )
+        send_id = canvas.create_window(main_x1 - 104, 512, anchor="nw", width=82, height=44, window=send_btn)
+        _pulse_on = [False]
+        def _pulse_send():
+            if not _pulse_on[0]:
+                return
+            try:
+                cur = send_btn.cget("highlightbackground")
+                nxt = "#c02dff" if cur == "#58c7ff" else "#58c7ff"
+                send_btn.config(highlightbackground=nxt)
+                bub.after(600, _pulse_send)
+            except Exception:
+                pass
+        def _start_pulse(_e=None):
+            send_btn.config(bg="#5b3cf5", highlightbackground="#58c7ff")
+            _pulse_on[0] = True
+            _pulse_send()
+        def _stop_pulse(_e=None):
+            _pulse_on[0] = False
+            send_btn.config(bg=_btn_bg, highlightbackground="#8a2be2")
+        send_btn.bind("<Enter>", lambda _e: (_start_pulse(), send_btn.config(bg=_btn_hover, fg="#06111f")))
+        send_btn.bind("<Leave>", lambda _e: (_stop_pulse(), send_btn.config(bg=_btn_bg, fg=_btn_fg)))
 
         def _has_placeholder():
             return entry.get() == _PLACEHOLDER
@@ -1728,13 +3731,13 @@ class ClawdPet(tk.Tk):
         def _clear_placeholder(*_):
             if _has_placeholder():
                 entry.delete(0, tk.END)
-                entry.config(fg=THEME["text_primary"])
+                entry.config(fg="#ffffff")
 
         def _restore_placeholder(*_):
             if not entry.get().strip():
                 entry.delete(0, tk.END)
                 entry.insert(0, _PLACEHOLDER)
-                entry.config(fg=THEME["text_secondary"])
+                entry.config(fg="#5a78cc")
 
         entry.bind("<FocusIn>", _clear_placeholder, add=True)
         entry.bind("<Button-1>", lambda _e: entry.after_idle(_clear_placeholder))
@@ -1742,11 +3745,42 @@ class ClawdPet(tk.Tk):
         entry.bind("<FocusOut>", lambda _e: entry.after_idle(_restore_placeholder))
 
         status = tk.Label(
-            bub, text="Enter envía  ·  Esc cierra  ·  [Espacio] 2s: Hablar 🎙️",
-            bg=THEME["bg_bubble"], fg=THEME["text_label"],
-            font=FONT_LABEL, padx=12, pady=4, anchor="w",
+            bub, text="\u21b5 Enter envia   |   \u2191 Shift+Enter salto   |   Esc cierra   |   \U0001f3a4 Espacio 2s habla",
+            bg="#030714", fg="#9fb2ff",
+            font=("Bahnschrift", 8), padx=8, pady=2, anchor="w",
         )
-        status_id = canvas.create_window(16, 372, anchor="nw", width=width - 32, window=status)
+        self._status_label = status
+        status_id = canvas.create_window(main_x0 + 116, 576, anchor="nw",
+                                         width=main_x1 - main_x0 - 232, window=status)
+
+        for _attach_item in (attach_bg_id, attach_icon_id):
+            canvas.tag_bind(
+                _attach_item,
+                "<Button-1>",
+                lambda _e: self._pick_and_analyze_attachment(status, entry),
+            )
+            canvas.tag_bind(
+                _attach_item,
+                "<Enter>",
+                lambda _e: (
+                    canvas.configure(cursor="hand2"),
+                    status.configure(
+                        text="Adjuntar PDF, Excel, imagen, Word o PowerPoint",
+                        fg=chat_theme["accent_glow"],
+                    ),
+                ),
+            )
+            canvas.tag_bind(
+                _attach_item,
+                "<Leave>",
+                lambda _e: (
+                    canvas.configure(cursor=""),
+                    status.configure(
+                        text="Enter envia  |  Shift+Enter salto  |  Esc cierra  |  Espacio 2s habla",
+                        fg=chat_theme["text_label"],
+                    ),
+                ),
+            )
 
         # Position for the minimized (sleep) state — centered in the mini window.
         mini_cx = BUBBLE_MINI_SIZE // 2
@@ -1771,7 +3805,7 @@ class ClawdPet(tk.Tk):
             self.bubble_minimized = True
             self._reset_idle_timer()
             # Hide all UI chrome AND the bubble background
-            for item in (header_id, entry_id, status_id, minimize_id, history_id, folder_id, open_location_id, clear_id, brand_id, status_dot_id):
+            for item in (header_id, entry_id, send_id, status_id, minimize_id, history_id, folder_id, open_location_id, clear_id, brand_id, subtitle_id, status_dot_id):
                 canvas.itemconfigure(item, state="hidden")
             canvas.itemconfigure("bubble_bg", state="hidden")
             
@@ -1807,7 +3841,7 @@ class ClawdPet(tk.Tk):
                 except Exception:
                     pass
                 self._pet_speech_win = None
-            for item in (header_id, entry_id, status_id, minimize_id, history_id, folder_id, open_location_id, clear_id, brand_id, status_dot_id):
+            for item in (header_id, entry_id, send_id, status_id, minimize_id, history_id, folder_id, open_location_id, clear_id, brand_id, subtitle_id, status_dot_id):
                 canvas.itemconfigure(item, state="normal")
             canvas.itemconfigure("bubble_bg", state="normal")
             for item in _idle_items:
@@ -1816,6 +3850,11 @@ class ClawdPet(tk.Tk):
             canvas.configure(width=width, height=height)
             cx, cy = self.bubble_position(width, height)
             bub.geometry(f"{width}x{height}+{cx}+{cy}")
+            try:
+                self.lift()
+                self.attributes("-topmost", True)
+            except Exception:
+                pass
             entry.focus_set()
 
         self._expand_bubble = expand
@@ -1837,6 +3876,11 @@ class ClawdPet(tk.Tk):
             # If Guided Report Flow is active, process the current answer
             if getattr(self, "_guided_report_active", False):
                 self._handle_guided_report_step(prompt, status, entry)
+                return
+
+            # If Guided Email Flow is active, process the current answer
+            if getattr(self, "_guided_email_active", False):
+                self._handle_guided_email_step(prompt, status, entry)
                 return
 
             # Check if this is a new request to generate a report
@@ -1871,11 +3915,562 @@ class ClawdPet(tk.Tk):
                 self._start_guided_report_flow(topic, status, entry)
                 return
 
-            # Clear visible chat history on sending to focus solely on the active turn
+            # ── Mission Control: crear borrador de correo en el Inbox ─────
+            if self._try_seed_mc_draft(prompt, plow, status, entry):
+                return
+
+            # ── Mi Portafolio: editar archivos locales del proyecto ───────
+            if self._try_edit_portfolio(prompt, plow, status, entry):
+                return
+
+            # ── QCORE Product Launcher ────────────────────────────────────
+            _QCORE_PRODUCTS = {
+                "mission control": {
+                    "path": r"C:\Users\Felipe\Documents\QCORE-LOCAL\MISSION-CONTROL",
+                    "cmd": "npm run dev",
+                    "port": 5200,
+                    "name": "Mission Control",
+                },
+                "mision control": {  # Spanish variant (single 's')
+                    "path": r"C:\Users\Felipe\Documents\QCORE-LOCAL\MISSION-CONTROL",
+                    "cmd": "npm run dev",
+                    "port": 5200,
+                    "name": "Mission Control",
+                },
+                "smartstudent": {
+                    "path": r"G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\SMARTSTUDENT\APP",
+                    "cmd": "npm run dev",
+                    "port": 9002,
+                    "name": "SmartStudent",
+                },
+                "smart student": {
+                    "path": r"G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\SMARTSTUDENT\APP",
+                    "cmd": "npm run dev",
+                    "port": 9002,
+                    "name": "SmartStudent",
+                },
+                "roadix": {
+                    "path": r"G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\ROADIX\frontend",
+                    "cmd": "npm run dev",
+                    "port": 5173,
+                    "name": "Roadix",
+                },
+                "campaign studio": {
+                    "path": r"G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\CAMPAIGN-STUDIO",
+                    "cmd": "npm run dev",
+                    "port": 5174,
+                    "name": "Campaign Studio",
+                },
+                "unitcore": {
+                    "path": r"G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\UNITCORE",
+                    "cmd": "npm run dev",
+                    "port": 5175,
+                    "name": "UnitCore",
+                },
+                "luxium": {
+                    "path": r"G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\LUXIUM\MONOREPO",
+                    "cmd": "npm run dev",
+                    "port": 5176,
+                    "name": "Luxium",
+                },
+                "mi portafolio": {
+                    "path": r"C:\Users\Felipe\Documents\CV_JorgeCastro_v3.5",
+                    "cmd": "python -m http.server",
+                    "port": 8080,
+                    "name": "Mi Portafolio",
+                },
+                "portafolio": {
+                    "path": r"C:\Users\Felipe\Documents\CV_JorgeCastro_v3.5",
+                    "cmd": "python -m http.server",
+                    "port": 8080,
+                    "name": "Mi Portafolio",
+                },
+                "portfolio": {
+                    "path": r"C:\Users\Felipe\Documents\CV_JorgeCastro_v3.5",
+                    "cmd": "python -m http.server",
+                    "port": 8080,
+                    "name": "Mi Portafolio",
+                },
+            }
+            # Clean politeness and conversational prefixes for robust QCORE matching
+            cleaned_plow = plow
+            try:
+                import claudy_powers as cp
+                cleaned_plow = cp.clean_politeness_prefixes(plow).strip()
+            except Exception:
+                pass
+
+            _launch_triggers = [
+                "inicia ", "iniciar ", "inicializa ", "inicializar ",
+                "inciializa ", "inciializar ", "inicialisa ", "inicialisar ",
+                "lanza ", "lanzar ", "abre ", "abrir ",
+                "arranca ", "arrancar ", "levanta ", "levantar ",
+                "ejecuta ", "ejecutar ", "corre ", "correr ",
+                "start ", "launch ", "run ",
+            ]
+            _product_match = None
+            for trig in _launch_triggers:
+                if cleaned_plow.startswith(trig):
+                    product_query = cleaned_plow[len(trig):].strip()
+                    # Strip common Spanish prepositions: "inicializa a mission control" → "mission control"
+                    import re as _re
+                    product_query = _re.sub(r"^(?:a|el|la|al|de|del|los|las|panel\s+de|panel\s+del)\s+", "", product_query).strip()
+                    product_query = product_query.replace("-", " ").replace("_", " ")
+                    # Strip trailing politeness words like "por favor", "porfa", "plis"
+                    product_query = _re.sub(r"\s+(?:por\s+favor|porfa|plis|please)$", "", product_query).strip()
+                    # Skip-analysis hint anywhere in the prompt (rapido, sin analisis, no analices, skip)
+                    _skip_analysis = any(s in plow for s in (
+                        "rapido", "rápido", "sin analisis", "sin análisis",
+                        "no analices", "no analizar", "no análisis",
+                        "skip analysis", "skip-analysis",
+                    ))
+                    # Also strip the hint from the product query so "inicia mc rapido" matches "mc"
+                    product_query = _re.sub(r"\s+(?:rapido|rápido|sin\s+an[aá]lisis|no\s+anali\w+|skip[- ]analysis)$", "", product_query).strip()
+                    for key, info in _QCORE_PRODUCTS.items():
+                        if key in product_query or product_query in key:
+                            _product_match = info
+                            break
+                    if _product_match:
+                        break
+
+            # Fuzzy fallback for typos like "inciializa mission control".
+            # Only activates when a known QCORE product is explicitly present.
+            if not _product_match:
+                import difflib as _difflib
+                import re as _re
+                normalized_plow = cleaned_plow.replace("-", " ").replace("_", " ")
+                first_word = normalized_plow.split(None, 1)[0] if normalized_plow else ""
+                launch_words = (
+                    "inicia", "iniciar", "inicializa", "inicializar",
+                    "lanza", "lanzar", "abre", "abrir", "arranca", "arrancar",
+                    "levanta", "levantar", "ejecuta", "ejecutar", "corre", "correr",
+                    "start", "launch", "run",
+                )
+                looks_like_launch = any(
+                    _difflib.SequenceMatcher(None, first_word, word).ratio() >= 0.78
+                    for word in launch_words
+                )
+                if looks_like_launch:
+                    product_query = normalized_plow.split(None, 1)[1].strip() if " " in normalized_plow else ""
+                    product_query = _re.sub(r"^(?:a|el|la|al|de|del|los|las|panel\s+de|panel\s+del)\s+", "", product_query).strip()
+                    _skip_analysis = any(s in plow for s in (
+                        "rapido", "rápido", "sin analisis", "sin análisis",
+                        "no analices", "no analizar", "no análisis",
+                        "skip analysis", "skip-analysis",
+                    ))
+                    product_query = _re.sub(r"\s+(?:rapido|rápido|sin\s+an[aá]lisis|no\s+anali\w+|skip[- ]analysis)$", "", product_query).strip()
+                    for key, info in _QCORE_PRODUCTS.items():
+                        if key in product_query or product_query in key:
+                            _product_match = info
+                            break
+
+            if _product_match:
+                pinfo = _product_match
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    chat.add_user(prompt)
+                status.configure(text=f"Preparando {pinfo['name']}...", fg="#58c7ff")
+                self._active_product = pinfo["name"]
+                self._portfolio_mode = (pinfo["name"] == "Mi Portafolio")
+
+                def _launch_product_with_analysis(info=pinfo, skip_analysis=_skip_analysis):
+                    import webbrowser
+                    import hashlib
+                    import time as _time
+                    product_name = info["name"]
+                    product_path = info["path"]
+
+                    # ====== STEP 1: Lanzar dev server PRIMERO (no esperar al análisis) ======
+                    import socket
+                    def _find_free_port(start_port):
+                        port = start_port
+                        while port < 65535:
+                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                                try:
+                                    s.bind(("127.0.0.1", port))
+                                    return port
+                                except socket.error:
+                                    port += 1
+                        return start_port
+
+                    original_port = info["port"]
+                    free_port = _find_free_port(original_port)
+                    info["port"] = free_port
+
+                    cmd = info["cmd"]
+                    if "npm run dev" in cmd:
+                        # Detectar el runner real desde el script "dev" del package.json.
+                        # La presencia de next.config.* NO implica Next: Mission Control usa Vite
+                        # con next.config sobrante, y Vite aborta con `-p` (Unknown option).
+                        dev_script = ""
+                        try:
+                            import json as _json
+                            with open(os.path.join(product_path, "package.json"), "r", encoding="utf-8", errors="replace") as _pf:
+                                dev_script = ((_json.load(_pf).get("scripts") or {}).get("dev") or "")
+                        except Exception:
+                            pass
+                        uses_next = "next" in dev_script.replace("&", " ").split()
+                        # `-p` solo lo entiende Next; `--port` lo entienden Next y Vite.
+                        port_flag = "-p" if uses_next else "--port"
+                        cmd = f"npm run dev -- {port_flag} {free_port}"
+                    elif "http.server" in cmd:
+                        # Sitio estático (ej. Mi Portafolio): servir la carpeta con el puerto libre.
+                        cmd = f"python -m http.server {free_port}"
+
+                    def _notify_launching():
+                        ch = getattr(self, "_chat_view", None)
+                        if ch:
+                            ch.add_system(f"🚀 Iniciando **{product_name}** en puerto {free_port}...")
+                        try:
+                            status.configure(text=f"Iniciando {product_name}...", fg="#58c7ff")
+                        except Exception:
+                            pass
+                    self.after(0, _notify_launching)
+
+                    launch_ok = False
+                    try:
+                        proc = subprocess.Popen(
+                            cmd,
+                            cwd=info["path"],
+                            shell=True,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        self._launched_processes = getattr(self, "_launched_processes", {})
+                        self._launched_processes[info["name"]] = proc
+                        url = f"http://localhost:{info['port']}"
+
+                        # Esperar a que el dev server realmente acepte conexiones antes de abrir el navegador.
+                        # npm run dev (Next.js, y más sobre Drive en G:\) puede tardar bastante en hacer bind.
+                        def _port_ready(port, host="127.0.0.1"):
+                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as cs:
+                                cs.settimeout(1)
+                                return cs.connect_ex((host, port)) == 0
+
+                        deadline = _time.time() + 90  # hasta 90s para el cold start
+                        server_up = False
+                        while _time.time() < deadline:
+                            if proc.poll() is not None:
+                                break  # el proceso murió; no tiene sentido seguir esperando
+                            if _port_ready(info["port"]):
+                                server_up = True
+                                break
+                            self.after(0, lambda: status.configure(
+                                text=f"Esperando a {info['name']} en {url}...", fg="#58c7ff"))
+                            _time.sleep(1)
+
+                        if not server_up:
+                            def _fail():
+                                ch = getattr(self, "_chat_view", None)
+                                reason = "el proceso terminó" if proc.poll() is not None else "no respondió a tiempo"
+                                if ch:
+                                    ch.add_system(
+                                        f"❌ **{info['name']}** no llegó a iniciarse ({reason}). "
+                                        f"Revisa que `npm install` esté hecho en {info['path']}.")
+                                try:
+                                    status.configure(text=f"{info['name']} no inició", fg="#ff5555")
+                                except Exception:
+                                    pass
+                            self.after(0, _fail)
+                            return
+
+                        webbrowser.open(url)
+                        launch_ok = True
+                        def _done():
+                            ch = getattr(self, "_chat_view", None)
+                            if ch:
+                                ch.add_system(f"✅ **{info['name']}** corriendo en {url}")
+                            try:
+                                status.configure(text=f"{info['name']} activo — {url}", fg="#00ff99")
+                            except Exception:
+                                pass
+                        self.after(0, _done)
+                    except Exception as e:
+                        def _err(ex=e):
+                            ch = getattr(self, "_chat_view", None)
+                            if ch:
+                                ch.add_system(f"❌ Error al iniciar {info['name']}: {ex}")
+                            try:
+                                status.configure(text=f"Error: {ex}", fg="#ff5555")
+                            except Exception:
+                                pass
+                        self.after(0, _err)
+
+                    if not launch_ok:
+                        return  # No tiene sentido analizar si no levantó
+
+                    # ====== STEP 2: Análisis después, en background, opcional ======
+                    if skip_analysis:
+                        return
+
+                    self._product_analyses = getattr(self, "_product_analyses", {})
+                    if product_name in self._product_analyses:
+                        return  # ya hay análisis en memoria para esta sesión
+
+                    # Caché en disco: ~/.claudy/analyses/<hash>.md
+                    cache_dir = os.path.join(os.path.expanduser("~"), ".claudy", "analyses")
+                    try:
+                        os.makedirs(cache_dir, exist_ok=True)
+                    except Exception:
+                        pass
+                    cache_key = hashlib.md5(product_path.encode("utf-8", errors="replace")).hexdigest()[:16]
+                    cache_file = os.path.join(cache_dir, f"{cache_key}.md")
+
+                    def _src_changed_since(p, ts):
+                        # Cualquier archivo (fuera de node_modules/.git) modificado tras `ts` invalida el caché.
+                        try:
+                            for root, dirs, files in os.walk(p):
+                                dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "dist", ".next", "build")]
+                                for f in files:
+                                    try:
+                                        if os.path.getmtime(os.path.join(root, f)) > ts:
+                                            return True
+                                    except Exception:
+                                        continue
+                            return False
+                        except Exception:
+                            return True
+
+                    try:
+                        if os.path.exists(cache_file):
+                            cache_mtime = os.path.getmtime(cache_file)
+                            age = _time.time() - cache_mtime
+                            if age < 7 * 86400 and not _src_changed_since(product_path, cache_mtime):
+                                with open(cache_file, "r", encoding="utf-8", errors="replace") as cf:
+                                    cached_text = cf.read()
+                                self._product_analyses[product_name] = cached_text
+                                def _show_cached(txt=cached_text):
+                                    ch = getattr(self, "_chat_view", None)
+                                    if ch:
+                                        ch.add_system(f"📋 Análisis previo de **{product_name}** (caché):\n\n{txt}")
+                                self.after(0, _show_cached)
+                                return
+                    except Exception:
+                        pass
+
+                    def _notify_analyzing():
+                        ch = getattr(self, "_chat_view", None)
+                        if ch:
+                            ch.add_system(f"🔍 Analizando **{product_name}** en segundo plano...")
+                    self.after(0, _notify_analyzing)
+
+                    try:
+                        analysis_result = self._analyze_folder_deep(product_path, status)
+                        if isinstance(analysis_result, tuple):
+                            analysis_text, saved_path = analysis_result
+                        else:
+                            analysis_text = analysis_result
+                            saved_path = ""
+                        self._product_analyses[product_name] = analysis_text
+                        try:
+                            with open(cache_file, "w", encoding="utf-8") as cf:
+                                cf.write(analysis_text)
+                        except Exception:
+                            pass
+
+                        def _show_analysis(txt=analysis_text, sp=saved_path):
+                            ch = getattr(self, "_chat_view", None)
+                            if ch:
+                                ch.add_system(txt)
+                                if sp and os.path.exists(sp):
+                                    self._remember_file_artifact(sp)
+                                    ch.add_file_card(
+                                        filename=os.path.basename(sp),
+                                        on_open_file=lambda p=sp: self._open_path_file(p),
+                                        on_open_folder=lambda p=sp: self._open_path_location(p),
+                                        message="Abrir reporte de análisis"
+                                    )
+                        self.after(0, _show_analysis)
+                    except Exception as e:
+                        def _analysis_err(ex=e):
+                            ch = getattr(self, "_chat_view", None)
+                            if ch:
+                                ch.add_system(f"⚠️ No se pudo analizar {product_name}: {ex}")
+                        self.after(0, _analysis_err)
+                threading.Thread(target=_launch_product_with_analysis, daemon=True).start()
+                return
+            # ── NLP: gaming / retro ───────────────────────────────────────
+            _nlp_game_triggers = [
+                # Standard
+                "quiero jugar", "quisiera jugar", "jugar a", "jugar el juego",
+                "pon el juego", "busca el rom", "descarga el rom", "emular",
+                "instala el emulador", "juguemos", "abre el juego",
+                # Typo/partial variants ("quier" = "quiero" sin 'o')
+                "quier jugar", "quiero juga", "quiero jueg",
+                # System-named requests: "jugar ... nes/snes/gba"
+                "jugar", "juego de nes", "juego de snes", "juego de gba",
+                "rom de nes", "rom de snes", "rom de gba",
+            ]
+            # Only trigger on "jugar" if it appears with a system keyword (avoid false positives)
+            _plow_has_system = any(s in plow for s in ["nes", "snes", "gba", "gameboy", "nintendo", "famicom", "megaman", "mario", "zelda", "sonic", "contra", "castlevania", "metroid", "donkey kong"])
+            _game_hit = any(t in plow for t in _nlp_game_triggers if t != "jugar") or ("jugar" in plow and _plow_has_system)
+            if _game_hit:
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    chat.add_user(prompt)
+                    chat.show_typing()
+                status.configure(text="\ud83c\udfae Buscando juego...", fg=THEME["accent"])
+
+                def _game_worker(q=prompt, _st=status, _en=entry, _ch=chat):
+                    try:
+                        import claudy_gaming as cg
+                    except Exception as e:
+                        msg = f"\u274c Motor de gaming no disponible: {e}"
+                        self.after(0, lambda m=msg: self._game_done(m, _st, _en, _ch))
+                        return
+                    def _prog(m):
+                        self.after(0, lambda msg=m: _st.configure(text=msg, fg=THEME["accent"]))
+                    result = cg.play_retro_game(q, progress_cb=_prog)
+                    try:
+                        lower_result = (result or "").lower()
+                        if "no encontre el rom" in lower_result or "no encontré el rom" in lower_result:
+                            system_hint, game_name = cg._detect_system_and_game(q)
+                            if system_hint and game_name:
+                                self.after(0, lambda: _st.configure(text="🌐 Probando búsqueda alternativa...", fg=THEME["accent"]))
+                                alt_result = self._play_game(game_name, system_hint)
+                                if alt_result and alt_result != result:
+                                    result = alt_result
+                    except Exception:
+                        pass
+                    self.after(0, lambda m=result: self._game_done(m, _st, _en, _ch))
+
+                threading.Thread(target=_game_worker, daemon=True, name="gaming-worker").start()
+                return
+
+            # ── NLP: alarmas ──────────────────────────────────────────────
+            _nlp_alarm_del_all = [
+                "elimina todas las alarmas", "borra todas las alarmas",
+                "cancela todas las alarmas", "quita todas las alarmas",
+                "eliminar todas las alarmas", "borrar todas las alarmas",
+            ]
+            _nlp_alarm_del_one = [
+                "elimina la alarma", "borra la alarma", "cancela la alarma",
+                "quita la alarma", "eliminar alarma", "borrar alarma",
+                "cancela alarma", "elimina alarma", "borra alarma",
+            ]
+            _nlp_alarm_list = [
+                "mis alarmas", "ver mis alarmas", "muéstrame las alarmas",
+                "mostrame las alarmas", "qué alarmas tengo", "que alarmas tengo",
+                "lista de alarmas", "alarmas pendientes",
+            ]
+            _nlp_alarm_create = [
+                "pon una alarma", "ponme una alarma", "crea una alarma", "crear alarma",
+                "programa una alarma", "recuérdame en", "recuerdame en",
+                "avísame en", "avisame en", "despiértame a", "despertarme a",
+                "alarma para", "alarma a las", "alarma en",
+            ]
+
+            def _alarm_respond(msg):
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    chat.add_user(prompt)
+                    chat.add_bot(msg)
+                else:
+                    self._set_response_text(msg)
+                entry.configure(state="normal"); entry.focus_set()
+
+            if any(t in plow for t in _nlp_alarm_del_all):
+                msg = self._alarm_delete_all()
+                _alarm_respond(msg)
+                status.configure(text="🗑️ Alarmas eliminadas", fg=THEME["accent"]); return
+
+            if any(t in plow for t in _nlp_alarm_del_one):
+                msg = self._alarm_delete_by_text(prompt)
+                _alarm_respond(msg)
+                status.configure(text="🗑️ Alarma eliminada", fg=THEME["accent"]); return
+
+            if any(t in plow for t in _nlp_alarm_list):
+                msg = self._alarm_list()
+                _alarm_respond(msg)
+                status.configure(text="⏰ Alarmas", fg=THEME["accent"]); return
+
+            if any(t in plow for t in _nlp_alarm_create):
+                msg = self._alarm_set(prompt)
+                _alarm_respond(msg)
+                status.configure(text="⏰ Alarma configurada", fg=THEME["accent"]); return
+
+
+            # ── NLP: actualizar memoria (Claudy + agentes + Obsidian) ─────
+            _mem_hit, _mem_fact = self._extract_memory_fact(prompt, plow)
+            if _mem_hit:
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    chat.add_user(prompt)
+                    chat.show_typing()
+                status.configure(text="🧠 Actualizando memoria...", fg=THEME["accent"])
+
+                def _mem_worker(fact=_mem_fact):
+                    try:
+                        msg = self._remember_knowledge(fact)
+                    except Exception as e:
+                        msg = f"No pude actualizar la memoria: {e}"
+
+                    def _done():
+                        c = getattr(self, "_chat_view", None)
+                        if c:
+                            try:
+                                c.hide_typing()
+                            except Exception:
+                                pass
+                            c.add_bot(msg)
+                        else:
+                            self._set_response_text(msg)
+                        try:
+                            status.configure(text="🧠 Memoria actualizada", fg=THEME["accent"])
+                            entry.configure(state="normal"); entry.focus_set()
+                        except tk.TclError:
+                            pass
+                    self.after(0, _done)
+
+                threading.Thread(target=_mem_worker, daemon=True).start()
+                return
+
+            # ── NLP: notas ────────────────────────────────────────────────
+            _nlp_note_triggers = [
+                "guarda una nota", "guarda esto", "anota esto", "anota que",
+                "crear nota", "crea una nota", "guardar nota", "nota:", "nota sobre",
+                "quiero recordar", "no olvides que", "recuerda que",
+            ]
+            _nlp_note_list_triggers = [
+                "mis notas", "ver mis notas", "muéstrame mis notas", "mostrame mis notas",
+                "qué notas tengo", "que notas tengo", "lista de notas",
+            ]
+            _note_nlp_hit = any(t in plow for t in _nlp_note_triggers)
+            _note_list_hit = any(t in plow for t in _nlp_note_list_triggers)
+            if _note_list_hit:
+                msg = self._notes_list()
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    chat.add_user(prompt)
+                    chat.add_bot(msg)
+                else:
+                    self._set_response_text(msg)
+                status.configure(text="📝 Notas", fg=THEME["accent"])
+                entry.configure(state="normal"); entry.focus_set(); return
+            if _note_nlp_hit:
+                # Strip the trigger prefix so we save just the note content
+                note_content = prompt
+                for t in sorted(_nlp_note_triggers, key=len, reverse=True):
+                    if t in plow:
+                        idx = plow.find(t)
+                        note_content = prompt[idx + len(t):].strip(" :,-")
+                        break
+                if not note_content:
+                    note_content = prompt
+                msg = self._notes_add(note_content)
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    chat.add_user(prompt)
+                    chat.add_bot(msg)
+                else:
+                    self._set_response_text(msg)
+                status.configure(text="📝 Nota guardada", fg=THEME["accent"])
+                entry.configure(state="normal"); entry.focus_set(); return
+
+
             chat = getattr(self, "_chat_view", None)
             if chat is not None:
                 try:
-                    chat.clear()
                     chat.add_user(prompt)
                     chat.show_typing()
                 except Exception:
@@ -2433,6 +5028,195 @@ class ClawdPet(tk.Tk):
                 entry.configure(state="normal")
                 entry.focus_set()
                 return
+            # /gmail and /drive — high-level shortcuts over the MCP servers.
+            if prompt.startswith("/gmail") or prompt.startswith("/drive"):
+                server = "gmail" if prompt.startswith("/gmail") else "gdrive"
+                parts = prompt.split(None, 2)
+                sub = parts[1].strip().lower() if len(parts) > 1 else ""
+                rest = parts[2] if len(parts) > 2 else ""
+                self._set_response_text(f"{server} procesando...")
+                status.configure(text=f"{server}...", fg=THEME["accent"])
+
+                def _do_google():
+                    try:
+                        import mcp_client
+                    except Exception as e:
+                        self.after(0, lambda: self._set_response_text(f"MCP no disponible: {e}"))
+                        return
+                    if not sub or sub in ("help", "?"):
+                        if server == "gmail":
+                            msg = ("Gmail:\n"
+                                   "  /gmail tools                 lista herramientas\n"
+                                   "  /gmail search <query>        buscar correos\n"
+                                   "  /gmail read <id>             leer correo por id\n"
+                                   "  /gmail send <to>|<subj>|<body>  enviar correo\n"
+                                   "  /gmail raw <tool> <json>     llamada directa")
+                        else:
+                            msg = ("Drive:\n"
+                                   "  /drive tools                 lista herramientas\n"
+                                   "  /drive search <query>        buscar archivos\n"
+                                   "  /drive read <fileId>         leer archivo por id\n"
+                                   "  /drive raw <tool> <json>     llamada directa")
+                    elif sub == "tools":
+                        msg = mcp_client.list_tools(server)
+                    elif sub == "search":
+                        tool = "search_emails" if server == "gmail" else "search"
+                        msg = mcp_client.call_tool(server, tool, {"query": rest})
+                    elif sub == "read":
+                        if server == "gmail":
+                            msg = mcp_client.call_tool(server, "read_email", {"messageId": rest.strip()})
+                        else:
+                            msg = mcp_client.call_tool(server, "read", {"fileId": rest.strip()})
+                    elif sub == "send" and server == "gmail":
+                        pieces = [p.strip() for p in rest.split("|", 2)]
+                        if len(pieces) < 3:
+                            msg = "Usa: /gmail send <to>|<subject>|<body>"
+                        else:
+                            msg = mcp_client.call_tool(server, "send_email", {
+                                "to": [pieces[0]],
+                                "subject": pieces[1],
+                                "body": pieces[2],
+                            })
+                    elif sub == "raw":
+                        rp = rest.split(None, 1)
+                        tool = rp[0] if rp else ""
+                        args_str = rp[1] if len(rp) > 1 else "{}"
+                        try:
+                            args = json.loads(args_str)
+                        except Exception:
+                            args = {"input": args_str}
+                        msg = mcp_client.call_tool(server, tool, args) if tool else "Usa: /xxx raw <tool> <json>"
+                    else:
+                        msg = f"Subcomando desconocido: {sub}. Usa /{server} help"
+                    self.after(0, lambda m=msg: self._set_response_text(m))
+                    self.after(0, lambda: status.configure(text=f"{server} listo", fg=THEME["accent"]))
+                threading.Thread(target=_do_google, daemon=True).start()
+                entry.configure(state="normal")
+                entry.focus_set()
+                return
+            # /docs and /sheets — Google Docs/Sheets via google_docs module.
+            if prompt.startswith("/docs") or prompt.startswith("/sheets"):
+                cmd_type = "docs" if prompt.startswith("/docs") else "sheets"
+                parts = prompt.split(None, 2)
+                sub = parts[1].strip().lower() if len(parts) > 1 else ""
+                rest = parts[2] if len(parts) > 2 else ""
+                self._set_response_text(f"{cmd_type} procesando...")
+                status.configure(text=f"{cmd_type}...", fg=THEME["accent"])
+
+                def _do_docs_sheets():
+                    try:
+                        import google_docs as gdocs
+                    except Exception as e:
+                        self.after(0, lambda: self._set_response_text(f"Google Docs no disponible: {e}"))
+                        return
+                    if not sub or sub in ("help", "?"):
+                        if cmd_type == "docs":
+                            msg = ("Docs:\n"
+                                   "  /docs connect              conectar Google\n"
+                                   "  /docs status               estado conexion\n"
+                                   "  /docs search <query>       buscar documentos\n"
+                                   "  /docs read <id>            leer documento\n"
+                                   "  /docs create <title>|<content>  crear documento\n"
+                                   "  /docs append <id>|<text>   agregar texto al final")
+                        else:
+                            msg = ("Sheets:\n"
+                                   "  /sheets connect            conectar Google\n"
+                                   "  /sheets status             estado conexion\n"
+                                   "  /sheets search <query>     buscar hojas\n"
+                                   "  /sheets read <id> [range]  leer hoja (default A1:Z1000)\n"
+                                   "  /sheets create <title>|<headers>  crear hoja\n"
+                                   "  /sheets append <id>|<range>|<data>  agregar filas")
+                    elif sub == "connect":
+                        result = gdocs.connect()
+                        msg = "Conectado!" if result.get("connected") else f"Error: {result.get('reason')}"
+                    elif sub == "status":
+                        result = gdocs.status()
+                        msg = "Conectado" if result.get("connected") else f"No conectado: {result.get('reason')}"
+                    elif sub == "search":
+                        doc_type = "document" if cmd_type == "docs" else "spreadsheet"
+                        result = gdocs.search_docs(rest, doc_type=doc_type)
+                        if result.get("connected"):
+                            items = result.get("items", [])
+                            if not items:
+                                msg = "No se encontraron resultados."
+                            else:
+                                msg = f"Encontrados {len(items)}:\n"
+                                for item in items:
+                                    msg += f"  - {item['name']} (id: {item['id']})\n"
+                        else:
+                            msg = f"Error: {result.get('reason')}"
+                    elif sub == "read":
+                        read_parts = rest.split(None, 1)
+                        doc_id = read_parts[0] if read_parts else ""
+                        if not doc_id:
+                            msg = f"Usa: /{cmd_type} read <id>"
+                        elif cmd_type == "docs":
+                            result = gdocs.read_doc(doc_id)
+                            if result.get("ok"):
+                                msg = f"Titulo: {result.get('title')}\n\n{result.get('content', '')[:5000]}"
+                            else:
+                                msg = f"Error: {result.get('reason')}"
+                        else:
+                            range_name = read_parts[1] if len(read_parts) > 1 else "A1:Z1000"
+                            result = gdocs.read_sheet(doc_id, range_name)
+                            if result.get("ok"):
+                                values = result.get("values", [])
+                                msg = f"Rango: {result.get('range')}\nFilas: {len(values)}\n\n"
+                                for row in values[:50]:
+                                    msg += " | ".join(str(c) for c in row) + "\n"
+                                if len(values) > 50:
+                                    msg += f"\n... y {len(values) - 50} filas mas"
+                            else:
+                                msg = f"Error: {result.get('reason')}"
+                    elif sub == "create":
+                        create_parts = rest.split("|", 1)
+                        title = create_parts[0].strip() if create_parts else ""
+                        if not title:
+                            msg = f"Usa: /{cmd_type} create <titulo>"
+                        elif cmd_type == "docs":
+                            content = create_parts[1].strip() if len(create_parts) > 1 else ""
+                            result = gdocs.create_doc(title, content)
+                            if result.get("ok"):
+                                msg = f"Creado: {result.get('title')}\nID: {result.get('id')}\nLink: {result.get('link')}"
+                            else:
+                                msg = f"Error: {result.get('reason')}"
+                        else:
+                            headers_str = create_parts[1].strip() if len(create_parts) > 1 else ""
+                            headers = [h.strip() for h in headers_str.split(",")] if headers_str else None
+                            result = gdocs.create_sheet(title, headers=headers)
+                            if result.get("ok"):
+                                msg = f"Creada: {result.get('title')}\nID: {result.get('id')}\nLink: {result.get('link')}"
+                            else:
+                                msg = f"Error: {result.get('reason')}"
+                    elif sub == "append":
+                        append_parts = rest.split("|", 2 if cmd_type == "sheets" else 1)
+                        doc_id = append_parts[0].strip() if append_parts else ""
+                        if not doc_id:
+                            msg = f"Usa: /{cmd_type} append <id>|<text>"
+                        elif cmd_type == "docs":
+                            text = append_parts[1].strip() if len(append_parts) > 1 else ""
+                            if not text:
+                                msg = "Usa: /docs append <id>|<texto>"
+                            else:
+                                result = gdocs.append_to_doc(doc_id, "\n" + text)
+                                msg = "Agregado!" if result.get("ok") else f"Error: {result.get('reason')}"
+                        else:
+                            range_name = append_parts[1].strip() if len(append_parts) > 1 else "A1"
+                            data_str = append_parts[2].strip() if len(append_parts) > 2 else ""
+                            if not data_str:
+                                msg = "Usa: /sheets append <id>|<range>|<fila1;fila2>"
+                            else:
+                                rows = [r.split(",") for r in data_str.split(";")]
+                                result = gdocs.append_to_sheet(doc_id, range_name, rows)
+                                msg = f"Agregadas {result.get('updatedRows')} filas" if result.get("ok") else f"Error: {result.get('reason')}"
+                    else:
+                        msg = f"Subcomando desconocido: {sub}. Usa /{cmd_type} help"
+                    self.after(0, lambda m=msg: self._set_response_text(m))
+                    self.after(0, lambda: status.configure(text=f"{cmd_type} listo", fg=THEME["accent"]))
+                threading.Thread(target=_do_docs_sheets, daemon=True).start()
+                entry.configure(state="normal")
+                entry.focus_set()
+                return
             # Handle /browse <url> - fetch page and summarize.
             if prompt.startswith("/browse"):
                 parts = prompt.split(None, 1)
@@ -2519,6 +5303,130 @@ class ClawdPet(tk.Tk):
                         fg=THEME["accent"] if ok else "#ff6b6b",
                     ))
                 threading.Thread(target=_do_batch, daemon=True).start()
+                entry.configure(state="normal")
+                entry.focus_set()
+                return
+            # Handle /index command (RAG: index a folder of documents).
+            if prompt.startswith("/index"):
+                parts = prompt.split(None, 1)
+                folder = parts[1].strip().strip('"') if len(parts) > 1 else ""
+                if not folder:
+                    self._set_response_text("Usa: /index <carpeta>\nIndexa tus documentos para luego preguntar con /docs.")
+                    status.configure(text="Falta carpeta", fg="#ff6b6b")
+                    entry.configure(state="normal")
+                    entry.focus_set()
+                    return
+                self._set_response_text(f"Indexando: {folder}\n(esto puede tardar la primera vez)")
+                status.configure(text="Indexando...", fg=THEME["accent"])
+
+                def _do_index():
+                    try:
+                        import rag_index
+                        res = rag_index.index_folder(folder)
+                    except Exception as e:
+                        res = {"ok": False, "error": f"Error: {e}"}
+                    if res.get("ok"):
+                        msg = (f"Listo. {res['files_indexed']} archivos, "
+                               f"{res['chunks_added']} fragmentos nuevos.\n"
+                               f"Total indexado: {res['total_chunks']} | motor: {res['backend']}\n"
+                               f"Pregunta con: /docs <tu pregunta>")
+                    else:
+                        msg = res.get("error", "No pude indexar.")
+                    self.after(0, lambda: self._set_response_text(msg))
+                    self.after(0, lambda: status.configure(
+                        text="Indexado" if res.get("ok") else "Error",
+                        fg=THEME["accent"] if res.get("ok") else "#ff6b6b",
+                    ))
+                threading.Thread(target=_do_index, daemon=True).start()
+                entry.configure(state="normal")
+                entry.focus_set()
+                return
+            # Handle /docs command (RAG: answer using indexed documents).
+            if prompt.startswith("/docs"):
+                parts = prompt.split(None, 1)
+                question = parts[1].strip() if len(parts) > 1 else ""
+                if not question:
+                    self._set_response_text("Usa: /docs <pregunta>\nResponde usando los documentos que indexaste con /index.")
+                    status.configure(text="Falta pregunta", fg="#ff6b6b")
+                    entry.configure(state="normal")
+                    entry.focus_set()
+                    return
+                self._set_response_text("Buscando en tus documentos...")
+                status.configure(text="Consultando docs...", fg=THEME["accent"])
+
+                def _do_docs():
+                    try:
+                        import rag_index
+                        hits = rag_index.search(question, k=4)
+                    except Exception as e:
+                        hits = []
+                        self.after(0, lambda: self._set_response_text(f"Error RAG: {e}"))
+                    if not hits:
+                        self.after(0, lambda: self._set_response_text(
+                            "No encontré nada relevante. ¿Indexaste una carpeta con /index?"))
+                        self.after(0, lambda: status.configure(text="Sin resultados", fg=THEME["text_secondary"]))
+                        return
+                    context_parts = []
+                    for h in hits:
+                        name = os.path.basename(h["path"])
+                        context_parts.append(f"[Fuente: {name}]\n{h['chunk']}")
+                    context = "\n\n".join(context_parts)
+                    enhanced = (
+                        "Responde la pregunta del usuario usando EXCLUSIVAMENTE estos extractos de "
+                        "sus documentos. Cita el archivo fuente entre paréntesis. Si los extractos no "
+                        "alcanzan, dilo claramente.\n\n"
+                        f"{context}\n\nPregunta: {question}"
+                    )
+                    try:
+                        answer = self.send_quick_message(enhanced, _skip_skill_action=True)
+                    except Exception as e:
+                        answer = f"Error consultando el modelo: {e}"
+                    sources = ", ".join(sorted({os.path.basename(h["path"]) for h in hits}))
+                    answer = f"{answer}\n\n— Fuentes: {sources}"
+                    self.after(0, lambda: self.finish_quick_answer(answer, status, entry))
+                threading.Thread(target=_do_docs, daemon=True).start()
+                entry.configure(state="normal")
+                entry.focus_set()
+                return
+            # Handle /rag command (RAG index status / clear).
+            if prompt.startswith("/rag"):
+                parts = prompt.split()
+                sub = parts[1].lower() if len(parts) > 1 else "status"
+                try:
+                    import rag_index
+                    if sub == "clear":
+                        rag_index.clear()
+                        msg = "Índice RAG borrado."
+                    else:
+                        st = rag_index.status()
+                        if not st.get("exists"):
+                            msg = "No hay índice todavía. Usa: /index <carpeta>"
+                        else:
+                            folders = "\n".join(f"  • {f}" for f in st.get("folders", [])) or "  (ninguna)"
+                            msg = (f"Índice RAG:\n{folders}\n"
+                                   f"Archivos: {st.get('files', 0)} | Fragmentos: {st.get('chunks', 0)} | "
+                                   f"Motor: {st.get('backend', '?')}")
+                except Exception as e:
+                    msg = f"Error RAG: {e}"
+                self._set_response_text(msg)
+                status.configure(text="RAG", fg=THEME["accent"])
+                entry.configure(state="normal")
+                entry.focus_set()
+                return
+            # Handle /stream command (toggle live token streaming in the bubble).
+            if prompt.startswith("/stream"):
+                arg = prompt[len("/stream"):].strip().lower()
+                if arg in ("on", "1", "true", "si", "sí"):
+                    self._streaming_enabled = True
+                    msg = "Streaming activado: verás las respuestas escribirse en vivo."
+                elif arg in ("off", "0", "false", "no"):
+                    self._streaming_enabled = False
+                    msg = "Streaming desactivado."
+                else:
+                    estado = "ON" if getattr(self, "_streaming_enabled", False) else "OFF"
+                    msg = f"Streaming está {estado}. Usa: /stream on  |  /stream off"
+                self._set_response_text(msg)
+                status.configure(text="Streaming", fg=THEME["accent"])
                 entry.configure(state="normal")
                 entry.focus_set()
                 return
@@ -2669,7 +5577,32 @@ class ClawdPet(tk.Tk):
                 entry.configure(state="normal")
                 entry.focus_set()
                 return
+            # ── ALARMAS ──────────────────────────────────────────────────
+            if prompt.startswith("/alarma"):
+                rest = prompt[7:].strip()
+                if not rest or rest in ("list", "ver", "listar"):
+                    self._set_response_text(self._alarm_list())
+                elif rest.startswith("del ") or rest.startswith("borrar "):
+                    aid = rest.split(None, 1)[1].strip()
+                    self._set_response_text(self._alarm_delete(aid))
+                else:
+                    msg = self._alarm_set(rest)
+                    self._set_response_text(msg)
+                entry.configure(state="normal"); entry.focus_set(); return
+            # ── NOTAS ─────────────────────────────────────────────────────
+            if prompt.startswith("/nota"):
+                rest = prompt[5:].strip()
+                if not rest or rest in ("list", "ver", "listar", "mis notas"):
+                    self._set_response_text(self._notes_list())
+                elif rest.startswith("del ") or rest.startswith("borrar "):
+                    nid = rest.split(None, 1)[1].strip()
+                    self._set_response_text(self._notes_delete(nid))
+                else:
+                    msg = self._notes_add(rest)
+                    self._set_response_text(msg)
+                entry.configure(state="normal"); entry.focus_set(); return
             entry.configure(state="disabled")
+
             thinking = random.choice([
                 "Pensando...", "Dándole vueltas...", "Conectando neuronas...",
                 "Consultando al oráculo...", "Hablando con las estrellas...", "Esforzándome...",
@@ -2698,6 +5631,9 @@ class ClawdPet(tk.Tk):
             submit()
             return "break"   # Stop standard Return key from adding a newline
 
+        send_btn.bind("<Button-1>", submit)
+        send_btn.bind("<Enter>", lambda _e: send_btn.config(bg="#58c7ff", fg="#06111f"))
+        send_btn.bind("<Leave>", lambda _e: send_btn.config(bg="#c02dff", fg="#ffffff"))
         entry.bind("<Return>", handle_return)
         entry.bind("<Escape>", lambda _e: self.hide_bubble())
         entry.bind("<FocusIn>", lambda _e: self._record_activity())
@@ -2761,17 +5697,169 @@ class ClawdPet(tk.Tk):
             pass
         bub.bind("<Escape>", lambda _e: self.hide_bubble())
 
-        cx, cy = self.bubble_position(width, height)
+        # Use the WebView's actual physical footprint for positioning + overlap
+        # checks (it's larger than BUBBLE_WIDTH x BUBBLE_HEIGHT on high-DPI
+        # displays because pywebview renders CSS px at logical-pixel size).
+        if self.webview_win is not None:
+            web_logical_w, web_logical_h, cx, cy, chat_w, chat_h = self._webview_layout_for_panels()
+        else:
+            web_logical_w, web_logical_h = width, height
+            chat_w = width
+            chat_h = height
+            cx, cy = self.bubble_position(chat_w, chat_h)
+
+        # Collision avoidance: check if the pet overlaps with the chat bubble
+        # and step aside to the left or right to remain fully visible!
+        win_left = cx
+        win_right = cx + chat_w
+        win_top = cy
+        win_bottom = cy + chat_h
+
+        pet_left = self.base_x
+        pet_right = self.base_x + self.width
+        pet_top = self.base_y
+        pet_bottom = self.base_y + self.height
+
+        overlaps = (pet_left < win_right and pet_right > win_left and
+                    pet_top < win_bottom and pet_bottom > win_top)
+
+        if overlaps:
+            # Save original position to restore later when chat closes
+            if not hasattr(self, "_pre_chat_pet_x") or self._pre_chat_pet_x is None:
+                self._pre_chat_pet_x = self.base_x
+                self._pre_chat_pet_y = self.base_y
+            
+            # Determine which side has more space (left or right of the chat window)
+            space_left = win_left - work_area.left
+            space_right = work_area.right - win_right
+            
+            if space_left >= space_right:
+                # Place pet to the left of the chat window
+                new_pet_x = win_left - self.width - 12
+            else:
+                # Place pet to the right of the chat window
+                new_pet_x = win_right + 12
+                
+            # Keep pet y near the bottom or at its current position, clamped
+            new_pet_y = max(work_area.top, min(self.base_y, work_area.bottom - self.height))
+            new_pet_x = max(work_area.left, min(new_pet_x, work_area.right - self.width))
+            
+            try:
+                # Move the pet window!
+                self.geometry(f"+{new_pet_x}+{new_pet_y}")
+                self.base_x = new_pet_x
+                self.base_y = new_pet_y
+            except Exception:
+                pass
+
         bub.geometry(f"{width}x{height}+{cx}+{cy}")
+        try:
+            self.lift()
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
         self.bubble_win = bub
         self._bubble_opened_at = time.time()
         self._reset_idle_timer()
 
-        # Foco automático en el input al abrir el chat — el usuario puede escribir directo
-        try:
-            bub.after(50, lambda: (bub.lift(), bub.focus_force(), entry.focus_set()))
-        except Exception:
-            pass
+        # Save submit function and entry reference for webview integration
+        self._submit_fn = submit
+        self._chat_entry_widget = entry
+        self._status_widget = status
+
+        # WebView redirection phase — only redirect if HTML is fully loaded
+        if self.webview_win is not None and self._webview_ready:
+            # Hide the native Tkinter window
+            bub.withdraw()
+            
+            # Move the webview from off-screen to correct position
+            # (window is always visible but parked at -9999,-9999 when "hidden")
+            w_cx, w_cy = physical_to_webview(cx, cy)
+            try:
+                self.webview_win.resize(web_logical_w, web_logical_h)
+                self.webview_win.move(w_cx, w_cy)
+            except Exception as e:
+                print(f"[webview show] error: {e}")
+                # Fallback: show the tkinter window
+                bub.deiconify()
+                try:
+                    bub.after(50, lambda: (bub.lift(), bub.focus_force(), entry.focus_set()))
+                except Exception:
+                    pass
+                return
+
+            self._webview_visible = True
+            
+            # Keep Claudy BELOW the webview while chat is open.
+            # Topmost will be restored in hide_bubble() when chat closes.
+            try:
+                self.attributes("-topmost", False)
+            except Exception:
+                pass
+            
+            # Instanciate WebViewChatWrapper
+            self._chat_view = WebViewChatWrapper(self)
+            
+            # Overrides for status
+            status.original_configure = status.configure
+            def _web_status_configure(text=None, fg=None, **kwargs):
+                if text is not None:
+                    self._eval_in_web(f"updateStatusText({json.dumps(text)})")
+                try:
+                    status.original_configure(text=text, **{k:v for k,v in kwargs.items() if k != 'fg'})
+                except Exception:
+                    pass
+            status.configure = _web_status_configure
+            status.config = _web_status_configure
+
+            # Overrides for entry
+            entry.original_delete = entry.delete
+            def _web_entry_delete(first, last=None):
+                self._eval_in_web("try { clearInputField(); } catch(e) {}")
+                try:
+                    entry.original_delete(first, last)
+                except Exception:
+                    pass
+            entry.delete = _web_entry_delete
+
+            entry.original_insert = entry.insert
+            def _web_entry_insert(index, chars, *tags):
+                self._eval_in_web(f"try {{ insertInputText({json.dumps(chars)}); }} catch(e) {{}}")
+                try:
+                    entry.original_insert(index, chars, *tags)
+                except Exception:
+                    pass
+            entry.insert = _web_entry_insert
+
+            def _web_entry_focus_set():
+                self._eval_in_web("try { focusInputField(); } catch(e) {}")
+                try:
+                    entry.focus()
+                except Exception:
+                    pass
+            entry.focus_set = _web_entry_focus_set
+
+            entry.original_configure = entry.configure
+            def _web_entry_configure(*args, **kwargs):
+                pass
+            entry.configure = _web_entry_configure
+            entry.config = _web_entry_configure
+
+            # NOTE: React loads history automatically via get_history() API on mount.
+            # Only inject messages via Python when loading from an Obsidian buffer
+            # (i.e. history imported from a previous session file).
+            # Do NOT call add_system here — it would duplicate the React welcome message.
+            if getattr(self, "_chat_history_buffer", None) is not None:
+                self._chat_view.load_history(self._chat_history_buffer)
+                self._chat_history_buffer = None
+                
+            self.after(100, lambda: self._eval_in_web("try { focusInputField(); } catch(e) {}"))
+        else:
+            # Foco automático en el input al abrir el chat — el usuario puede escribir directo
+            try:
+                bub.after(50, lambda: (bub.lift(), bub.focus_force(), entry.focus_set()))
+            except Exception:
+                pass
 
     def _normalize_existing_path(self, path):
         path = (path or "").strip().strip('"\'')
@@ -2788,7 +5876,10 @@ class ClawdPet(tk.Tk):
             if candidate:
                 return os.path.normpath(os.path.abspath(os.path.expanduser(candidate)))
 
-        labels = ("Ruta:", "Ubicacion:", "Salida:", "Archivo:", "Archivo creado:", "Archivo actualizado:")
+        # Solo etiquetas que afirman EXPLÍCITAMENTE que se creó/actualizó un archivo.
+        # (No "Ruta:"/"Archivo:"/"Ubicacion:" sueltas: aparecen también cuando Claudy
+        #  ANALIZA o menciona un archivo existente y no debe mostrarse "archivo creado".)
+        labels = ("Archivo creado:", "Archivo actualizado:")
         for line in text.splitlines():
             stripped = line.strip()
             for label in labels:
@@ -2800,13 +5891,8 @@ class ClawdPet(tk.Tk):
                         if os.path.exists(parent):
                             return normalized
 
-        for match in re.finditer(r"[A-Za-z]:[\\/][^\r\n<>\"|?*]+", text):
-            candidate = match.group(0).strip().rstrip(").,;")
-            if candidate:
-                normalized = os.path.normpath(os.path.abspath(os.path.expanduser(candidate)))
-                parent = os.path.dirname(normalized) if not os.path.isdir(normalized) else normalized
-                if os.path.exists(parent):
-                    return normalized
+        # Nota: NO se escanean rutas sueltas del texto. Una creación real SIEMPRE emite
+        # el marcador [CLAUDY_PATH:...]; mencionar una ruta al analizar no es crear nada.
         return ""
 
     def _remember_file_artifact(self, path):
@@ -2821,11 +5907,14 @@ class ClawdPet(tk.Tk):
         if btn is None:
             return
         try:
+            theme = getattr(self, "_dashboard_chat_theme", THEME)
             path = getattr(self, "_last_file_artifact_path", None)
             ready = bool(path)
             btn.configure(
-                fg=THEME["accent"] if ready else THEME["text_secondary"],
-                bg=THEME["bg_input"] if ready else THEME["bg_bubble_border"],
+                fg=theme["accent_glow"] if ready else theme["text_secondary"],
+                bg=theme.get("button_bg", theme["bg_input"]),
+                highlightbackground=theme["bg_input_border"],
+                highlightthickness=1,
             )
         except tk.TclError:
             pass
@@ -2835,12 +5924,31 @@ class ClawdPet(tk.Tk):
         if btn is None:
             return
         try:
+            theme = getattr(self, "_dashboard_chat_theme", THEME)
             path = getattr(self, "_last_file_artifact_path", None)
             ready = bool(path)
-            if active and ready:
-                btn.configure(fg="#ffffff", bg=THEME["accent"])
+            status = getattr(self, "_status_label", None)
+            if active:
+                if ready:
+                    btn.configure(
+                        fg=theme["accent_glow"],
+                        bg=theme.get("button_hover", theme["bg_input"]),
+                        highlightbackground=theme["accent"]
+                    )
+                    if status:
+                        status.configure(text="Abrir ubicacion del ultimo reporte generado", fg=theme["accent_glow"])
+                else:
+                    btn.configure(
+                        fg=theme["text_secondary"],
+                        bg=theme.get("button_hover", theme["bg_input"]),
+                        highlightbackground=theme["bg_input_border"]
+                    )
+                    if status:
+                        status.configure(text="No hay reportes generados recientemente", fg="#ff6b6b")
             else:
                 self._set_open_location_button_state()
+                if status:
+                    status.configure(text="Enter envia  |  Shift+Enter salto  |  Esc cierra  |  Espacio 2s habla", fg=theme["text_label"])
         except tk.TclError:
             pass
 
@@ -2891,6 +5999,15 @@ class ClawdPet(tk.Tk):
 
     def _set_response_text(self, text):
         """Push a response into the chat view (or fallback Text widget)."""
+        # If Claudy is silently generating a report, NEVER write to chat
+        if getattr(self, "_report_generating", False):
+            # Only show lightweight bubble update when minimized
+            if getattr(self, "bubble_minimized", False):
+                clean_text = re.sub(r"\n?\[CLAUDY_PATH:.+?\]", "", str(text or "")).strip()
+                if clean_text and len(clean_text) < 120:
+                    self.show_pet_speech_bubble(clean_text, duration=None)
+            return  # <-- block ALL chat writes during report generation
+
         if getattr(self, "bubble_minimized", False):
             clean_text = re.sub(r"\n?\[CLAUDY_PATH:.+?\]", "", str(text or "")).strip()
             artifact_path = self._extract_artifact_path(text)
@@ -2994,33 +6111,62 @@ class ClawdPet(tk.Tk):
         except Exception:
             pass
             
-        bg_color = "#1e1b29"
-        border_color = "#3d3752"
-        text_color = "#ece9f5"
-        
-        win.configure(bg=bg_color)
-        
-        # Main bubble frame
-        frame = tk.Frame(win, bg=bg_color, bd=1, highlightthickness=1,
-                         highlightbackground=border_color, highlightcolor=border_color)
-        frame.pack(fill="both", expand=True, padx=2, pady=2)
-        
-        lbl = tk.Label(
-            frame,
+        win.configure(bg=TRANSPARENT_COLOR)
+        win.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+
+        wraplength = 210
+        temp = tk.Label(win, text=text, font=("Bahnschrift SemiBold", 9), wraplength=wraplength)
+        temp.update_idletasks()
+        bw = max(180, temp.winfo_reqwidth() + 34)
+        bh = max(58, temp.winfo_reqheight() + 28)
+        temp.destroy()
+
+        canvas = tk.Canvas(win, width=bw, height=bh, bg=TRANSPARENT_COLOR, highlightthickness=0, bd=0)
+        canvas.pack(fill="both", expand=True)
+
+        try:
+            img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+            glow = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+            gd = ImageDraw.Draw(glow)
+            gd.rounded_rectangle((4, 4, bw - 5, bh - 5), radius=20,
+                                 outline=(88, 199, 255, 145), width=4)
+            gd.rounded_rectangle((8, 8, bw - 9, bh - 9), radius=18,
+                                 outline=(192, 45, 255, 130), width=3)
+            glow = glow.filter(ImageFilter.GaussianBlur(7))
+            img = Image.alpha_composite(img, glow)
+            d = ImageDraw.Draw(img)
+            d.rounded_rectangle((8, 8, bw - 9, bh - 9), radius=18,
+                                fill=(5, 9, 29, 246), outline=(88, 199, 255, 180), width=1)
+            d.polygon([(bw // 2 - 9, bh - 10), (bw // 2, bh - 1), (bw // 2 + 9, bh - 10)],
+                      fill=(5, 9, 29, 246), outline=(88, 199, 255, 130))
+            # Pre-composite onto magenta background so semi-transparent pixels
+            # don't bleed pink through Tkinter's -transparentcolor.
+            bg_layer = Image.new("RGBA", (bw, bh), (255, 0, 255, 255))
+            composited = Image.alpha_composite(bg_layer, img)
+            final = composited.convert("RGB")
+            # Snap near-magenta pixels to exact #FF00FF so chroma-key works
+            px = final.load()
+            for _y in range(final.height):
+                for _x in range(final.width):
+                    r, g, b = px[_x, _y]
+                    if r > 200 and g < 55 and b > 200:
+                        px[_x, _y] = (255, 0, 255)
+            tk_img = ImageTk.PhotoImage(final)
+            win._speech_bg_ref = tk_img
+            canvas.create_image(0, 0, anchor="nw", image=tk_img)
+        except Exception:
+            canvas.create_rectangle(0, 0, bw, bh, fill="#05091d", outline="#58c7ff", width=1)
+
+        canvas.create_text(
+            bw // 2, bh // 2 - 2,
             text=text,
-            bg=bg_color,
-            fg=text_color,
-            font=("Segoe UI", 9, "bold"),
-            wraplength=180,
+            width=wraplength,
+            fill="#f7f9ff",
+            font=("Bahnschrift SemiBold", 9),
             justify="center",
-            padx=14,
-            pady=10
         )
-        lbl.pack(fill="both", expand=True)
         
         win.update_idletasks()
-        bw = win.winfo_reqwidth()
-        bh = win.winfo_reqheight()
         
         px = self.winfo_x()
         py = self.winfo_y()
@@ -3335,14 +6481,1132 @@ class ClawdPet(tk.Tk):
         self._start_milestone_progress()
 
         def worker():
+            self._streamed = False
+            chat_v = getattr(self, "_chat_view", None)
+            on_delta = None
+            if getattr(self, "_streaming_enabled", False) and chat_v is not None:
+                state = {"started": False, "buf": "", "last": 0.0}
+
+                def on_delta(piece):
+                    state["buf"] += piece
+                    if not state["started"]:
+                        state["started"] = True
+                        self._streamed = True
+                        self.after(0, chat_v.begin_stream)
+                    now = time.time()
+                    if now - state["last"] >= 0.05:
+                        state["last"] = now
+                        try:
+                            shown = self._strip_markdown(state["buf"])
+                        except Exception:
+                            shown = state["buf"]
+                        self.after(0, lambda b=shown: chat_v.update_stream(b))
+
             try:
-                answer = self.send_quick_message(prompt)
+                answer = self.send_quick_message(prompt, on_delta=on_delta)
             except Exception as error:
                 answer = f"Mmm... algo falló en mi cabecita: {error}"
             self._stop_milestone_progress()
-            self.after(0, lambda: self.finish_quick_answer(answer, status, entry))
+            streamed = getattr(self, "_streamed", False)
+            self._streamed = False
+            if streamed and chat_v is not None:
+                try:
+                    clean = self._strip_markdown(answer)
+                except Exception:
+                    clean = answer
+                self.after(0, lambda: chat_v.end_stream(clean))
+                self.after(0, lambda: self.finish_quick_answer(answer, status, entry, _already_shown=True))
+            else:
+                self.after(0, lambda: self.finish_quick_answer(answer, status, entry))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ============================================================
+    # Mission Control — sembrar borrador de correo en el Inbox
+    # ============================================================
+    # Contactos conocidos: destinatario, copia y marca a usar.
+    _MC_KNOWN_CONTACTS = {
+        "combas": {
+            "name": "Conservatorio COMBAS",
+            "aliases": ["combas", "conservatorio"],
+            "to": ["secretaria@combas.cl"],
+            "cc": ["jeanpaul.harb@combas.cl"],
+            "brand": "smartstudent",
+        },
+        "tentacion": {
+            "name": "Tentación a Granel",
+            "aliases": ["tentacion", "tentación", "granel", "marco", "gonzalez", "gonzález"],
+            "to": ["agraneltentacion@gmail.com"],
+            "cc": [],
+            "brand": "point",
+        },
+    }
+    # Marcas disponibles para el remitente y el estilo del correo.
+    _MC_BRANDS = {
+        "smartstudent": {
+            "label": "SmartStudent (educativo)",
+            "template": "smartstudent",
+            "from": "SmartStudent <smartstudentweb@gmail.com>",
+            "replyTo": "jorge.castro@qcorespa.com",
+            "productId": "smartstudent",
+            "primary": "#2563eb",
+            "signature": "Equipo SmartStudent · www.smartstudent.cl",
+            "guidance": "Marca SmartStudent (plataforma educativa SaaS). Tono cercano, claro y profesional, en español de Chile.",
+        },
+        "point": {
+            "label": "Point (POS / comercio)",
+            "template": "point",
+            "from": "QCORE SPA <jorge.castro@qcorespa.com>",
+            "replyTo": "jorge.castro@qcorespa.com",
+            "productId": "",
+            "primary": "#D81B60",
+            "signature": "Equipo Point · QCORE SPA",
+            "guidance": "Marca Point (sistema POS con control de inventario FEFO para comercios). Tono cercano, claro y práctico, orientado al dueño del negocio, en español de Chile.",
+        },
+        "qcore": {
+            "label": "QCORE SPA (corporativo)",
+            "from": "QCORE SPA <jorge.castro@qcorespa.com>",
+            "replyTo": "jorge.castro@qcorespa.com",
+            "productId": "",
+            "primary": "#6c5ce7",
+            "signature": "QCORE SPA · jorge.castro@qcorespa.com",
+            "guidance": "Marca QCORE SPA (consultora tecnológica). Tono profesional corporativo, en español de Chile.",
+        },
+    }
+    _MC_SEEDED_DRAFTS_PATH = r"C:\Users\Felipe\Documents\QCORE-LOCAL\MISSION-CONTROL\logs\seeded-drafts.json"
+
+    # Dónde queda el correo dentro del Inbox de Mission Control (kind + origin).
+    _MC_DRAFT_KINDS = {
+        "1": ("general-reply",          "direct-email",  "Respuesta general",            "Borrador general que queda en la bandeja de pendientes del Inbox"),
+        "2": ("implementation-follow-up","direct-email", "Seguimiento de implementación", "Para avisar avances / configuraciones aplicadas en la plataforma"),
+        "3": ("meeting-reply",          "direct-email",  "Coordinación de reunión",       "Para agendar o confirmar una reunión o demo"),
+        "4": ("receipt-confirmation",   "direct-email",  "Confirmación / recibo",         "Confirmaciones de recepción, pago o entrega"),
+        "5": ("website-reply",          "website-lead",  "Respuesta a lead web",          "Respuesta a un contacto entrante desde el sitio web"),
+    }
+
+    def _try_seed_mc_draft(self, prompt, plow, status, entry=None):
+        """Detecta pedidos de 'crear correo borrador' y lanza el flujo guiado que
+        pregunta destinatario, ubicación en Mission Control y estilo antes de
+        sembrarlo en el Inbox (logs/seeded-drafts.json). Devuelve True si tomó el pedido."""
+        create_verbs = (
+            "crea", "créa", "crear", "haz", "hazme", "redacta", "redáctame",
+            "prepara", "prepárame", "genera", "escribe", "escríbeme", "arma", "ármame",
+            "quiero", "necesito", "dame",
+        )
+        has_create = any(v in plow for v in create_verbs)
+        mentions_draft = "borrador" in plow
+        mentions_mail = any(w in plow for w in ("correo", "email", "e-mail", "mail"))
+        mentions_mc = any(w in plow for w in ("mission control", "inbox", "casilla", "bandeja"))
+
+        # Un borrador de correo SIEMPRE es para Mission Control. Señal fuerte:
+        # "borrador" junto a correo/MC dispara aunque no haya verbo de creación.
+        strong = mentions_draft and (mentions_mail or mentions_mc)
+        if not (strong or (has_create and (mentions_mail or mentions_draft))):
+            return False
+
+        self._start_guided_email_flow(prompt, plow, status, entry)
+        return True
+
+    # ============================================================
+    # Guided Email Flow (Asistente de Correos para Mission Control)
+    # ============================================================
+    def _detect_email_style(self, plow):
+        """Detecta la marca/estilo mencionada en el texto. Devuelve la clave o None."""
+        if "smart" in plow:
+            return "smartstudent"
+        if "point" in plow or " pos" in plow:
+            return "point"
+        if "qcore" in plow or "corporativo" in plow:
+            return "qcore"
+        return None
+
+    def _extract_email_topic(self, prompt, plow):
+        """Quita el 'andamiaje' (verbos, 'correo/borrador', destinatario, estilo, MC) y
+        devuelve el tema restante. Sirve para decidir si hay contenido suficiente."""
+        import re as _re
+        t = " " + (prompt or "") + " "
+        t = _re.sub(r'\b(crea|créa|crear|haz|hazme|redacta|redáctame|prepara|prepárame|genera|escribe|escríbeme|arma|ármame|quiero|necesito|dame)\b', ' ', t, flags=_re.I)
+        t = _re.sub(r'\b(un|una|el|la|los|las|de|del)\b', ' ', t, flags=_re.I)
+        t = _re.sub(r'\b(correo|email|e-mail|mail|borrador|mensaje)\b', ' ', t, flags=_re.I)
+        t = _re.sub(r'\bestilo\s+\w+\b', ' ', t, flags=_re.I)
+        t = _re.sub(r'\b(smartstudent|point|qcore|pos|corporativo)\b', ' ', t, flags=_re.I)
+        t = _re.sub(r'\b(mission\s+control|misi[oó]n\s+control|inbox|casilla|bandeja)\b', ' ', t, flags=_re.I)
+        for c in self._MC_KNOWN_CONTACTS.values():
+            for a in c.get("aliases", []):
+                t = _re.sub(r'\b' + _re.escape(a) + r'\b', ' ', t, flags=_re.I)
+        t = _re.sub(r'\b(a\s+granel)\b', ' ', t, flags=_re.I)
+        t = _re.sub(r'[\w.+-]+@[\w-]+\.[\w.-]+', ' ', t)  # emails
+        # conectores colgantes al inicio
+        t = _re.sub(r'^\s*(para|a|que\s+sea|y\s+que\s+sea|y\s+que|que|sobre|avisando\s+que|avisando|diciendo\s+que|informando\s+que|informando|enviando)\s+', ' ', t, flags=_re.I)
+        t = _re.sub(r'\s+', ' ', t).strip(" ,.;:-")
+        return t
+
+    def _start_guided_email_flow(self, prompt, plow, status, entry):
+        # Detectar contacto conocido para ofrecerlo primero (sin auto-seleccionarlo).
+        detected_key = None
+        for key, c in self._MC_KNOWN_CONTACTS.items():
+            if any(a in plow for a in c.get("aliases", [key])):
+                detected_key = key
+                break
+
+        # ── ONE-SHOT: si ya hay destinatario + tema claro, saltamos las preguntas ──
+        topic = self._extract_email_topic(prompt, plow)
+        detected_style = self._detect_email_style(plow)
+        if detected_key and topic and len(topic.split()) >= 3:
+            c = self._MC_KNOWN_CONTACTS[detected_key]
+            brand_key = detected_style or c.get("brand", "qcore")
+            self._guided_email_active = False
+            self._guided_email_step = 0
+            self._guided_email_data = {
+                "prompt": prompt,
+                "content": prompt,  # el LLM se enfoca en el pedido real
+                "recipient_name": c["name"],
+                "contact_key": detected_key,
+                "to_list": list(c.get("to", [])),
+                "cc_list": list(c.get("cc", [])),
+                "kind": "general-reply",
+                "origin": "direct-email",
+                "brand_key": brand_key,
+            }
+            chat = getattr(self, "_chat_view", None)
+            if chat is not None:
+                try:
+                    last = chat._messages[-1] if getattr(chat, "_messages", None) else None
+                    if not (last and last.get("role") == "user" and last.get("text") == prompt):
+                        chat.add_user(prompt)
+                except Exception:
+                    pass
+            self._finalize_and_seed_email(self._guided_email_data, status)
+            return
+
+        self._guided_email_active = True
+        self._guided_email_step = 1
+        self._guided_email_data = {
+            "prompt": prompt,
+            "content": None,
+            "recipient_name": None,
+            "contact_key": None,
+            "to_list": [],
+            "cc_list": [],
+            "kind": "general-reply",
+            "origin": "direct-email",
+            "brand_key": "qcore",
+            "style_label": None,
+        }
+        self._bubble_status = status
+        self._bubble_entry = entry
+
+        chat = getattr(self, "_chat_view", None)
+        if chat is not None:
+            try:
+                last = chat._messages[-1] if getattr(chat, "_messages", None) else None
+                if not (last and last.get("role") == "user" and last.get("text") == prompt):
+                    chat.add_user(prompt)
+            except Exception:
+                pass
+            chat.add_bot(
+                "Vamos a preparar el borrador para el **Inbox de Mission Control**.\n\n"
+                "**Pregunta 1/3: ¿A quién va dirigido el correo?**"
+            )
+            options = []
+            for key, c in self._MC_KNOWN_CONTACTS.items():
+                dest = ", ".join(c.get("to", [])) or "sin destinatario"
+                label = f"{c['name']}" + (" ⭐" if key == detected_key else "")
+                options.append((f"contact:{key}", label, dest))
+            options.append(("otro", "Otro cliente / destinatario", "Escribe el correo del nuevo cliente o destinatario a continuación"))
+            chat.add_options(options, self._handle_email_option_select)
+
+        try:
+            status.configure(text="Correo · Paso 1: Destinatario", fg=THEME["accent"])
+        except Exception:
+            pass
+        if entry is not None:
+            try:
+                entry.configure(state="normal")
+                entry.focus_set()
+            except Exception:
+                pass
+
+    def _handle_email_option_select(self, option_value):
+        status = getattr(self, "_bubble_status", None)
+        entry = getattr(self, "_bubble_entry", None)
+        self._handle_guided_email_step(option_value, status, entry)
+
+    def _ask_email_content(self, chat, status):
+        self._guided_email_step = 15
+        chat.add_bot("**Pregunta 2/3: ¿De qué se trata el correo?** (escríbelo con tus palabras)")
+        try:
+            status.configure(text="Correo · Paso 2: Contenido", fg=THEME["accent"])
+        except Exception:
+            pass
+
+    def _ask_email_style(self, chat, status):
+        self._guided_email_step = 4
+        chat.add_bot("**Pregunta 3/3: ¿Qué estilo / marca usamos para redactar?**")
+        descs = {
+            "smartstudent": "Plataforma educativa. Tono cercano y profesional (plantilla SmartStudent, azul)",
+            "point": "POS / comercio. Tono cercano y práctico para el dueño del negocio (rosado Point)",
+            "qcore": "Consultora tecnológica. Tono profesional corporativo (morado QCORE)",
+        }
+        suggested = self._guided_email_data.get("brand_key", "qcore")
+        order = [suggested] + [k for k in ("smartstudent", "point", "qcore") if k != suggested]
+        options = []
+        for k in order:
+            b = self._MC_BRANDS.get(k)
+            if not b:
+                continue
+            label = b.get("label", k)
+            if k == suggested:
+                label += " ⭐"
+            options.append((k, label, descs.get(k, "")))
+        chat.add_options(options, self._handle_email_option_select)
+        try:
+            status.configure(text="Correo · Paso 3: Estilo", fg=THEME["accent"])
+        except Exception:
+            pass
+
+    def _handle_guided_email_step(self, prompt, status, entry):
+        chat = getattr(self, "_chat_view", None)
+        if chat is None:
+            return
+        data = self._guided_email_data
+        step = self._guided_email_step
+        plow = (prompt or "").lower().strip()
+
+        if step == 1:
+            # Elegir destinatario.
+            if prompt.startswith("contact:"):
+                key = prompt.split(":", 1)[1]
+                c = self._MC_KNOWN_CONTACTS.get(key)
+                if c:
+                    data["recipient_name"] = c["name"]
+                    data["contact_key"] = key
+                    data["to_list"] = list(c.get("to", []))
+                    data["cc_list"] = list(c.get("cc", []))
+                    data["brand_key"] = c.get("brand", "qcore")
+                    chat.add_user(c["name"])
+                    self._ask_email_content(chat, status)
+                    return
+            if prompt == "otro" or plow == "otro":
+                self._guided_email_step = 2
+                chat.add_bot("Escribe el **correo (o nombre)** del destinatario:")
+                try:
+                    status.configure(text="Correo · Destinatario personalizado", fg=THEME["accent"])
+                except Exception:
+                    pass
+                return
+            # Si escribió algo libre, intentar resolver contacto conocido o usarlo como destinatario.
+            matched = None
+            for key, c in self._MC_KNOWN_CONTACTS.items():
+                if any(a in plow for a in c.get("aliases", [key])):
+                    matched = (key, c)
+                    break
+            if matched:
+                key, c = matched
+                data["recipient_name"] = c["name"]
+                data["contact_key"] = key
+                data["to_list"] = list(c.get("to", []))
+                data["cc_list"] = list(c.get("cc", []))
+                data["brand_key"] = c.get("brand", "qcore")
+                chat.add_user(c["name"])
+            else:
+                self._set_custom_recipient(data, prompt)
+                chat.add_user(prompt)
+            self._ask_email_content(chat, status)
+            return
+
+        if step == 2:
+            # Destinatario personalizado escrito por el usuario.
+            self._set_custom_recipient(data, prompt)
+            chat.add_user(prompt)
+            self._ask_email_content(chat, status)
+            return
+
+        if step == 15:
+            # Contenido / tema del correo.
+            content = (prompt or "").strip()
+            data["content"] = content
+            chat.add_user(content if len(content) <= 120 else content[:117] + "…")
+            self._ask_email_style(chat, status)
+            return
+
+        if step == 4:
+            # Estilo / marca.
+            if prompt in self._MC_BRANDS:
+                brand_key = prompt
+            elif "smart" in plow:
+                brand_key = "smartstudent"
+            elif "point" in plow or "pos" in plow:
+                brand_key = "point"
+            elif "qcore" in plow or "corporativo" in plow:
+                brand_key = "qcore"
+            else:
+                brand_key = data.get("brand_key", "qcore")
+            data["brand_key"] = brand_key
+            data["style_label"] = self._MC_BRANDS.get(brand_key, self._MC_BRANDS["qcore"]).get("label", brand_key)
+            chat.add_user(data["style_label"])
+            self._finalize_and_seed_email(data, status)
+            return
+
+    def _finalize_and_seed_email(self, data, status):
+        """Cierra el flujo y dispara la redacción/siembra del borrador en el Inbox de MC.
+        Los borradores SIEMPRE quedan en el Inbox (kind general-reply / origin direct-email)."""
+        chat = getattr(self, "_chat_view", None)
+        self._guided_email_active = False
+        self._guided_email_step = 0
+        brand_key = data.get("brand_key", "qcore")
+        brand = self._MC_BRANDS.get(brand_key, self._MC_BRANDS["qcore"])
+        data["style_label"] = brand.get("label", brand_key)
+        dest = ", ".join(data.get("to_list") or []) or "(sin destinatario — complétalo en el Inbox)"
+        if chat:
+            chat.add_bot(
+                "Listo, tengo todo. Redactando el borrador para el **Inbox de Mission Control**…\n\n"
+                f"**Para:** {dest}\n"
+                f"**Estilo:** {data.get('style_label')}"
+            )
+            chat.show_typing()
+        try:
+            status.configure(text="Redactando borrador para Mission Control...", fg="#58c7ff")
+        except Exception:
+            pass
+        brief = data.get("content") or data.get("prompt") or ""
+        threading.Thread(
+            target=self._seed_mc_draft_worker,
+            args=(brief, data.get("recipient_name") or "destinatario",
+                  data.get("contact_key") or "contacto", brand,
+                  list(data.get("to_list") or []), list(data.get("cc_list") or []), status,
+                  data.get("kind", "general-reply"), data.get("origin", "direct-email"),
+                  data.get("custom_reference")),
+            daemon=True,
+        ).start()
+
+    def _set_custom_recipient(self, data, text):
+        import re as _re
+        emails = _re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", text or "")
+        if emails:
+            data["to_list"] = emails
+            data["recipient_name"] = emails[0].split("@")[0]
+        else:
+            data["to_list"] = []
+            data["recipient_name"] = (text or "").strip() or "destinatario"
+        data["cc_list"] = []
+        data["contact_key"] = _re.sub(r"[^a-z0-9]+", "-", (data["recipient_name"] or "contacto").lower()).strip("-") or "contacto"
+
+    # ============================================================
+    # Mi Portafolio — edición directa de archivos locales del proyecto
+    # ============================================================
+    _PORTFOLIO_PATH = r"C:\Users\Felipe\Documents\CV_JorgeCastro_v3.5"
+    _PORTFOLIO_EXTS = (".html", ".css", ".js", ".md")
+    _PORTFOLIO_EDIT_VERBS = (
+        "cambia", "cámbia", "cambiale", "cámbiale", "modifica", "edita", "edíta",
+        "agrega", "añade", "anade", "quita", "elimina", "borra", "actualiza",
+        "pon", "ponle", "reemplaza", "arregla", "ajusta", "corrige", "mejora",
+        "saca", "renombra", "traduce",
+    )
+
+    def _try_edit_portfolio(self, prompt, plow, status, entry=None):
+        """Si el portafolio está activo (o se menciona) y se pide un cambio, edita
+        directamente los archivos locales del proyecto. Devuelve True si lo tomó."""
+        is_portfolio = (
+            getattr(self, "_portfolio_mode", False)
+            or getattr(self, "_active_product", "") == "Mi Portafolio"
+            or "portafolio" in plow or "portfolio" in plow
+        )
+        has_edit = any(v in plow for v in self._PORTFOLIO_EDIT_VERBS)
+        if not (is_portfolio and has_edit):
+            return False
+        if not os.path.isdir(self._PORTFOLIO_PATH):
+            return False
+        chat = getattr(self, "_chat_view", None)
+        if chat:
+            try:
+                last = chat._messages[-1] if getattr(chat, "_messages", None) else None
+                if not (last and last.get("role") == "user" and last.get("text") == prompt):
+                    chat.add_user(prompt)
+                chat.show_typing()
+            except Exception:
+                pass
+        try:
+            status.configure(text="Editando el portafolio...", fg="#58c7ff")
+        except Exception:
+            pass
+        threading.Thread(
+            target=self._edit_portfolio_worker, args=(prompt, status), daemon=True
+        ).start()
+        return True
+
+    def _portfolio_text_files(self):
+        """Lista de archivos editables (rel paths) dentro del portafolio."""
+        path = self._PORTFOLIO_PATH
+        files = []
+        for root, dirs, fnames in os.walk(path):
+            dirs[:] = [d for d in dirs if d not in ("backups", "__pycache__", ".git", "node_modules")]
+            for fn in fnames:
+                if fn.lower().endswith(self._PORTFOLIO_EXTS):
+                    files.append(os.path.relpath(os.path.join(root, fn), path))
+        return sorted(files)
+
+    def _edit_portfolio_worker(self, instruction, status):
+        import datetime as _dt
+        import shutil as _shutil
+        import re as _re
+        path = self._PORTFOLIO_PATH
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        backups = os.path.join(path, "backups")
+
+        def _say(msg, ok=True, system=False):
+            def _f():
+                ch = getattr(self, "_chat_view", None)
+                if ch:
+                    ch.hide_typing()
+                    (ch.add_system if system else ch.add_bot)(msg)
+                try:
+                    status.configure(text=("Portafolio actualizado" if ok else "No se pudo editar"),
+                                     fg=("#00ff99" if ok else "#ff5555"))
+                except Exception:
+                    pass
+            self.after(0, _f)
+
+        try:
+            files = self._portfolio_text_files()
+            if not files:
+                _say("❌ No encontré archivos editables en el portafolio.", ok=False, system=True)
+                return
+
+            roles = {
+                "index.html": "Home (hero, perfil, stack, showcase)",
+                "experience.html": "Experiencia", "education.html": "Educación",
+                "certifications.html": "Certificaciones", "portfolio.html": "Proyectos",
+                "about.html": "Sobre mí / contacto", "styles.css": "Estilos / colores / diseño",
+                "app.js": "Lógica: i18n, tema, navegación",
+            }
+            listing = "\n".join(f"- {f}" + (f" — {roles[f]}" if f in roles else "") for f in files)
+
+            # ── Paso 1: pedir reemplazos LITERALES (ideal para nombres/textos repetidos
+            #    en varias páginas: nav, hero, footer, etc.) ──
+            rep_prompt = (
+                "Eres editor de un sitio web estático (portafolio personal de Jorge Castro Segura). "
+                "Genera reemplazos de texto LITERALES que se aplicarán en TODOS los archivos para lograr el cambio.\n"
+                f"Cambio pedido: \"{instruction}\".\n"
+                "Archivos del sitio:\n" + listing + "\n\n"
+                "Devuelve SOLO JSON con esta forma:\n"
+                "{\"replacements\":[{\"find\":\"texto EXACTO que está hoy en el sitio\",\"replace\":\"texto nuevo\"}], "
+                "\"structural\": false, \"file\": \"\"}\n"
+                "Reglas: usa cadenas exactas tal como aparecen (respeta mayúsculas/acentos). "
+                "Para cambios de NOMBRE incluye TODAS las variantes (nombre completo, nombre+apellido, solo nombre, en mayúsculas si aplica). "
+                "Si el cambio NO se puede hacer con find/replace (agregar/quitar secciones, cambiar diseño/color sin saber el valor), "
+                "deja \"replacements\":[] , pon \"structural\": true y el archivo más probable en \"file\"."
+            )
+            data = self._extract_json(self._llm_structured(rep_prompt, expect_json=True)) or {}
+            reps = [r for r in (data.get("replacements") or []) if isinstance(r, dict) and r.get("find")]
+
+            os.makedirs(backups, exist_ok=True)
+            changed = {}
+            for rel in files:
+                ap = os.path.join(path, rel)
+                try:
+                    with open(ap, "r", encoding="utf-8", errors="replace") as fh:
+                        c = fh.read()
+                except Exception:
+                    continue
+                orig = c
+                n = 0
+                for r in reps:
+                    fnd = r.get("find") or ""
+                    rpl = r.get("replace")
+                    rpl = "" if rpl is None else str(rpl)
+                    if fnd and fnd in c:
+                        n += c.count(fnd)
+                        c = c.replace(fnd, rpl)
+                if n and c != orig:
+                    _shutil.copy2(ap, os.path.join(backups, f"{rel.replace(os.sep, '_')}.{stamp}.bak"))
+                    with open(ap, "w", encoding="utf-8", newline="") as fh:
+                        fh.write(c)
+                    changed[rel] = n
+
+            if changed:
+                resumen = ", ".join(f"{f} ({n})" for f, n in changed.items())
+                _say(
+                    f"✅ Apliqué el cambio en tu portafolio.\n\n"
+                    f"Cambio: {instruction.strip()[:160]}\n"
+                    f"Archivos modificados: {resumen}\n\n"
+                    f"Respaldos en `backups/` (sello {stamp}). **Refresca el navegador (F5)** para verlo."
+                )
+                return
+
+            # ── Paso 2 (fallback): edición estructural de UN archivo ──
+            target = (data.get("file") or "").strip().replace("/", os.sep).replace("\\", os.sep)
+            if target not in files:
+                for f in files:
+                    if f.lower() in instruction.lower():
+                        target = f
+                        break
+            if target not in files:
+                pick = self._extract_json(self._llm_structured(
+                    "Portafolio web estático. Archivos:\n" + listing +
+                    f"\n\nEl usuario pide: \"{instruction}\".\n¿Qué ÚNICO archivo modificar? SOLO JSON: {{\"file\":\"ruta\"}}",
+                    expect_json=True)) or {}
+                target = (pick.get("file") or "").strip().replace("/", os.sep).replace("\\", os.sep)
+            if target not in files:
+                _say("❌ No pude determinar qué cambiar. Sé más específico (ej. 'en certifications agrega...' "
+                     "o 'cambia el texto X por Y').", ok=False, system=True)
+                return
+
+            abs_target = os.path.join(path, target)
+            try:
+                with open(abs_target, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except Exception as e:
+                _say(f"❌ No pude leer {target}: {e}", ok=False, system=True)
+                return
+            if len(content) > 120000:
+                _say(f"❌ {target} es muy grande para editarlo automáticamente.", ok=False, system=True)
+                return
+
+            edit_prompt = (
+                f"Eres un editor de código preciso. Archivo del portafolio: {target}.\n"
+                "Aplica EXACTAMENTE el cambio pedido y NO toques nada más.\n"
+                f"Cambio pedido: \"{instruction}\".\n\n"
+                "Contenido actual:\n<<<FILE\n" + content + "\nFILE\n\n"
+                "Devuelve ÚNICAMENTE el contenido COMPLETO del archivo ya modificado, sin explicaciones y SIN fences ```."
+            )
+            new_content = self._llm_structured(edit_prompt, expect_json=False) or ""
+            m = _re.search(r"```[a-zA-Z]*\s*(.+?)```", new_content, _re.S)
+            if m:
+                new_content = m.group(1)
+            new_content = new_content.strip("\n")
+            if not new_content or len(new_content) < max(20, len(content) * 0.3):
+                _say("❌ La respuesta del modelo no parece un archivo válido; no apliqué cambios.", ok=False, system=True)
+                return
+
+            os.makedirs(backups, exist_ok=True)
+            bak = os.path.join(backups, f"{target.replace(os.sep, '_')}.{stamp}.bak")
+            _shutil.copy2(abs_target, bak)
+            with open(abs_target, "w", encoding="utf-8", newline="") as f:
+                f.write(new_content)
+            _say(
+                f"✅ Edité **{target}** en tu portafolio.\n\n"
+                f"Cambio: {instruction.strip()[:160]}\n"
+                f"Respaldo: `backups/{os.path.basename(bak)}`.\n\n"
+                f"**Refresca el navegador (F5)** para verlo."
+            )
+        except Exception as e:
+            _say(f"❌ Error inesperado editando el portafolio: {e}", ok=False, system=True)
+
+    _SMARTSTUDENT_LOGO_URL = "https://smartstudent-web.vercel.app/img/logo4.png"
+
+    def _structured_email_llm_prompt(self, role_desc, recipient_name, prompt, eyebrow_hint, tail_hint):
+        """Prompt común para plantillas con contenido estructurado (SmartStudent / Point)."""
+        return (
+            f"{role_desc}\n"
+            f"Destinatario: {recipient_name}.\n\n"
+            "=== PEDIDO DEL USUARIO (este es el TEMA del correo, respétalo al pie de la letra) ===\n"
+            f"{prompt}\n"
+            "=== FIN DEL PEDIDO ===\n\n"
+            "Redacta el correo SOBRE EXACTAMENTE ese pedido. El asunto, la intro y los items deben "
+            "tratar ese tema concreto y nada más. Si el pedido es puntual (p. ej. avisar que el contrato "
+            "quedó firmado por ambas partes), NO inventes un listado de features ni un pitch de producto: "
+            "escribe solo lo que corresponde a ese mensaje.\n\n"
+            "Devuelve UNICAMENTE un objeto JSON válido (sin texto antes ni después, sin fences) "
+            "con esta forma exacta:\n"
+            '{\n'
+            '  "subject": "asunto breve y claro, sobre el tema del pedido",\n'
+            '  "eyebrow": "ETIQUETA EN MAYÚSCULAS que resuma el tema del pedido",\n'
+            '  "greeting_name": "nombre de pila del destinatario o \"\" si se desconoce",\n'
+            '  "greeting_tail": "remate corto del saludo acorde al tema",\n'
+            '  "intro": "párrafo introductorio de 1-2 frases sobre el tema",\n'
+            '  "items": [ {"title": "título del punto", "body": "descripción (puede usar <strong> y <code>)", "featured": false} ],\n'
+            '  "recommendation": "texto de recomendación final o \"\" si no aplica",\n'
+            '  "closing": "frase de cierre breve"\n'
+            '}\n'
+            f"(Solo como referencia de FORMATO, no de tema: un eyebrow se ve así \"{eyebrow_hint}\" y un "
+            f"remate así \"{tail_hint}\" — pero adáptalos al pedido real.)\n"
+            "Reglas: 'items' es una lista de 1 a 6 puntos; si el pedido no amerita varios puntos, usa 1. "
+            "Marca featured=true solo en un punto si hay uno destacado. No incluyas saludos ni firma dentro "
+            "de los textos: eso lo arma la plantilla. No incluyas HTML completo, solo los campos pedidos. Solo el JSON."
+        )
+
+    def _build_point_email_html(self, data, recipient_name, prompt):
+        """Arma el HTML del correo con la plantilla institucional Point
+        (header magenta, eyebrow rosado, tarjetas numeradas con badge rosado,
+        punto destacado en variante morada, callout morado, firma Jorge Castro · QCORE)."""
+        import html as _html
+
+        def esc(v):
+            return _html.escape((v or "").strip())
+
+        eyebrow = esc(data.get("eyebrow")) or "POINT · COMERCIO"
+        greeting_name = esc(data.get("greeting_name"))
+        greeting_tail = esc(data.get("greeting_tail")) or "acá va tu sistema"
+        intro = esc(data.get("intro")) or "Te escribo con la información de tu sistema Point."
+        closing = esc(data.get("closing")) or "Cualquier duda me escribes y te acompaño. ¡Saludos!"
+        recommendation = (data.get("recommendation") or "").strip()
+
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            items = [{"title": "Detalle", "body": esc(prompt) or "Te comparto la información solicitada."}]
+
+        if greeting_name:
+            title = f"Hola {greeting_name} \U0001F44B — {greeting_tail}"
+        else:
+            title = f"\U0001F44B {greeting_tail}"
+
+        cards = []
+        for i, it in enumerate(items, start=1):
+            it = it if isinstance(it, dict) else {}
+            t = esc(it.get("title")) or f"Paso {i}"
+            body = (it.get("body") or "").strip()  # permite <strong>/<code> del LLM
+            featured = bool(it.get("featured"))
+            box_bg = "#f5f3ff" if featured else "#fdf2f8"
+            box_border = "#ddd6fe" if featured else "#fbcfe8"
+            badge_bg = "#8E24AA" if featured else "#D81B60"
+            cards.append(
+                f'''          <tr>
+            <td style="padding:0 40px 12px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:{box_bg};border:1px solid {box_border};border-radius:12px;">
+                <tr>
+                  <td style="padding:18px 20px;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="width:40px;vertical-align:top;">
+                          <div style="width:32px;height:32px;border-radius:8px;background:{badge_bg};color:#ffffff;font-size:15px;font-weight:800;text-align:center;line-height:32px;">{i}</div>
+                        </td>
+                        <td>
+                          <div style="font-size:15px;font-weight:700;color:#0f172a;">{t}</div>
+                          <div style="font-size:13px;color:#475569;margin-top:6px;line-height:1.6;">{body}</div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>'''
+            )
+
+        rec_html = ""
+        if recommendation:
+            rec_html = f'''          <tr>
+            <td style="padding:0 40px 24px;">
+              <div style="border-left:3px solid #8E24AA;background:#f8fafc;padding:14px 18px;border-radius:0 8px 8px 0;">
+                <div style="font-size:12px;font-weight:700;color:#8E24AA;text-transform:uppercase;letter-spacing:1px;">Recomendación</div>
+                <div style="font-size:13px;color:#475569;margin-top:4px;line-height:1.6;">{recommendation}</div>
+              </div>
+            </td>
+          </tr>'''
+
+        return f'''<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,0.08);">
+          <tr>
+            <td style="background:linear-gradient(135deg,#1a0a14 0%,#3d0f2e 50%,#5b1248 100%);padding:0;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr><td style="height:4px;background:linear-gradient(90deg,#D81B60,#8E24AA,#D81B60);"></td></tr>
+                <tr>
+                  <td style="padding:32px 40px 24px;">
+                    <div style="font-size:28px;font-weight:900;color:#ffffff;letter-spacing:1px;">Point<span style="color:#D81B60;"> POS</span></div>
+                    <div style="font-size:12px;color:#e9b8d4;margin-top:4px;letter-spacing:2px;text-transform:uppercase;">Punto de venta + inventario · by QCORE</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px 40px 12px;">
+              <div style="font-size:12px;color:#D81B60;font-weight:700;letter-spacing:2px;text-transform:uppercase;">{eyebrow}</div>
+              <h1 style="margin:8px 0 0;font-size:22px;font-weight:800;color:#0f172a;line-height:1.3;">{title}</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 40px 20px;">
+              <p style="margin:0;font-size:14px;color:#475569;line-height:1.6;">{intro}</p>
+            </td>
+          </tr>
+{chr(10).join(cards)}
+{rec_html}
+          <tr>
+            <td style="padding:0 40px 32px;">
+              <p style="margin:0 0 6px;font-size:14px;color:#475569;line-height:1.6;">{closing}</p>
+              <table cellpadding="0" cellspacing="0" style="margin-top:24px;border-top:1px solid #e2e8f0;padding-top:20px;width:100%;">
+                <tr>
+                  <td style="padding-right:16px;vertical-align:middle;width:72px;">
+                    {self._qcore_logo_badge_html(64, 34)}
+                  </td>
+                  <td style="vertical-align:middle;border-left:2px solid #e2e8f0;padding-left:16px;">
+                    <div style="font-size:14px;font-weight:700;color:#1e293b;">Jorge Castro</div>
+                    <div style="font-size:12px;color:#475569;margin-top:2px;">Account Director · QCORE</div>
+                    <div style="font-size:12px;color:#64748b;margin-top:2px;">Santiago, Chile</div>
+                    <div style="margin-top:4px;line-height:1.4;">
+                      <a href="mailto:jorge.castro@qcorespa.com" style="color:#D81B60;text-decoration:none;font-size:12px;font-weight:500;">jorge.castro@qcorespa.com</a>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#f8fafc;padding:20px 40px;text-align:center;">
+              <div style="font-size:10px;color:#94a3b8;line-height:1.6;">Point POS · Enviado por QCORE GROUP TECHNOLOGIES SPA · Santiago, Chile</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>'''
+
+    def _qcore_logo_badge_html(self, size=64, font=34):
+        """Badge institucional QCORE (cuadro morado redondeado con la 'Q' blanca).
+        Se usa como logo en las firmas hasta que exista una imagen hospedada."""
+        radius = round(size / 4)
+        return (
+            f'<table cellpadding="0" cellspacing="0" role="presentation" '
+            f'style="width:{size}px;height:{size}px;border-radius:{radius}px;'
+            f'background-color:#4f46e5;background:linear-gradient(135deg,#7b6ef0,#4f46e5);">'
+            f'<tr><td align="center" valign="middle" style="font-size:{font}px;font-weight:800;'
+            f'color:#ffffff;font-family:\'Segoe UI\',Arial,sans-serif;line-height:{size}px;">Q</td></tr>'
+            f'</table>'
+        )
+
+    def _build_qcore_email_html(self, data, recipient_name, prompt):
+        """Envuelve el cuerpo redactado en una tarjeta corporativa QCORE con la
+        firma institucional fija (badge "Q", Jorge Castro · Account Director ·
+        Santiago, Chile · www.qcorespa.com)."""
+        import html as _html
+
+        body_html = (data.get("body_html") or "").strip()
+        if not body_html:
+            safe = _html.escape((prompt or "").strip())
+            body_html = (
+                f'<p style="margin:0 0 12px;font-size:14px;color:#1e293b;line-height:1.6;">Estimado/a {_html.escape(recipient_name)},</p>'
+                f'<p style="margin:0;font-size:14px;color:#475569;line-height:1.6;">{safe}</p>'
+            )
+
+        return f'''<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,0.08);">
+          <tr><td style="height:4px;background:linear-gradient(90deg,#6c5ce7,#4f46e5,#a29bfe);"></td></tr>
+          <tr>
+            <td style="padding:32px 40px 8px;font-size:14px;color:#1e293b;line-height:1.6;">
+              {body_html}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 40px 32px;">
+              <p style="margin:0 0 18px;font-size:14px;color:#475569;line-height:1.6;">Saludos Cordiales,</p>
+              <table cellpadding="0" cellspacing="0" style="width:100%;">
+                <tr>
+                  <td style="padding-right:16px;vertical-align:middle;width:72px;">
+                    {self._qcore_logo_badge_html(64, 34)}
+                  </td>
+                  <td style="vertical-align:middle;border-left:2px solid #e2e8f0;padding-left:16px;">
+                    <div style="font-size:16px;font-weight:700;color:#1e293b;">Jorge Castro</div>
+                    <div style="font-size:13px;color:#64748b;margin-top:2px;">Account Director</div>
+                    <div style="font-size:13px;color:#64748b;margin-top:2px;">Santiago, Chile</div>
+                    <div style="margin-top:4px;line-height:1.2;">
+                      <a href="https://www.qcorespa.com" style="color:#4f46e5;text-decoration:none;font-size:13px;font-weight:500;">www.qcorespa.com</a>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#f8fafc;padding:20px 40px;text-align:center;">
+              <div style="font-size:10px;color:#94a3b8;line-height:1.6;">Este correo fue enviado por QCORE SPA · Santiago, Chile</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>'''
+
+    def _build_smartstudent_email_html(self, data, recipient_name, prompt):
+        """Arma el HTML del correo con la plantilla institucional SmartStudent
+        (header navy, eyebrow azul, tarjetas numeradas con ✓, callout de
+        recomendación, firma de Jorge Castro y footer QCORE)."""
+        import html as _html
+
+        def esc(v):
+            return _html.escape((v or "").strip())
+
+        eyebrow = esc(data.get("eyebrow")) or "ACTUALIZACIÓN PLATAFORMA"
+        greeting_name = esc(data.get("greeting_name"))
+        greeting_tail = esc(data.get("greeting_tail")) or "tu plataforma quedó al día"
+        intro = esc(data.get("intro")) or (
+            "Quería confirmarte que aplicamos las configuraciones que conversamos."
+        )
+        closing = esc(data.get("closing")) or "Cualquier ajuste me avisas. ¡Saludos!"
+        recommendation = (data.get("recommendation") or "").strip()
+
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            items = [{"title": "Detalle", "body": esc(prompt) or "Te comparto la actualización solicitada."}]
+
+        if greeting_name:
+            title = f"Hola {greeting_name} \U0001F44B — {greeting_tail}"
+        else:
+            title = f"\U0001F44B {greeting_tail}"
+
+        cards = []
+        for i, it in enumerate(items, start=1):
+            it = it if isinstance(it, dict) else {}
+            t = esc(it.get("title")) or f"Punto {i}"
+            body = (it.get("body") or "").strip()  # permite <strong>/<code> del LLM
+            featured = bool(it.get("featured"))
+            box_bg = "#eff6ff" if featured else "#f8fafc"
+            box_border = "#bfdbfe" if featured else "#e2e8f0"
+            badge_bg = "#2563eb" if featured else "#dcfce7"
+            badge_fg = "#ffffff" if featured else "#16a34a"
+            badge_char = "★" if featured else "✓"
+            title_html = (
+                f'<div style="font-size:15px;font-weight:700;color:#0f172a;">{i} · '
+                f'<span style="color:#2563eb;">{t}</span></div>' if featured
+                else f'<div style="font-size:15px;font-weight:700;color:#0f172a;">{i} · {t}</div>'
+            )
+            cards.append(
+                f'''          <tr>
+            <td style="padding:0 40px 16px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:{box_bg};border:1px solid {box_border};border-radius:12px;">
+                <tr>
+                  <td style="padding:18px 20px;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="width:36px;vertical-align:top;">
+                          <div style="width:32px;height:32px;border-radius:8px;background:{badge_bg};color:{badge_fg};font-size:16px;font-weight:800;text-align:center;line-height:32px;">{badge_char}</div>
+                        </td>
+                        <td>
+                          {title_html}
+                          <div style="font-size:13px;color:#475569;margin-top:4px;line-height:1.5;">{body}</div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>'''
+            )
+
+        rec_html = ""
+        if recommendation:
+            rec_html = f'''          <tr>
+            <td style="padding:0 40px 24px;">
+              <div style="border-left:3px solid #2563eb;background:#f8fafc;padding:14px 18px;border-radius:0 8px 8px 0;">
+                <div style="font-size:12px;font-weight:700;color:#2563eb;text-transform:uppercase;letter-spacing:1px;">Recomendación</div>
+                <div style="font-size:13px;color:#475569;margin-top:4px;line-height:1.6;">{recommendation}</div>
+              </div>
+            </td>
+          </tr>'''
+
+        logo = self._SMARTSTUDENT_LOGO_URL
+        return f'''<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,0.08);">
+          <tr>
+            <td style="background:linear-gradient(135deg,#060d1a 0%,#0d1b2e 50%,#112240 100%);padding:0;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr><td style="height:4px;background:linear-gradient(90deg,#2563eb,#3B82F6,#4ADE80);"></td></tr>
+                <tr>
+                  <td style="padding:32px 40px 24px;">
+                    <table cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td style="vertical-align:middle;width:88px;padding-right:10px;">
+                          <img src="{logo}" alt="SmartStudent" style="width:80px;height:80px;border-radius:16px;object-fit:contain;display:block;" />
+                        </td>
+                        <td>
+                          <div style="font-size:28px;font-weight:900;color:#ffffff;letter-spacing:1px;">Smart<span style="color:#2563eb;">Student</span></div>
+                          <div style="font-size:12px;color:#94a3b8;margin-top:4px;letter-spacing:2px;text-transform:uppercase;">Gestión Escolar con Inteligencia Artificial</div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px 40px 12px;">
+              <div style="font-size:12px;color:#2563eb;font-weight:700;letter-spacing:2px;text-transform:uppercase;">{eyebrow}</div>
+              <h1 style="margin:8px 0 0;font-size:22px;font-weight:800;color:#0f172a;line-height:1.3;">{title}</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 40px 20px;">
+              <p style="margin:0;font-size:14px;color:#475569;line-height:1.6;">{intro}</p>
+            </td>
+          </tr>
+{chr(10).join(cards)}
+{rec_html}
+          <tr>
+            <td style="padding:0 40px 32px;">
+              <p style="margin:0 0 6px;font-size:14px;color:#475569;line-height:1.6;">{closing}</p>
+              <table cellpadding="0" cellspacing="0" style="margin-top:24px;border-top:1px solid #e2e8f0;padding-top:20px;width:100%;">
+                <tr>
+                  <td style="padding-right:14px;vertical-align:top;width:90px;">
+                    <img src="{logo}" alt="SmartStudent" style="width:80px;height:80px;border-radius:20px;object-fit:contain;display:block;" />
+                  </td>
+                  <td style="vertical-align:top;">
+                    <div style="font-size:14px;font-weight:700;color:#1e293b;">Jorge Castro</div>
+                    <div style="font-size:12px;color:#475569;margin-top:2px;">Account Director · SmartStudent</div>
+                    <div style="font-size:12px;color:#64748b;margin-top:2px;">Santiago, Chile</div>
+                    <div style="margin-top:4px;line-height:1.2;">
+                      <a href="https://www.smartstudent.cl" style="color:#2563eb;text-decoration:none;font-size:12px;font-weight:500;">www.smartstudent.cl</a>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#f8fafc;padding:20px 40px;text-align:center;">
+              <div style="font-size:10px;color:#94a3b8;line-height:1.6;">Este correo fue enviado por QCORE SPA · Santiago, Chile</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>'''
+
+    def _seed_mc_draft_worker(self, prompt, recipient_name, contact_key, brand, to_list, cc_list, status,
+                              kind="general-reply", origin="direct-email", custom_reference=None):
+        import datetime as _dt
+        import json as _json
+        template = brand.get("template")
+        try:
+            if template == "smartstudent":
+                llm_prompt = self._structured_email_llm_prompt(
+                    "Eres redactor de correos de SmartStudent (plataforma educativa SaaS). "
+                    "Tono cercano, claro y profesional, en español de Chile.",
+                    recipient_name, prompt,
+                    "ACTUALIZACIÓN PLATAFORMA · COMBAS", "tu plataforma quedó al día",
+                )
+                raw = self._llm_structured(llm_prompt, expect_json=True)
+                data = self._extract_json(raw) or {}
+                subject = (data.get("subject") or "").strip() or f"Actualización SmartStudent · {recipient_name}"
+                html = self._build_smartstudent_email_html(data, recipient_name, prompt)
+            elif template == "point":
+                llm_prompt = self._structured_email_llm_prompt(
+                    "Eres redactor de correos de Point (sistema POS con control de inventario FEFO para comercios). "
+                    "Tono cercano, claro y práctico, orientado al dueño del negocio, en español de Chile.",
+                    recipient_name, prompt,
+                    "ENTREGA DE SOFTWARE · TENTACIÓN A GRANEL", "acá va tu sistema listo",
+                )
+                raw = self._llm_structured(llm_prompt, expect_json=True)
+                data = self._extract_json(raw) or {}
+                subject = (data.get("subject") or "").strip() or f"Point · {recipient_name}"
+                html = self._build_point_email_html(data, recipient_name, prompt)
+            else:
+                llm_prompt = (
+                    f"Eres redactor de correos profesionales. {brand['guidance']}\n"
+                    f"Destinatario: {recipient_name}.\n"
+                    f"Pedido del usuario: \"{prompt}\".\n\n"
+                    "Redacta SOLO el cuerpo del correo en español (saludo inicial + párrafos). "
+                    "NO incluyas despedida, ni firma, ni datos de contacto: eso se añade automáticamente. "
+                    "Devuelve UNICAMENTE un objeto JSON válido, sin texto antes ni después y sin fences, "
+                    "con esta forma exacta:\n"
+                    '{"subject": "asunto breve", "body_html": "<p>saludo</p><p>párrafos del cuerpo en HTML</p>"}\n'
+                    "El body_html debe usar etiquetas <p> con estilos inline simples y profesionales. "
+                    "No incluyas comentarios ni explicaciones, solo el JSON."
+                )
+                raw = self._llm_structured(llm_prompt, expect_json=True)
+                data = self._extract_json(raw) or {}
+                subject = (data.get("subject") or "").strip() or f"Mensaje para {recipient_name}"
+                html = self._build_qcore_email_html(data, recipient_name, prompt)
+
+            now = _dt.datetime.now(_dt.timezone.utc)
+            stamp = now.strftime("%Y%m%d%H%M%S")
+            iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            seed_id = f"seed-claudy-{contact_key}-{stamp}"
+            draft = {
+                "id": seed_id,
+                "kind": kind,
+                "relatedMessageId": f"{seed_id}-msg",
+                "createdAt": iso,
+                "status": "pending-approval",
+                "origin": origin,
+                "reason": (custom_reference.strip()[:200] if custom_reference and custom_reference.strip()
+                           else f"Borrador creado por Claudy a partir de: {prompt.strip()[:200]}"),
+                "from": brand["from"],
+                "to": to_list,
+                "cc": cc_list,
+                "replyTo": brand["replyTo"],
+                "subject": subject,
+                "html": html,
+            }
+            if brand.get("productId"):
+                draft["productId"] = brand["productId"]
+
+            path = self._MC_SEEDED_DRAFTS_PATH
+            existing = []
+            try:
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        loaded = _json.load(f)
+                        if isinstance(loaded, list):
+                            existing = loaded
+            except Exception:
+                existing = []
+            existing.append(draft)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(existing, f, ensure_ascii=False, indent=2)
+
+            dest = ", ".join(to_list) if to_list else "(sin destinatario — complétalo en el Inbox)"
+            def _ok():
+                ch = getattr(self, "_chat_view", None)
+                if ch:
+                    ch.hide_typing()
+                    ch.add_system(
+                        f"✅ Borrador creado en el **Inbox de Mission Control**.\n\n"
+                        f"**Para:** {dest}\n**Asunto:** {subject}\n\n"
+                        f"Aparecerá en *Borradores pendientes* en ~1 segundo si Mission Control está abierto."
+                    )
+                try:
+                    status.configure(text="Borrador sembrado en Mission Control", fg="#00ff99")
+                except Exception:
+                    pass
+            self.after(0, _ok)
+        except Exception as e:
+            def _err(ex=e):
+                ch = getattr(self, "_chat_view", None)
+                if ch:
+                    ch.hide_typing()
+                    ch.add_system(f"❌ No pude crear el borrador en Mission Control: {ex}")
+                try:
+                    status.configure(text=f"Error: {ex}", fg="#ff5555")
+                except Exception:
+                    pass
+            self.after(0, _err)
 
     # ============================================================
     # Guided Report Flow (Asistente de Informes Interactivo)
@@ -3579,35 +7843,103 @@ class ClawdPet(tk.Tk):
                 style=self._guided_report_data['style'],
                 language=self._guided_report_data['language']
             )
-            chat.add_bot("Iniciando la recopilación, investigación y maquetación de tu documento...")
-            status.configure(text="Redactando informe...", fg=THEME["accent"])
-            
-            # Generate the prompt to send to LLM
-            system_instruction = (
-                f"Genera un informe altamente profesional en formato DOCX sobre el tema: '{self._guided_report_data['topic']}'.\n"
-                f"Sigue de forma estricta las siguientes preferencias del usuario:\n"
-                f"- Alcance/Profundidad: {self._guided_report_data['depth']}\n"
-                f"- Imágenes: {self._guided_report_data['images']}\n"
-                f"- Referencias/Citas: {self._guided_report_data['references']}\n"
-                f"- Estilo y Maquetación: {self._guided_report_data['style']} (Asegúrate de estructurar títulos, contenido justificado y maquetar de acuerdo a esta directriz)\n"
-                f"- Idioma de Redacción: {self._guided_report_data['language']}\n\n"
-                f"El informe final DEBE guardarse como un archivo .docx. Al terminar de crear el archivo, asegúrate de imprimir su ruta absoluta envuelta en la etiqueta [CLAUDY_PATH:ruta_completa] para poder mostrar la tarjeta interactiva de descarga y apertura de carpeta."
-            )
-            
+            status.configure(text="Investigando y redactando...", fg=THEME["accent"])
+
+            # Capture report data locally for the thread closure
+            rdata = dict(self._guided_report_data)
+
+            # ── CRITICAL: suppress all chat display during background report build ──
+            self._report_generating = True
+
             # Start background processing thread
             self._start_milestone_progress()
-            self._start_typing_progress(entry, system_instruction)
-            
+            self._start_typing_progress(entry, rdata.get("topic", "Informe"))
+
             def worker():
+                import re as _re
+                import os as _os
+                result = "Error inesperado en el pipeline."
                 try:
-                    chat.show_typing()
-                    answer = self.send_quick_message(system_instruction, _skip_skill_action=True)
-                except Exception as error:
-                    answer = f"Error generando informe: {error}"
+                    topic = rdata.get("topic", "Tema General")
+                    depth = rdata.get("depth", "Extenso y actualizado")
+                    images_pref = rdata.get("images", "No")
+                    references = rdata.get("references", "Sí, con citas APA")
+                    style = rdata.get("style", "Profesional justificado con portada e índice")
+                    language = rdata.get("language", "Español")
+
+                    # ── Step 1: Update status bar only (NOT the chat) ──
+                    self.after(0, lambda: status.configure(
+                        text="🔍 Investigando el tema...", fg=THEME["accent"]))
+
+                    content_prompt = (
+                        f"Redacta un informe completo, estructurado y profesional sobre: '{topic}'.\n"
+                        f"Alcance/Profundidad: {depth}.\n"
+                        f"Referencias y citas: {references}.\n"
+                        f"Estilo: {style}.\n"
+                        f"Idioma: {language}.\n\n"
+                        f"ESTRUCTURA REQUERIDA (usa exactamente estos marcadores Markdown):\n"
+                        f"# [Título principal del informe]\n"
+                        f"## Introducción\n"
+                        f"## [Sección 1]\n"
+                        f"## [Sección 2]\n"
+                        f"... (tantas secciones como requiera el tema)\n"
+                        f"## Conclusiones\n"
+                        f"## Referencias\n\n"
+                        f"REGLAS ESTRICTAS:\n"
+                        f"- Escribe el informe completo en texto plano con marcadores Markdown (#, ##, ###).\n"
+                        f"- NO uses comandos como /buscar, /docx, /webfetch ni ningún slash-command.\n"
+                        f"- NO escribas explicaciones previas ni 'voy a hacer...'. Escribe directamente el informe.\n"
+                        f"- El informe debe ser sustancial: mínimo 800 palabras.\n"
+                        f"- Si se piden referencias, incluye al menos 5 fuentes reales al final.\n"
+                        f"- Responde SOLO con el contenido del informe en Markdown."
+                    )
+
+                    self.after(0, lambda: status.configure(
+                        text="📝 Redactando el informe...", fg=THEME["accent"]))
+                    raw_content = self.send_quick_message(content_prompt, _skip_skill_action=True)
+
+                    # Strip any accidental slash commands from the LLM response
+                    raw_content = _re.sub(r'^/\S+.*$', '', raw_content, flags=_re.MULTILINE).strip()
+                    if not raw_content or len(raw_content) < 100:
+                        raw_content = (
+                            f"# Informe: {topic}\n\n"
+                            f"## Introducción\n"
+                            f"Este informe presenta información sobre {topic}.\n\n"
+                            f"## Desarrollo\n"
+                            f"El tema de {topic} abarca múltiples aspectos relevantes para su comprensión.\n\n"
+                            f"## Conclusiones\n"
+                            f"En conclusión, {topic} es un tema de gran importancia.\n"
+                        )
+
+                    # ── Step 2: Optionally download images ──
+                    image_paths = []
+                    wants_images = images_pref and any(
+                        w in images_pref.lower() for w in ["sí", "si", "pocas", "muchas", "varias"])
+                    if wants_images:
+                        self.after(0, lambda: status.configure(
+                            text="🖼️ Buscando imágenes...", fg=THEME["accent"]))
+                        try:
+                            image_paths = self._download_report_images(topic, max_images=3)
+                        except Exception:
+                            image_paths = []
+
+                    # ── Step 3: Build the docx locally (guaranteed) ──
+                    self.after(0, lambda: status.configure(
+                        text="📄 Creando el archivo Word...", fg=THEME["accent"]))
+                    import claudy_powers as cp
+                    safe_topic = _re.sub(r'[\\/*?:"<>|]', '_', topic)[:60]
+                    docx_dir = _os.path.join(_os.path.expanduser("~"), "Documents", "Claudy", "Informes")
+                    _os.makedirs(docx_dir, exist_ok=True)
+                    docx_path = _os.path.join(docx_dir, f"{safe_topic}.docx")
+                    result = cp.create_docx_with_images(docx_path, raw_content, image_paths)
+
+                except Exception as pipeline_err:
+                    result = f"Error en el pipeline del informe: {pipeline_err}"
+
                 self._stop_milestone_progress()
-                self.after(0, lambda: self.finish_quick_answer(answer, status, entry))
-                
-            threading.Thread(target=worker, daemon=True).start()
+                self.after(0, lambda: self._deliver_report_result(result, status, entry))
+
+            threading.Thread(target=worker, daemon=True, name="report-worker").start()
 
     # ============================================================
     # Hitos de progreso ("dame un momento, sigo trabajando...")
@@ -3628,7 +7960,329 @@ class ClawdPet(tk.Tk):
             aid = self.after(int(delay_s * 1000), lambda m=msg: self._emit_milestone(m))
             self._milestone_after_ids.append(aid)
 
+    def _game_done(self, result, status, entry, chat=None):
+        """Callback when the gaming worker finishes. Shows result in chat."""
+        try:
+            if chat:
+                chat.hide_typing()
+                chat.add_bot(result)
+            else:
+                self._set_response_text(result)
+            status.configure(text="\ud83c\udfae Listo", fg=THEME.get("accent", "#c4b5fd"))
+            # Show bubble if minimized
+            first_line = result.splitlines()[0] if result else "Juego listo"
+            if getattr(self, "bubble_minimized", False):
+                self.show_pet_speech_bubble(first_line, duration=8000)
+        except Exception:
+            pass
+        try:
+            entry.configure(state="normal")
+            entry.focus_set()
+        except Exception:
+            pass
+
+    # ══════════════════════════════════════════════════════════════════
+    # ALARMAS  ─  motor completo
+    # ══════════════════════════════════════════════════════════════════
+    def _alarms_path(self):
+        p = os.path.join(os.path.expanduser("~"), ".claudy", "alarms.json")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        return p
+
+    def _load_alarms(self):
+        try:
+            with open(self._alarms_path(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def _save_alarms(self, alarms):
+        try:
+            with open(self._alarms_path(), "w", encoding="utf-8") as f:
+                json.dump(alarms, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _parse_alarm_time(self, text):
+        """Parse Spanish natural language time from text.
+        Returns (fire_ts, label) or (None, None) on failure.
+        Examples: 'en 30 minutos', 'a las 15:30', 'mañana a las 9', '2 horas'.
+        """
+        import re as _re
+        import time as _time
+        now = _time.time()
+        tl = text.lower()
+
+        # en N minutos / en N horas / en N segundos
+        m = _re.search(r'en\s+(\d+)\s*(minuto|minutos|min|hora|horas|h|segundo|segundos|seg)', tl)
+        if m:
+            qty = int(m.group(1))
+            unit = m.group(2)
+            if unit.startswith("s"):
+                delta = qty
+            elif unit.startswith("m"):
+                delta = qty * 60
+            else:
+                delta = qty * 3600
+            label = _re.sub(r'(/alarma|alarma\s*(para|en|a\s*las)?)', '', tl, flags=_re.IGNORECASE).strip()
+            return now + delta, label or text
+
+        # a las HH:MM  o  a las H (am/pm)
+        m = _re.search(r'a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', tl)
+        if m:
+            import datetime as _dt
+            h = int(m.group(1))
+            mins = int(m.group(2)) if m.group(2) else 0
+            ampm = (m.group(3) or "").lower()
+            if ampm == "pm" and h < 12:
+                h += 12
+            elif ampm == "am" and h == 12:
+                h = 0
+            target = _dt.datetime.now().replace(hour=h, minute=mins, second=0, microsecond=0)
+            if target.timestamp() <= now:
+                target += _dt.timedelta(days=1)  # next day if already past
+            label = _re.sub(r'(/alarma|alarma\s*(para|en|a\s*las?)?)', '', tl, flags=_re.IGNORECASE).strip()
+            label = _re.sub(r'a\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?', '', label).strip(" ,-")
+            return target.timestamp(), label or f"Alarma {h:02d}:{mins:02d}"
+
+        # mañana a las HH:MM
+        m = _re.search(r'mañana\s+a\s+las?\s+(\d{1,2})(?::(\d{2}))?', tl)
+        if m:
+            import datetime as _dt
+            h = int(m.group(1))
+            mins = int(m.group(2)) if m.group(2) else 0
+            target = _dt.datetime.now().replace(hour=h, minute=mins, second=0, microsecond=0)
+            target += _dt.timedelta(days=1)
+            label = _re.sub(r'(/alarma|alarma\s*(para|mañana)?|mañana\s+a\s+las?\s+\d+(?::\d+)?)', '', tl).strip(" ,-")
+            return target.timestamp(), label or f"Alarma mañana {h:02d}:{mins:02d}"
+
+        return None, None
+
+    def _alarm_set(self, text):
+        """Create and schedule an alarm from natural language text."""
+        import time as _time
+        fire_ts, label = self._parse_alarm_time(text)
+        if fire_ts is None:
+            return (
+                "⏰ No entendí la hora, Felipe. Prueba con:\n"
+                "• \"en 30 minutos\"\n"
+                "• \"en 2 horas\"\n"
+                "• \"a las 15:30\"\n"
+                "• \"mañana a las 9\""
+            )
+        alarms = self._load_alarms()
+        alarm_id = str(int(_time.time() * 1000))[-6:]
+        label = label or "Alarma"
+        alarms.append({"id": alarm_id, "fire": fire_ts, "label": label, "created": _time.time()})
+        self._save_alarms(alarms)
+        self._schedule_alarm(alarm_id, fire_ts, label)
+
+        import datetime as _dt
+        dt = _dt.datetime.fromtimestamp(fire_ts)
+        secs = fire_ts - _time.time()
+        if secs < 3600:
+            when = f"en {int(secs//60)} min {int(secs%60)} seg"
+        else:
+            when = dt.strftime("el %d/%m a las %H:%M")
+        return f"⏰ Alarma #{alarm_id} configurada — {when}\n📌 {label}"
+
+    def _schedule_alarm(self, alarm_id, fire_ts, label):
+        """Spawn a background thread that fires the alarm at fire_ts."""
+        import time as _time
+        import threading as _th
+
+        def _waiter():
+            delay = fire_ts - _time.time()
+            if delay > 0:
+                _time.sleep(delay)
+            # Fire! — update alarm to done
+            alarms = self._load_alarms()
+            alarms = [a for a in alarms if a.get("id") != alarm_id]
+            self._save_alarms(alarms)
+            # Notify in UI thread
+            self.after(0, lambda: self._fire_alarm_notify(label))
+
+        t = _th.Thread(target=_waiter, daemon=True, name=f"alarm-{alarm_id}")
+        t.start()
+
+    def _fire_alarm_notify(self, label):
+        """Visual + audio alarm notification."""
+        msg = f"⏰ ¡ALARMA, Felipe!\n{label}"
+        self.show_pet_speech_bubble(msg, duration=30000)
+        chat = getattr(self, "_chat_view", None)
+        if chat:
+            chat.add_bot(msg)
+        try:
+            import winsound
+            for _ in range(3):
+                winsound.Beep(1000, 400)
+        except Exception:
+            pass
+        try:
+            self._notify("⏰ Claudy", label)
+        except Exception:
+            pass
+
+    def _alarm_list(self):
+        import time as _time
+        import datetime as _dt
+        alarms = self._load_alarms()
+        if not alarms:
+            return "No tienes alarmas pendientes, Felipe.\nUsa: /alarma en 30 minutos [etiqueta]"
+        lines = ["⏰ Alarmas pendientes:"]
+        for a in sorted(alarms, key=lambda x: x["fire"]):
+            dt = _dt.datetime.fromtimestamp(a["fire"])
+            secs = a["fire"] - _time.time()
+            if secs < 0:
+                remain = "(pasada)"
+            elif secs < 3600:
+                remain = f"en {int(secs//60)} min"
+            else:
+                remain = dt.strftime("%d/%m %H:%M")
+            lines.append(f"  #{a['id']} — {remain} — {a.get('label','')}")
+        lines.append("\nUsa /alarma del <id> para borrar.")
+        return "\n".join(lines)
+
+    def _alarm_delete(self, alarm_id):
+        alarms = self._load_alarms()
+        before = len(alarms)
+        alarms = [a for a in alarms if a.get("id") != alarm_id]
+        self._save_alarms(alarms)
+        if len(alarms) < before:
+            return f"✅ Alarma #{alarm_id} eliminada."
+        return f"⚠️ No encontré la alarma #{alarm_id}."
+
+    def _alarm_delete_all(self):
+        """Delete ALL pending alarms."""
+        alarms = self._load_alarms()
+        count = len(alarms)
+        if count == 0:
+            return "No tienes alarmas pendientes, Felipe."
+        self._save_alarms([])
+        self._alarm_badge_hide()
+        return f"✅ Eliminé todas las alarmas ({count} en total)."
+
+    def _alarm_delete_by_text(self, text):
+        """Delete an alarm matching a time (HH:MM) or label keyword in the text."""
+        import re as _re
+        import datetime as _dt
+        import time as _t
+        alarms = self._load_alarms()
+        if not alarms:
+            return "No tienes alarmas pendientes, Felipe."
+
+        tl = text.lower()
+
+        # Try to match HH:MM or H.MM or H:MM from the text
+        m = _re.search(r'(\d{1,2})[.:h](\d{2})', tl)
+        if m:
+            h, mins = int(m.group(1)), int(m.group(2))
+            # Find alarm whose fire time matches hour+minute
+            matched = []
+            for a in alarms:
+                dt = _dt.datetime.fromtimestamp(a["fire"])
+                if dt.hour == h and dt.minute == mins:
+                    matched.append(a)
+            if matched:
+                ids = [a["id"] for a in matched]
+                remaining = [a for a in alarms if a["id"] not in ids]
+                self._save_alarms(remaining)
+                labels = ", ".join(a.get("label","") or f"#{a['id']}" for a in matched)
+                return f"✅ Alarma(s) de las {h:02d}:{mins:02d} eliminada(s): {labels}"
+
+        # Try to match by label keyword (any word > 3 chars from text that matches label)
+        noise = {"alarma", "borra", "elimina", "cancela", "quita", "la", "el", "de", "las",
+                 "eliminar", "borrar", "cancelar", "quitar", "que", "esta", "ese", "esa"}
+        words = [w for w in _re.split(r'\W+', tl) if len(w) > 3 and w not in noise]
+        if words:
+            matched = []
+            for a in alarms:
+                label_low = (a.get("label") or "").lower()
+                if any(w in label_low for w in words):
+                    matched.append(a)
+            if matched:
+                ids = [a["id"] for a in matched]
+                remaining = [a for a in alarms if a["id"] not in ids]
+                self._save_alarms(remaining)
+                labels = ", ".join(a.get("label","") or f"#{a['id']}" for a in matched)
+                return f"✅ Alarma(s) eliminada(s): {labels}"
+
+        # Last resort: show list and ask for ID
+        lines = ["⚠️ No encontré qué alarma borrar. Estas son tus alarmas pendientes:"]
+        for a in sorted(alarms, key=lambda x: x["fire"]):
+            dt = _dt.datetime.fromtimestamp(a["fire"])
+            lines.append(f"  #{a['id']} — {dt.strftime('%H:%M')} — {a.get('label','')}")
+        lines.append("\nDi: \"elimina la alarma de las HH:MM\" o \"/alarma del <id>\"")
+        return "\n".join(lines)
+
+    def _restore_pending_alarms(self):
+        """Call on startup to re-schedule any persisted alarms that haven't fired yet."""
+        import time as _time
+        alarms = self._load_alarms()
+        active = []
+        for a in alarms:
+            if a["fire"] > _time.time():
+                self._schedule_alarm(a["id"], a["fire"], a.get("label", "Alarma"))
+                active.append(a)
+        if len(active) != len(alarms):
+            self._save_alarms(active)  # prune past alarms
+
+    # ══════════════════════════════════════════════════════════════════
+    # NOTAS  ─  motor completo
+    # ══════════════════════════════════════════════════════════════════
+    def _notes_path(self):
+        p = os.path.join(os.path.expanduser("~"), ".claudy", "notes.json")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        return p
+
+    def _load_notes(self):
+        try:
+            with open(self._notes_path(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def _save_notes(self, notes):
+        try:
+            with open(self._notes_path(), "w", encoding="utf-8") as f:
+                json.dump(notes, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _notes_add(self, content):
+        import time as _time
+        import datetime as _dt
+        content = content.strip()
+        if not content:
+            return "No me diste nada que guardar, Felipe."
+        notes = self._load_notes()
+        note_id = str(int(_time.time() * 1000))[-6:]
+        dt_str = _dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+        notes.append({"id": note_id, "content": content, "created": _time.time(), "date": dt_str})
+        self._save_notes(notes)
+        return f"📝 Nota #{note_id} guardada:\n\"{content}\"\n\nTienes {len(notes)} nota(s) en total."
+
+    def _notes_list(self):
+        notes = self._load_notes()
+        if not notes:
+            return "No tienes notas guardadas, Felipe.\nPrueba: \"anota que debo llamar al médico\""
+        lines = [f"📝 Tus notas ({len(notes)}):"]
+        for n in sorted(notes, key=lambda x: x.get("created", 0), reverse=True):
+            lines.append(f"\n  #{n['id']} — {n.get('date','')}\n  {n['content']}")
+        lines.append("\nUsa /nota del <id> para borrar una nota.")
+        return "\n".join(lines)
+
+    def _notes_delete(self, note_id):
+        notes = self._load_notes()
+        before = len(notes)
+        notes = [n for n in notes if n.get("id") != note_id]
+        self._save_notes(notes)
+        if len(notes) < before:
+            return f"✅ Nota #{note_id} eliminada."
+        return f"⚠️ No encontré la nota #{note_id}."
+
     def _emit_milestone(self, msg):
+
         if not getattr(self, "_milestone_active", False):
             return
             
@@ -3657,7 +8311,167 @@ class ClawdPet(tk.Tk):
                 pass
         self._milestone_after_ids = []
 
-    # ============================================================
+    def _deliver_report_result(self, result, status, entry):
+        """Final delivery of the report: show only the file card, never the content."""
+        import os as _os
+        import re as _re
+        # ── Lift the chat-suppression flag BEFORE touching the chat ──
+        self._report_generating = False
+        try:
+            chat = getattr(self, "_chat_view", None)
+
+            # Extract the [CLAUDY_PATH:...] marker from result
+            artifact_path = self._extract_artifact_path(result)
+
+            if artifact_path and _os.path.isfile(artifact_path):
+                # Save for the toolbar button
+                self._remember_file_artifact(artifact_path)
+                fname = _os.path.basename(artifact_path)
+
+                # Show completion bubble when minimized
+                if getattr(self, "bubble_minimized", False):
+                    self.show_pet_speech_bubble(
+                        f"\u2728 \u00a1Listo, Felipe!\nHe creado:\n{fname}",
+                        duration=10000
+                    )
+
+                # Append file card to existing chat (preserves history and scrollbar)
+                if chat:
+                    chat.hide_typing()
+                    chat.add_file_card(
+                        filename=fname,
+                        on_open_file=None,
+                        on_open_folder=lambda p=artifact_path: self._open_path_location(p),
+                        message="\ud83d\udcc2 Abrir carpeta",
+                    )
+
+                done_msg = "\u00a1Informe listo! \u00bfQu\u00e9 m\u00e1s necesitas, Felipe?"
+            else:
+                # Error path \u2014 show only a short message, never LLM content
+                raw_err = _re.sub(r'\n?\[CLAUDY_PATH:.+?\]', '', str(result or "")).strip()
+                first_line = (raw_err.splitlines() or [""])[0].strip()
+                if len(first_line) > 120 or not first_line:
+                    first_line = "No se pudo crear el archivo del informe."
+                if chat:
+                    chat.hide_typing()
+                    chat.add_bot(f"\u26a0\ufe0f {first_line}")
+                done_msg = "Algo sali\u00f3 mal. Intenta de nuevo."
+                if getattr(self, "bubble_minimized", False):
+                    self.show_pet_speech_bubble(f"\u26a0\ufe0f {first_line[:80]}", duration=7000)
+
+
+            status.configure(text=done_msg, fg=THEME.get("text_secondary", "#aaa"))
+            self._stop_typing_progress(entry)
+            entry.focus_set()
+        except Exception:
+            try:
+                status.configure(text="Error al mostrar resultado.", fg=THEME.get("accent", "#f55"))
+            except Exception:
+                pass
+
+    def _download_report_images(self, topic, max_images=3):
+        """Download Wikimedia CC images for the report topic. Returns list of local file paths."""
+        import urllib.request
+        import urllib.parse
+        import json
+        import os
+        import re as _re
+
+        img_dir = os.path.join(os.path.expanduser("~"), "Documents", "Claudy", "Informes", "images")
+        os.makedirs(img_dir, exist_ok=True)
+        downloaded = []
+
+        try:
+            # Step A: Search Wikipedia for the topic to get the exact page title
+            search_url = (
+                "https://en.wikipedia.org/w/api.php?action=query&list=search"
+                f"&srsearch={urllib.parse.quote(topic)}&format=json&srlimit=1"
+            )
+            req = urllib.request.Request(
+                search_url, headers={"User-Agent": "Claudy/4.0 (educational)"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                sdata = json.loads(resp.read())
+
+            search_results = sdata.get("query", {}).get("search", [])
+            if not search_results:
+                return []
+
+            page_title = search_results[0]["title"]
+
+            # Step B: Get ALL images listed on that page
+            images_url = (
+                "https://en.wikipedia.org/w/api.php?action=query"
+                f"&titles={urllib.parse.quote(page_title)}"
+                f"&prop=images&format=json&imlimit=20"
+            )
+            req2 = urllib.request.Request(
+                images_url, headers={"User-Agent": "Claudy/4.0 (educational)"}
+            )
+            with urllib.request.urlopen(req2, timeout=15) as resp2:
+                idata = json.loads(resp2.read())
+
+            pages = idata.get("query", {}).get("pages", {})
+            img_titles = []
+            for page in pages.values():
+                for img in page.get("images", []):
+                    name = img.get("title", "")
+                    # Filter: only jpg/png, skip icons/flags/small graphics
+                    low = name.lower()
+                    if any(low.endswith(ext) for ext in (".jpg", ".jpeg", ".png")):
+                        if not any(skip in low for skip in ("flag", "icon", "logo", "symbol", "coat", "blank", "map")):
+                            img_titles.append(name)
+            
+            if not img_titles:
+                return []
+
+            # Step C: Get thumbnail URLs for the filtered images
+            safe_base = _re.sub(r'[^\w]', '_', topic)[:30]
+            for img_title in img_titles[:max_images * 2]:  # fetch extra in case some fail
+                if len(downloaded) >= max_images:
+                    break
+                try:
+                    info_url = (
+                        "https://en.wikipedia.org/w/api.php?action=query"
+                        f"&titles={urllib.parse.quote(img_title)}"
+                        "&prop=imageinfo&iiprop=url&iiurlwidth=800&format=json"
+                    )
+                    req3 = urllib.request.Request(
+                        info_url, headers={"User-Agent": "Claudy/4.0"}
+                    )
+                    with urllib.request.urlopen(req3, timeout=15) as resp3:
+                        info = json.loads(resp3.read())
+
+                    for pg in info.get("query", {}).get("pages", {}).values():
+                        ii = pg.get("imageinfo", [{}])[0]
+                        thumb_url = ii.get("thumburl") or ii.get("url", "")
+                        if not thumb_url:
+                            continue
+
+                        ext = ".jpg" if ".jpg" in thumb_url.lower() else ".png"
+                        local_path = os.path.join(img_dir, f"{safe_base}_{len(downloaded)+1}{ext}")
+
+                        req4 = urllib.request.Request(
+                            thumb_url, headers={"User-Agent": "Claudy/4.0"}
+                        )
+                        with urllib.request.urlopen(req4, timeout=20) as r4:
+                            with open(local_path, "wb") as f:
+                                f.write(r4.read())
+
+                        # Validate: must be > 5KB (not a placeholder/tiny icon)
+                        if os.path.getsize(local_path) > 5120:
+                            downloaded.append(local_path)
+                        else:
+                            os.remove(local_path)
+                        break  # one image per img_title iteration
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        return downloaded
+
+
     # Mensajes de progreso animados dentro del input (cursiva)
     # ============================================================
     def _start_typing_progress(self, entry, prompt=""):
@@ -3998,7 +8812,7 @@ class ClawdPet(tk.Tk):
     def _sync_pagination_visibility(self, canvas):
         pass  # Pagination removed — scrollbar handles overflow.
 
-    def finish_quick_answer(self, answer, status, entry):
+    def finish_quick_answer(self, answer, status, entry, _already_shown=False):
         import re
         try:
             clean_answer = self._strip_markdown(answer)
@@ -4235,22 +9049,24 @@ class ClawdPet(tk.Tk):
             chat = getattr(self, "_chat_view", None)
             if chat is not None:
                 try:
-                    chat.hide_typing()
+                    if not _already_shown:
+                        chat.hide_typing()
                     artifact_path = self._extract_artifact_path(clean_answer)
                     if artifact_path:
                         self._remember_file_artifact(artifact_path)
-                        chat.add_bot(f"¡Hemos terminado! Se ha creado el archivo:\n{os.path.basename(artifact_path)}")
+                        if not _already_shown:
+                            chat.add_bot(f"¡Hemos terminado! Se ha creado el archivo:\n{os.path.basename(artifact_path)}")
                         chat.add_file_card(
                             filename=os.path.basename(artifact_path),
                             on_open_file=lambda p=artifact_path: self._open_path_file(p),
                             on_open_folder=lambda p=artifact_path: self._open_path_location(p),
                             message="Haz clic en el nombre para abrir la carpeta",
                         )
-                    else:
+                    elif not _already_shown:
                         chat.add_bot(clean_answer)
                 except Exception:
                     pass
-            else:
+            elif not _already_shown:
                 self._set_response_text(self._format_exchange(self._last_prompt, clean_answer))
 
             done_text = random.choice([
@@ -4279,9 +9095,40 @@ class ClawdPet(tk.Tk):
         except tk.TclError:
             pass
 
+    def _history_palette(self):
+        """Paleta de la ventana de historial: misma estética navy/neón que la
+        ventana de chat de Claudy. Reutiliza el tema del dashboard si ya existe,
+        para que ambos paneles se vean idénticos."""
+        base = getattr(self, "_dashboard_chat_theme", None)
+        if base:
+            return dict(base)
+        ct = dict(THEME)
+        ct.update({
+            "bg_bubble": "#030714",
+            "bg_bubble_border": "#5b35d8",
+            "bg_input": "#071026",
+            "bg_input_border": "#20315f",
+            "header_bg": "#071026",
+            "panel_soft": "#091333",
+            "message_bot": "#101a42",
+            "message_bot_border": "#324b9a",
+            "button_bg": "#0b1538",
+            "button_fg": "#dbe6ff",
+            "button_hover": "#172862",
+            "text_primary": "#f7f9ff",
+            "text_secondary": "#9fb2ff",
+            "text_label": "#9fb2ff",
+            "accent": "#7b3cff",
+            "accent_glow": "#58c7ff",
+            "accent_dim": "#17245a",
+            "divider": "#273c85",
+        })
+        return ct
+
     def show_history_window(self):
         # Toggle: if already open, close it.
         if self.history_win is not None:
+            self._stop_history_refresh()
             try:
                 if self.history_win.winfo_exists():
                     self.history_win.destroy()
@@ -4292,15 +9139,39 @@ class ClawdPet(tk.Tk):
 
         messages = self._load_memory()
 
+        # Sombrea THEME localmente con la paleta del chat: todos los THEME[...]
+        # de esta ventana adoptan la estética navy/neón sin tocar el tema global.
+        THEME = self._history_palette()
+        HFONT = "Bahnschrift"
+        HFONT_SB = "Bahnschrift SemiBold"
+
         hist = tk.Toplevel(self)
-        hist.title("Historial de conversaciones")
+        hist.title("Ajustes de Claudy")
         hist.configure(bg=THEME["bg_input"])
-        hist.geometry("460x840")
+        hist.geometry("460x750")
         hist.attributes("-topmost", True)
         hist.resizable(False, False)
         self.history_win = hist
 
+        # Apply Windows dark mode title bar native aesthetic
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(hist.winfo_id())
+            if not hwnd:
+                hwnd = hist.winfo_id()
+            value = ctypes.c_int(1)
+            res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)
+            )
+            if res != 0:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, 19, ctypes.byref(value), ctypes.sizeof(value)
+                )
+        except Exception:
+            pass
+
         def _on_close():
+            self._stop_history_refresh()
             self.history_win = None
             hist.destroy()
 
@@ -4308,33 +9179,51 @@ class ClawdPet(tk.Tk):
 
         shell = tk.Frame(
             hist, bg=THEME["bg_bubble"], bd=0,
-            highlightbackground=THEME["accent"], highlightthickness=1,
+            highlightbackground=THEME.get("bg_bubble_border", THEME["accent"]), highlightthickness=1,
         )
         shell.pack(fill="both", expand=True, padx=12, pady=12)
 
         header_canvas = tk.Canvas(shell, height=74, bg=THEME["bg_bubble"], highlightthickness=0, bd=0)
         header_canvas.pack(fill="x")
         header_canvas.create_rectangle(0, 0, 460, 74, fill=THEME["bg_input"], outline="")
-        header_canvas.create_oval(18, 15, 50, 47, fill="#7c6bff", outline="#f7f4ff", width=1)
+        header_canvas.create_oval(18, 15, 50, 47, fill="#0a1835", outline="#8d4dff", width=3)
         header_canvas.create_polygon(34, 20, 45, 31, 40, 43, 28, 43, 23, 31,
-                                     fill="#2fe6c8", outline="")
+                                     fill=THEME["accent_glow"], outline="")
         header_canvas.create_text(
-            66, 22, anchor="w", text="Archivo de conversaciones",
-            fill=THEME["text_primary"], font=("Segoe UI", 12, "bold"),
+            66, 22, anchor="w", text="Ajustes y archivo de conversaciones",
+            fill=THEME["text_primary"], font=(HFONT_SB, 13),
         )
 
         total_user = sum(1 for m in messages if m.get("role") == "Usuario")
         total_claudy = max(0, len(messages) - total_user)
-        header_canvas.create_text(
+        self._hist_header_canvas = header_canvas
+        self._hist_count_item = header_canvas.create_text(
             66, 46, anchor="w",
             text=f"{len(messages)} mensajes  |  Tu {total_user}  |  Claudy {total_claudy}",
-            fill=THEME["text_secondary"], font=("Segoe UI", 8),
+            fill=THEME["text_secondary"], font=(HFONT, 9),
         )
+
+        # Helpers for interactive hover micro-animations
+        def add_button_hover(btn, normal_bg=THEME["bg_bubble"], hover_bg=THEME.get("accent", "#c02dff"), normal_fg=THEME["text_primary"], hover_fg="#ffffff"):
+            def on_enter(_e):
+                btn.config(bg=hover_bg, fg=hover_fg)
+            def on_leave(_e):
+                btn.config(bg=normal_bg, fg=normal_fg)
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
+
+        def add_header_hover(header_lbl):
+            def on_enter(_e):
+                header_lbl.config(bg=THEME.get("panel_soft", THEME.get("accent_dim", THEME["bg_input"])))
+            def on_leave(_e):
+                header_lbl.config(bg=THEME["bg_input"])
+            header_lbl.bind("<Enter>", on_enter)
+            header_lbl.bind("<Leave>", on_leave)
 
         # ── API Key Panel (Collapsible) ──
         api_frame = tk.Frame(
             shell, bg=THEME["bg_input"],
-            highlightbackground=THEME["accent"], highlightthickness=2, bd=0,
+            highlightbackground=THEME.get("bg_bubble_border", THEME["accent"]), highlightthickness=1, bd=0,
         )
         api_frame.pack(side="bottom", fill="x", padx=12, pady=(4, 6))
 
@@ -4342,19 +9231,17 @@ class ClawdPet(tk.Tk):
 
         api_header = tk.Label(
             api_frame, text="▶  🔑 Claves API (Configuración)",
-            bg=THEME["bg_input"], fg=THEME["accent"],
-            font=("Segoe UI", 10, "bold"), cursor="hand2",
+            bg=THEME["bg_input"], fg=THEME["accent_glow"],
+            font=(HFONT_SB, 11), cursor="hand2",
             anchor="w", padx=10, pady=8
         )
         api_header.pack(fill="x")
+        add_header_hover(api_header)
 
         api_content = tk.Frame(api_frame, bg=THEME["bg_input"])
-        # api_content is NOT packed by default (collapsed)
 
-        # Load current config to populate entries
         cfg = self.load_claudy_config()
         
-        # Helper to get first key or single key
         def get_prov_key(cfg, prov):
             prov_cfg = cfg.get("providers", {}).get(prov, {})
             k = prov_cfg.get("key", "")
@@ -4368,7 +9255,6 @@ class ClawdPet(tk.Tk):
         deepseek_key_val = get_prov_key(cfg, "deepseek")
         openai_key_val = get_prov_key(cfg, "openai")
 
-        # Create row helper inside api_content
         def make_key_row(parent, label_text, default_val):
             row = tk.Frame(parent, bg=THEME["bg_input"])
             row.pack(fill="x", padx=10, pady=2)
@@ -4377,7 +9263,9 @@ class ClawdPet(tk.Tk):
             ent = tk.Entry(
                 row, bg=THEME["bg_bubble"], fg=THEME["text_primary"],
                 insertbackground=THEME["text_primary"], font=("Segoe UI", 8),
-                relief="flat", bd=1, highlightcolor=THEME["accent"], highlightthickness=1,
+                relief="flat", bd=1,
+                highlightbackground=THEME.get("bg_bubble_border", THEME["bg_bubble"]),
+                highlightcolor=THEME["accent"], highlightthickness=1,
             )
             ent.insert(0, default_val)
             ent.pack(side="left", fill="x", expand=True, padx=(4, 0))
@@ -4387,7 +9275,6 @@ class ClawdPet(tk.Tk):
         deepseek_ent = make_key_row(api_content, "DeepSeek Key:", deepseek_key_val)
         openai_ent = make_key_row(api_content, "OpenAI Key:", openai_key_val)
 
-        # Status Label for API actions
         api_status = tk.Label(
             api_content, text="",
             bg=THEME["bg_input"], fg="#2fe6c8",
@@ -4395,37 +9282,35 @@ class ClawdPet(tk.Tk):
         )
         api_status.pack(anchor="w", padx=10, pady=(2, 2))
 
-        # Save action
         def save_api_keys():
             try:
-                # Load fresh
                 new_cfg = self.load_claudy_config()
-                
-                # Update opencode key
                 if "opencode" not in new_cfg:
                     new_cfg["opencode"] = {}
                 new_cfg["opencode"]["apiKey"] = opencode_ent.get().strip()
 
-                # Update providers
                 if "providers" not in new_cfg:
                     new_cfg["providers"] = {}
                 
-                # DeepSeek key
                 if "deepseek" not in new_cfg["providers"]:
                     new_cfg["providers"]["deepseek"] = {}
                 ds_val = deepseek_ent.get().strip()
                 new_cfg["providers"]["deepseek"]["key"] = ds_val
                 new_cfg["providers"]["deepseek"]["keys"] = [ds_val] if ds_val else []
 
-                # OpenAI key
                 if "openai" not in new_cfg["providers"]:
                     new_cfg["providers"]["openai"] = {}
                 oa_val = openai_ent.get().strip()
                 new_cfg["providers"]["openai"]["key"] = oa_val
                 new_cfg["providers"]["openai"]["keys"] = [oa_val] if oa_val else []
 
-                # Write to disk
                 cfg_path = os.path.expanduser("~/.claudy/config.json")
+                # Encrypt secrets at rest before writing.
+                try:
+                    if _secure is not None:
+                        _secure.encrypt_config_secrets(new_cfg)
+                except Exception:
+                    pass
                 with open(cfg_path, "w", encoding="utf-8") as f:
                     json.dump(new_cfg, f, indent=2)
 
@@ -4442,8 +9327,8 @@ class ClawdPet(tk.Tk):
             padx=10, pady=4, bd=0,
         )
         save_btn.pack(anchor="e", padx=10, pady=(2, 6))
+        add_button_hover(save_btn)
 
-        # Toggle bind
         def toggle_api_content(_e=None):
             if api_expanded[0]:
                 api_content.pack_forget()
@@ -4459,7 +9344,7 @@ class ClawdPet(tk.Tk):
         # ── Skin picker (Collapsible) ──
         skin_frame = tk.Frame(
             shell, bg=THEME["bg_input"],
-            highlightbackground=THEME["accent"], highlightthickness=2, bd=0,
+            highlightbackground=THEME.get("bg_bubble_border", THEME["accent"]), highlightthickness=1, bd=0,
         )
         skin_frame.pack(side="bottom", fill="x", padx=12, pady=(4, 6))
 
@@ -4467,14 +9352,14 @@ class ClawdPet(tk.Tk):
 
         skin_header = tk.Label(
             skin_frame, text="▶  🎨 Skin de Claudy",
-            bg=THEME["bg_input"], fg=THEME["accent"],
-            font=("Segoe UI", 10, "bold"), cursor="hand2",
+            bg=THEME["bg_input"], fg=THEME["accent_glow"],
+            font=(HFONT_SB, 11), cursor="hand2",
             anchor="w", padx=10, pady=8
         )
         skin_header.pack(fill="x")
+        add_header_hover(skin_header)
 
         skin_content = tk.Frame(skin_frame, bg=THEME["bg_input"])
-        # skin_content is collapsed by default!
 
         tk.Label(
             skin_content,
@@ -4494,7 +9379,7 @@ class ClawdPet(tk.Tk):
         status_label.pack(anchor="w", padx=10, pady=(0, 8))
 
         def make_skin_btn(parent, label, skin_name):
-            return tk.Button(
+            btn = tk.Button(
                 parent, text=label,
                 command=lambda: self._switch_skin(skin_name, status_label),
                 bg=THEME["bg_bubble"], fg=THEME["text_primary"],
@@ -4502,6 +9387,8 @@ class ClawdPet(tk.Tk):
                 activebackground=THEME["accent"], activeforeground="#ffffff",
                 padx=12, pady=6, bd=0,
             )
+            add_button_hover(btn)
+            return btn
 
         make_skin_btn(btn_row, "🤖 Robot", "robot").pack(side="left", padx=(0, 6))
         make_skin_btn(btn_row, "🦀 Cangrejo", "crab").pack(side="left", padx=(0, 6))
@@ -4522,7 +9409,7 @@ class ClawdPet(tk.Tk):
         # ── Theme picker frame (Collapsible) ──
         theme_frame = tk.Frame(
             shell, bg=THEME["bg_input"],
-            highlightbackground=THEME["accent"], highlightthickness=2, bd=0,
+            highlightbackground=THEME.get("bg_bubble_border", THEME["accent"]), highlightthickness=1, bd=0,
         )
         theme_frame.pack(side="bottom", fill="x", padx=12, pady=(4, 6))
 
@@ -4530,14 +9417,14 @@ class ClawdPet(tk.Tk):
 
         theme_header = tk.Label(
             theme_frame, text="▶  ✦ Tema de Claudy",
-            bg=THEME["bg_input"], fg=THEME["accent"],
-            font=("Segoe UI", 10, "bold"), cursor="hand2",
+            bg=THEME["bg_input"], fg=THEME["accent_glow"],
+            font=(HFONT_SB, 11), cursor="hand2",
             anchor="w", padx=10, pady=8
         )
         theme_header.pack(fill="x")
+        add_header_hover(theme_header)
 
         theme_content = tk.Frame(theme_frame, bg=THEME["bg_input"])
-        # theme_content is collapsed by default!
 
         tk.Label(
             theme_content,
@@ -4561,11 +9448,9 @@ class ClawdPet(tk.Tk):
                 idx = _THEME_KEYS.index(theme_key)
                 self._toggle_theme(specific_idx=idx)
                 theme_status_label.config(text=f"Tema cambiado a: {theme_key.capitalize()} ✦")
-                # Buffer active messages in memory to preserve conversation
                 chat_view = getattr(self, "_chat_view", None)
                 if chat_view is not None:
                     self._chat_history_buffer = list(chat_view._messages)
-                # Reopen the main chat bubble with the new theme
                 try:
                     if getattr(self, "bubble_win", None) is not None:
                         self.bubble_win.destroy()
@@ -4573,7 +9458,6 @@ class ClawdPet(tk.Tk):
                 except Exception:
                     pass
                 self.after(50, self.show_chat_bubble)
-                # Also reload history window so it gets styled instantly!
                 try:
                     hist.destroy()
                 except Exception:
@@ -4583,7 +9467,7 @@ class ClawdPet(tk.Tk):
                 theme_status_label.config(text=f"Error: {e}")
 
         def make_theme_btn(parent, label, theme_key):
-            return tk.Button(
+            btn = tk.Button(
                 parent, text=label,
                 command=lambda: _on_theme_select(theme_key),
                 bg=THEME["bg_bubble"], fg=THEME["text_primary"],
@@ -4591,6 +9475,8 @@ class ClawdPet(tk.Tk):
                 activebackground=THEME["accent"], activeforeground="#ffffff",
                 padx=12, pady=6, bd=0,
             )
+            add_button_hover(btn)
+            return btn
 
         make_theme_btn(theme_btn_row, "✦ Glass", "glass").pack(side="left", padx=(0, 6))
         make_theme_btn(theme_btn_row, ">_ Terminal", "terminal").pack(side="left", padx=(0, 6))
@@ -4608,8 +9494,109 @@ class ClawdPet(tk.Tk):
 
         theme_header.bind("<Button-1>", toggle_theme_content)
 
+        # ── Alarmas y recordatorios (Collapsible) ──
+        alarms_frame = tk.Frame(
+            shell, bg=THEME["bg_input"],
+            highlightbackground=THEME.get("bg_bubble_border", THEME["accent"]), highlightthickness=1, bd=0,
+        )
+        alarms_frame.pack(side="bottom", fill="x", padx=12, pady=(4, 6))
+
+        alarms_expanded = [False]
+        alarms_data = self._load_alarms()
+        alarms_count = len(alarms_data)
+
+        alarms_header = tk.Label(
+            alarms_frame,
+            text=f"▶  ⏰ Alarmas y recordatorios ({alarms_count})",
+            bg=THEME["bg_input"], fg=THEME["accent_glow"],
+            font=(HFONT_SB, 11), cursor="hand2",
+            anchor="w", padx=10, pady=8,
+        )
+        alarms_header.pack(fill="x")
+        add_header_hover(alarms_header)
+
+        alarms_content = tk.Frame(alarms_frame, bg=THEME["bg_input"])
+
+        alarms_list_frame = tk.Frame(alarms_content, bg=THEME["bg_bubble"])
+        alarms_list_frame.pack(fill="x", padx=10, pady=(4, 6))
+
+        alarms_text = tk.Text(
+            alarms_list_frame, bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+            font=("Consolas", 9), wrap="word", height=8,
+            relief="flat", bd=0, padx=8, pady=6,
+            highlightthickness=0, state="disabled",
+            selectbackground=THEME["accent"], selectforeground="#ffffff",
+        )
+        alarms_text.pack(fill="both", expand=True)
+
+        def _refresh_alarms_text():
+            import time as _t, datetime as _dt
+            alarms = self._load_alarms()
+            alarms_text.configure(state="normal")
+            alarms_text.delete("1.0", "end")
+            if not alarms:
+                alarms_text.insert("end", "Sin alarmas pendientes.\nUsa: /alarma en 30 minutos [etiqueta]")
+            else:
+                for a in sorted(alarms, key=lambda x: x.get("fire", 0)):
+                    fire = a.get("fire", 0)
+                    secs = fire - _t.time()
+                    if secs < 0:
+                        when = "(pasada)"
+                    elif secs < 3600:
+                        when = f"en {int(secs//60)} min"
+                    else:
+                        when = _dt.datetime.fromtimestamp(fire).strftime("%d/%m %H:%M")
+                    label = a.get("label", "") or "(sin etiqueta)"
+                    alarms_text.insert("end", f"#{a.get('id','?')}  {when}  —  {label}\n")
+            alarms_text.configure(state="disabled")
+            alarms_header.config(text=f"{'▼' if alarms_expanded[0] else '▶'}  ⏰ Alarmas y recordatorios ({len(alarms)})")
+
+        _refresh_alarms_text()
+
+        alarms_btn_row = tk.Frame(alarms_content, bg=THEME["bg_input"])
+        alarms_btn_row.pack(fill="x", padx=10, pady=(0, 6))
+
+        def _refresh_btn():
+            _refresh_alarms_text()
+        def _delete_all_btn():
+            self._alarm_delete_all()
+            _refresh_alarms_text()
+
+        refresh_btn = tk.Button(
+            alarms_btn_row, text="🔄 Refrescar", command=_refresh_btn,
+            bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+            font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2",
+            activebackground=THEME["accent"], activeforeground="#ffffff",
+            padx=10, pady=4, bd=0,
+        )
+        refresh_btn.pack(side="left", padx=(0, 6))
+        add_button_hover(refresh_btn)
+
+        delete_btn = tk.Button(
+            alarms_btn_row, text="🗑️ Borrar todas", command=_delete_all_btn,
+            bg=THEME["bg_bubble"], fg="#ff8888",
+            font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2",
+            activebackground="#ff4e4e", activeforeground="#ffffff",
+            padx=10, pady=4, bd=0,
+        )
+        delete_btn.pack(side="left")
+        add_button_hover(delete_btn, normal_fg="#ff8888", hover_bg="#ff4e4e", hover_fg="#ffffff")
+
+        def toggle_alarms_content(_e=None):
+            alarms_expanded[0] = not alarms_expanded[0]
+            if alarms_expanded[0]:
+                alarms_content.pack(fill="x")
+            else:
+                alarms_content.pack_forget()
+            _refresh_alarms_text()
+
+        alarms_header.bind("<Button-1>", toggle_alarms_content)
+
         # ── Message frame (toma el espacio restante en el medio) ──
-        frame = tk.Frame(shell, bg=THEME["bg_bubble"])
+        frame = tk.Frame(
+            shell, bg=THEME["bg_bubble"],
+            highlightbackground=THEME.get("bg_bubble_border", THEME["accent"]), highlightthickness=1, bd=0,
+        )
         frame.pack(fill="both", expand=True, padx=12, pady=(8, 12))
 
         scrollbar = tk.Scrollbar(
@@ -4630,23 +9617,24 @@ class ClawdPet(tk.Tk):
         text_widget.pack(side="left", fill="both", expand=True)
         scrollbar.config(command=text_widget.yview)
 
-        text_widget.tag_configure("user_name", foreground="#ffffff", font=("Segoe UI", 9, "bold"),
-                                  background="#5d56d8", lmargin1=12, lmargin2=12,
+        user_bg_hex = THEME.get("accent_dim", "#18234f")
+        claudy_bg_hex = THEME.get("message_bot", THEME["bg_input"])
+
+        text_widget.tag_configure("user_name", foreground=THEME["text_primary"], font=(HFONT_SB, 9),
+                                  background=user_bg_hex, lmargin1=12, lmargin2=12,
                                   rmargin=56, spacing1=8, spacing3=0)
-        text_widget.tag_configure("user_body", foreground="#f2efff", font=("Segoe UI", 9),
-                                  background="#5d56d8", lmargin1=12, lmargin2=12,
+        text_widget.tag_configure("user_body", foreground=THEME["text_secondary"], font=(HFONT, 10),
+                                  background=user_bg_hex, lmargin1=12, lmargin2=12,
                                   rmargin=56, spacing3=10)
-        # Convert RGBA tuple to hex for tkinter Text tags (canvas accepts tuples, Text tags do not).
-        eye_glow_hex = "#{:02x}{:02x}{:02x}".format(*THEME["eye_glow"][:3])
-        text_widget.tag_configure("claudy_name", foreground=eye_glow_hex, font=("Segoe UI", 9, "bold"),
-                                  background=THEME["bg_input"], lmargin1=56, lmargin2=56,
+        text_widget.tag_configure("claudy_name", foreground=THEME["accent_glow"], font=(HFONT_SB, 9),
+                                  background=claudy_bg_hex, lmargin1=56, lmargin2=56,
                                   rmargin=12, spacing1=8, spacing3=0)
-        text_widget.tag_configure("claudy_body", foreground=THEME["text_primary"], font=("Segoe UI", 9),
-                                  background=THEME["bg_input"], lmargin1=56, lmargin2=56,
+        text_widget.tag_configure("claudy_body", foreground=THEME["text_primary"], font=(HFONT, 10),
+                                  background=claudy_bg_hex, lmargin1=56, lmargin2=56,
                                   rmargin=12, spacing3=10)
-        text_widget.tag_configure("time", foreground=THEME["text_secondary"], font=("Segoe UI", 7),
+        text_widget.tag_configure("time", foreground=THEME["text_secondary"], font=(HFONT, 7),
                                   lmargin1=12, lmargin2=12, rmargin=12, spacing3=3)
-        text_widget.tag_configure("empty", foreground=THEME["text_secondary"], font=("Segoe UI", 10, "bold"),
+        text_widget.tag_configure("empty", foreground=THEME["text_secondary"], font=(HFONT_SB, 11),
                                   justify="center", spacing1=90)
 
         text_widget.configure(state="normal")
@@ -4663,6 +9651,85 @@ class ClawdPet(tk.Tk):
         text_widget.configure(state="disabled")
         text_widget.see("end")
 
+        # Mantener el historial eterno actualizado EN VIVO mientras la ventana esté abierta.
+        self._hist_text_widget = text_widget
+        self._hist_rendered_count = len(messages)
+        self._history_refresh_loop()
+
+    def _history_append_new(self):
+        """Agrega al historial solo los mensajes nuevos desde el último render
+        (sin reconstruir todo, conservando el scroll si Felipe está al final)."""
+        tw = getattr(self, "_hist_text_widget", None)
+        if tw is None:
+            return
+        try:
+            if not tw.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        msgs = self._load_memory()
+        start = getattr(self, "_hist_rendered_count", 0)
+        if len(msgs) <= start:
+            return
+        try:
+            at_bottom = tw.yview()[1] >= 0.999
+        except tk.TclError:
+            at_bottom = True
+        tw.configure(state="normal")
+        for msg in msgs[start:]:
+            is_user = msg.get("role") == "Usuario"
+            role_label = "Tu" if is_user else "Claudy"
+            t = msg.get("time", "")
+            if t:
+                tw.insert("end", f"{t}\n", "time")
+            tw.insert("end", f"  {role_label}  \n", "user_name" if is_user else "claudy_name")
+            tw.insert("end", f"{msg.get('text','')}\n\n", "user_body" if is_user else "claudy_body")
+        tw.configure(state="disabled")
+        self._hist_rendered_count = len(msgs)
+        if at_bottom:
+            tw.see("end")
+        # Actualizar el contador del encabezado.
+        canvas = getattr(self, "_hist_header_canvas", None)
+        item = getattr(self, "_hist_count_item", None)
+        if canvas is not None and item is not None:
+            total_user = sum(1 for m in msgs if m.get("role") == "Usuario")
+            total_claudy = max(0, len(msgs) - total_user)
+            try:
+                canvas.itemconfigure(
+                    item,
+                    text=f"{len(msgs)} mensajes  |  Tu {total_user}  |  Claudy {total_claudy}",
+                )
+            except tk.TclError:
+                pass
+
+    def _history_refresh_loop(self):
+        """Poll ligero (1.5s) que mantiene la ventana de historial sincronizada."""
+        win = getattr(self, "history_win", None)
+        if win is None:
+            return
+        try:
+            if not win.winfo_exists():
+                self.history_win = None
+                return
+        except tk.TclError:
+            self.history_win = None
+            return
+        try:
+            self._history_append_new()
+        except Exception:
+            pass
+        self._hist_refresh_job = self.after(1500, self._history_refresh_loop)
+
+    def _stop_history_refresh(self):
+        job = getattr(self, "_hist_refresh_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._hist_refresh_job = None
+        self._hist_text_widget = None
+
     def _reload_frames(self):
         """Recarga los PNG frames desde disco y actualiza el label en vivo."""
         try:
@@ -4674,6 +9741,13 @@ class ClawdPet(tk.Tk):
             self.update_idletasks()
         except Exception as e:
             print(f"[!] Error recargando frames: {e}")
+        # Refresh motion system for the new skin (squash/stretch source + profile cache)
+        try:
+            self._skin_name = self._detect_skin_name()
+            self._cur_scaled_img = None
+            self._rebuild_pil_frames()
+        except Exception:
+            pass
 
     def _switch_skin(self, skin_name, status_label=None):
         """Cambia el skin de Claudy en vivo (sin reiniciar)."""
@@ -4858,76 +9932,278 @@ class ClawdPet(tk.Tk):
 
         return True, f"Batch listo: {len(prompts)} prompts\nSalida: {out_path}"
 
-    # --- F3.6 dropped file handler ---
+    # --- F3.6 attachment handling ---
+    def _entry_attachment_question(self, entry_widget):
+        """Return optional user guidance from the input without treating placeholders as text."""
+        if entry_widget is None:
+            return ""
+        try:
+            question = entry_widget.get().strip()
+            if question in ("Escribe aqui...", "Escribe tu mensaje..."):
+                return ""
+            if question:
+                entry_widget.delete(0, tk.END)
+            return question
+        except Exception:
+            return ""
+
+    def _attachment_status(self, status_widget, text, color=None):
+        if status_widget is None:
+            return
+        theme = getattr(self, "_dashboard_chat_theme", THEME)
+        def _apply():
+            try:
+                status_widget.configure(text=text, fg=color or theme.get("accent_glow", THEME["accent"]))
+            except Exception:
+                pass
+        try:
+            self.after(0, _apply)
+        except Exception:
+            _apply()
+
+    def _parse_dropped_paths(self, raw):
+        raw = raw or ""
+        try:
+            return [p for p in self.tk.splitlist(raw) if p]
+        except Exception:
+            import shlex
+            return [p for p in shlex.split(raw.replace("{", '"').replace("}", '"')) if p]
+
+    def _pick_and_analyze_attachment(self, status_widget=None, entry_widget=None):
+        try:
+            from tkinter import filedialog
+            paths = filedialog.askopenfilenames(
+                title="Adjuntar archivo para analizar",
+                filetypes=[
+                    ("Archivos compatibles", "*.pdf *.docx *.xlsx *.xls *.pptx *.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                    ("PDF", "*.pdf"),
+                    ("Word", "*.docx"),
+                    ("Excel", "*.xlsx *.xls"),
+                    ("PowerPoint", "*.pptx"),
+                    ("Imagenes", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                    ("Todos los archivos", "*.*"),
+                ],
+            )
+        except Exception as e:
+            self._set_response_text(f"No pude abrir el selector de archivos: {e}")
+            return
+        if not paths:
+            return
+        question = self._entry_attachment_question(entry_widget)
+        for path in list(paths)[:6]:
+            self._analyze_attachment_file(path, status_widget, None, question=question)
+        if len(paths) > 6:
+            self._set_response_text("Para no saturar la sesion, analizare solo los primeros 6 archivos.")
+
     def _handle_dropped_file(self, event, status_widget, entry_widget):
         try:
             self._set_state_briefly("surprised", 700)
         except Exception:
             pass
         raw = event.data if event else ""
-        # tkinterdnd2 returns paths possibly wrapped in {}; can be multiple
-        import shlex
-        paths = []
-        for p in shlex.split(raw.replace("{", '"').replace("}", '"')):
-            if p:
-                paths.append(p)
+        paths = self._parse_dropped_paths(raw)
         if not paths:
             return
-        path = paths[0]
+        question = self._entry_attachment_question(entry_widget)
+        for path in paths[:6]:
+            self._analyze_attachment_file(path, status_widget, None, question=question)
+        if len(paths) > 6:
+            self._set_response_text("Arrastraste muchos archivos. Analizare solo los primeros 6.")
+
+    def _analyze_attachment_file(self, path, status_widget=None, entry_widget=None, question=None):
+        path = os.path.abspath(os.path.expanduser(str(path or "").strip().strip('"').strip("'")))
         if not os.path.exists(path):
             self._set_response_text(f"No existe: {path}")
             return
+        if os.path.isdir(path):
+            self._set_response_text("Ese adjunto es una carpeta. Usa el boton de carpeta para analizarla completa.")
+            return
+        if question is None:
+            question = self._entry_attachment_question(entry_widget)
+
         ext = os.path.splitext(path)[1].lower()
-        question = ""
-        try:
-            question = entry_widget.get().strip()
-            if question == "Escribe aqui...":
-                question = ""
-            entry_widget.delete(0, tk.END)
-        except Exception:
-            pass
-        # Imagen -> usar pipeline de vision
-        if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
-            self._set_response_text(f"Analizando imagen: {os.path.basename(path)}")
+        basename = os.path.basename(path)
+        image_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+        doc_exts = (".pdf", ".docx", ".xlsx", ".xls", ".pptx")
+        display_user = f"Adjunto: {basename}"
+        if question:
+            display_user += f"\nPregunta: {question}"
+
+        chat = getattr(self, "_chat_view", None)
+        if chat is not None:
             try:
-                status_widget.configure(text="Analizando imagen...", fg=THEME["accent"])
+                chat.add_user(display_user)
+                chat.show_typing()
             except Exception:
                 pass
-            def _run_img():
-                answer = self._analyze_image_native(path, question)
-                self._save_memory("Usuario", f"[archivo: {os.path.basename(path)}] {question}".strip())
-                self._save_memory("Claudy", answer)
-                self.after(0, lambda: self._set_response_text(answer))
-            threading.Thread(target=_run_img, daemon=True).start()
-            return
-        # PDF -> extraer texto y mandar como contexto
-        if ext == ".pdf":
-            try:
-                text = self._read_pdf_text(path)
-            except Exception as e:
-                self._set_response_text(f"Error leyendo PDF: {e}")
-                return
         else:
+            self._set_response_text(f"Analizando archivo: {basename}")
+
+        self._attachment_status(status_widget, f"Analizando {basename}...")
+
+        def _finish(answer, status_text="Archivo analizado"):
+            def _show():
+                try:
+                    if chat is not None:
+                        chat.hide_typing()
+                except Exception:
+                    pass
+                self._set_response_text(answer)
+                theme = getattr(self, "_dashboard_chat_theme", THEME)
+                self._attachment_status(status_widget, status_text, theme.get("text_secondary", THEME["text_secondary"]))
+                if getattr(self, "_voice_enabled", False):
+                    try:
+                        _tts_speak(str(answer)[:500])
+                    except Exception:
+                        pass
+            self.after(0, _show)
+
+        def _run():
             try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    text = f.read()
+                if ext in image_exts:
+                    prompt = question or "Analiza esta imagen en espanol. Describe lo importante y extrae cualquier texto visible."
+                    answer = self._analyze_image_native(path, prompt)
+                    self._save_memory("Usuario", display_user)
+                    self._save_memory("Claudy", answer)
+                    _finish(answer, "Imagen analizada")
+                    return
+
+                if ext not in doc_exts:
+                    self._attachment_status(status_widget, "Intentando leer archivo como texto...")
+
+                text = self._extract_attachment_text(path)
+                if not text.strip():
+                    _finish(f"No pude extraer contenido legible de {basename}.")
+                    return
+
+                instruction = question or (
+                    "Resume el archivo, identifica los puntos importantes, datos clave, "
+                    "posibles problemas y acciones recomendadas."
+                )
+                prompt = (
+                    "Felipe adjunto un archivo para analizar.\n"
+                    f"Archivo: {basename}\n"
+                    f"Tipo: {ext or 'sin extension'}\n\n"
+                    "Contenido extraido del archivo (puede estar truncado):\n"
+                    "```text\n"
+                    f"{text}\n"
+                    "```\n\n"
+                    f"Instruccion del usuario: {instruction}\n\n"
+                    "Responde en espanol claro. Si hay tablas, destaca patrones, totales, anomalias "
+                    "y conclusiones utiles."
+                )
+                answer = self.send_quick_message(prompt, _skip_skill_action=True, timeout=120)
+                # Persistir el análisis en memoria de agentes (+ Obsidian) para contexto futuro.
+                try:
+                    self._save_memory("Usuario", display_user)
+                    self._save_memory("Claudy", f"[Análisis de archivo: {basename}] {answer}")
+                except Exception:
+                    pass
+                _finish(answer)
             except Exception as e:
-                self._set_response_text(f"Error leyendo archivo: {e}")
-                return
-        if not text.strip():
-            self._set_response_text(f"Archivo vacio: {path}")
-            return
-        text = text[:8000]
-        prompt = f"[archivo: {os.path.basename(path)}]\n```\n{text}\n```\n\n{question or 'Resume el contenido.'}"
-        self._set_response_text(f"Procesando: {os.path.basename(path)}")
-        def _run_txt():
-            answer = self.send_quick_message(prompt, _skip_skill_action=True)
-            self.after(0, lambda: self._set_response_text(answer))
-        threading.Thread(target=_run_txt, daemon=True).start()
+                _finish(f"Error analizando {basename}: {e}", "Error al analizar archivo")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _extract_attachment_text(self, path, max_chars=12000):
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".pdf":
+            text = self._read_pdf_text(path)
+        elif ext == ".docx":
+            text = self._read_docx_text(path)
+        elif ext in (".xlsx", ".xls"):
+            text = self._read_excel_text(path)
+        elif ext == ".pptx":
+            text = self._read_pptx_text(path)
+        else:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(max_chars + 1)
+        text = (text or "").strip()
+        if len(text) > max_chars:
+            return text[:max_chars] + "\n\n[Contenido truncado por longitud.]"
+        return text
+
+    def _read_docx_text(self, path):
+        try:
+            from docx import Document
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "python-docx"])
+            from docx import Document
+        doc = Document(path)
+        parts = []
+        for p in doc.paragraphs:
+            txt = (p.text or "").strip()
+            if txt:
+                parts.append(txt)
+        for idx, table in enumerate(doc.tables[:20], 1):
+            rows = []
+            for row in table.rows[:60]:
+                cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                if any(cells):
+                    rows.append(" | ".join(cells))
+            if rows:
+                parts.append(f"\nTabla {idx}\n" + "\n".join(rows))
+        return "\n".join(parts)
+
+    def _read_excel_text(self, path):
+        try:
+            import pandas as pd
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "pandas", "openpyxl", "xlrd"])
+            import pandas as pd
+        sheets = pd.read_excel(path, sheet_name=None)
+        parts = []
+        for idx, (sheet_name, df) in enumerate(sheets.items(), 1):
+            if idx > 8:
+                parts.append("\n[Se omitieron hojas adicionales por longitud.]")
+                break
+            preview = df.head(80).fillna("").to_csv(index=False)
+            parts.append(
+                f"Hoja: {sheet_name}\n"
+                f"Filas: {len(df)} | Columnas: {len(df.columns)}\n"
+                f"{preview}"
+            )
+        return "\n\n".join(parts)
+
+    def _read_pptx_text(self, path):
+        try:
+            from pptx import Presentation
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "python-pptx"])
+            from pptx import Presentation
+        prs = Presentation(path)
+        parts = []
+        for slide_idx, slide in enumerate(prs.slides, 1):
+            texts = []
+            for shape in slide.shapes:
+                try:
+                    if getattr(shape, "has_table", False):
+                        for row in shape.table.rows:
+                            cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                            if any(cells):
+                                texts.append(" | ".join(cells))
+                    elif hasattr(shape, "text"):
+                        txt = (shape.text or "").strip()
+                        if txt:
+                            texts.append(txt)
+                except Exception:
+                    pass
+            if texts:
+                parts.append(f"Diapositiva {slide_idx}\n" + "\n".join(texts))
+        return "\n\n".join(parts)
 
     def _read_pdf_text(self, path):
         try:
             from pypdf import PdfReader
+        except ImportError:
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "pypdf"])
+                from pypdf import PdfReader
+            except Exception:
+                try:
+                    from PyPDF2 import PdfReader
+                except Exception:
+                    return "[Para leer PDFs instala: pip install pypdf]"
         except Exception:
             try:
                 from PyPDF2 import PdfReader
@@ -4935,7 +10211,7 @@ class ClawdPet(tk.Tk):
                 return "[Para leer PDFs instala: pip install pypdf]"
         reader = PdfReader(path)
         parts = []
-        for page in reader.pages[:30]:
+        for page in reader.pages[:40]:
             try:
                 parts.append(page.extract_text() or "")
             except Exception:
@@ -5550,14 +10826,7 @@ class ClawdPet(tk.Tk):
         except Exception as e:
             self._set_response_text(f"Error guardando imagen: {e}")
             return True
-        question = ""
-        try:
-            question = entry_widget.get().strip()
-            if question == "Escribe aqui...":
-                question = ""
-            entry_widget.delete(0, tk.END)
-        except Exception:
-            pass
+        question = self._entry_attachment_question(entry_widget)
         self._set_response_text(f"Imagen pegada ({os.path.basename(path)}).\nAnalizando...")
         try:
             status_widget.configure(text="Analizando imagen...", fg=THEME["accent"])
@@ -5759,7 +11028,40 @@ class ClawdPet(tk.Tk):
         for key, value in loaded.items():
             if key not in ("opencode", "agent"):
                 default[key] = value
+        # Transparently decrypt secrets so the rest of the app sees plaintext.
+        try:
+            if _secure is not None:
+                _secure.decrypt_config_secrets(default)
+        except Exception:
+            pass
         return default
+
+    def _secure_migrate_config(self):
+        """Encrypt the secret fields in config.json at rest (idempotent + safe).
+        Never raises: any problem leaves the file untouched."""
+        try:
+            if _secure is None or not _secure.available():
+                return
+            path = os.path.join(os.path.expanduser("~"), ".claudy", "config.json")
+            if not os.path.exists(path):
+                return
+            with open(path, "r", encoding="utf-8-sig") as f:
+                cfg = json.load(f)
+            before = json.dumps(cfg, sort_keys=True)
+            _secure.encrypt_config_secrets(cfg)
+            after = json.dumps(cfg, sort_keys=True)
+            if before == after:
+                return  # already encrypted / nothing to migrate
+            try:
+                shutil.copy2(path, path + ".bak")
+            except Exception:
+                pass
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:
+            pass
 
     def build_auth_headers(self, config):
         headers = {"Content-Type": "application/json"}
@@ -5833,9 +11135,15 @@ class ClawdPet(tk.Tk):
     # Infinite memory (SQLite)
     # ------------------------------------------------------------------
     def _memory_db_path(self):
+        drive_dir = r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\AGENTES-MEMORY\claudy_local"
+        if os.path.isdir(drive_dir):
+            return os.path.join(drive_dir, "memory.db")
         return os.path.join(os.path.expanduser("~"), ".claudy", "memory.db")
 
     def _memory_jsonl_path(self):
+        drive_dir = r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\AGENTES-MEMORY\claudy_local"
+        if os.path.isdir(drive_dir):
+            return os.path.join(drive_dir, "memory.jsonl")
         return os.path.join(os.path.expanduser("~"), ".claudy", "memory.jsonl")
 
     def _init_memory_db(self):
@@ -5900,6 +11208,48 @@ class ClawdPet(tk.Tk):
             pass
         finally:
             conn.close()
+
+    def _tidy_history_text(self, role, text):
+        """Texto a mostrar en el panel de Historial.
+        Devuelve None si el mensaje no debe mostrarse (ruido interno de máquina).
+        Compacta volcados largos (análisis, JSON crudo) a una etiqueta legible.
+        No modifica la base de datos: solo cambia la presentación."""
+        t = (text or "").strip()
+        if not t:
+            return None
+        low = t.lower()
+
+        # Análisis de carpeta/archivo: mostrar resumen compacto, no el volcado entero.
+        m = re.match(r"\[an[aá]lisis de (carpeta|archivo):\s*(.+?)\]", t, re.I)
+        if m:
+            kind = m.group(1).lower()
+            target = m.group(2).strip()
+            base = target.replace("\\", "/").rstrip("/").split("/")[-1] or target
+            icon = "📁" if kind == "carpeta" else "📄"
+            return f"{icon} Análisis de {kind}: {base}"
+
+        # Prompts internos de formato / instrucciones de máquina: no mostrar.
+        noise = (
+            "body_html", "solo el json", "sólo el json",
+            "devuelve unicamente un objeto json", "devuelve únicamente un objeto json",
+            "solo como referencia de formato", "el body_html debe usar",
+            "no incluyas comentarios ni explicaciones",
+        )
+        if any(n in low for n in noise):
+            return None
+
+        # JSON crudo (borrador estructurado, etc.): etiqueta compacta.
+        if t[:1] in "{[" and t[-1:] in "}]":
+            try:
+                data = json.loads(t)
+                subj = ""
+                if isinstance(data, dict):
+                    subj = (data.get("subject") or data.get("asunto") or "").strip()
+                return f"📧 Borrador estructurado{(': ' + subj) if subj else ''}"
+            except Exception:
+                pass
+
+        return t
 
     def _load_memory(self):
         """Load all messages from SQLite."""
@@ -5978,6 +11328,12 @@ class ClawdPet(tk.Tk):
     def _save_memory(self, role, text):
         """Save to SQLite + mirror to external provider + Obsidian vault if configured."""
         self._save_memory_sqlite(role, text)
+        # Track current session messages for clean restart
+        if not hasattr(self, "_current_session_msgs"):
+            self._current_session_msgs = []
+        self._current_session_msgs.append({
+            "role": role, "text": text, "ts": time.time()
+        })
         # Optional mirror to external provider
         try:
             cfg = self.load_claudy_config()
@@ -5993,14 +11349,13 @@ class ClawdPet(tk.Tk):
                         self._mem_provider.save(role, text)
                     except Exception:
                         pass
-            # Mirror to Obsidian vault if configured
-            vault = (cfg.get("obsidian", {}) or {}).get("vault", "")
-            if vault and os.path.isdir(vault):
-                try:
-                    import obsidian_export as ox
-                    ox.append_today(vault, role, text)
-                except Exception as e:
-                    print(f"[obsidian] error: {e}")
+            # Always mirror to Obsidian vault
+            try:
+                vault = self._get_or_create_obsidian_vault()
+                import obsidian_export as ox
+                ox.append_today(vault, role, text)
+            except Exception as e:
+                print(f"[obsidian] error: {e}")
         except Exception:
             pass
 
@@ -6031,10 +11386,93 @@ class ClawdPet(tk.Tk):
         except Exception:
             pass
 
-    def _build_memory_context(self):
-        messages = self._load_memory()
-        if not messages:
+    # Stopwords para la búsqueda por relevancia en el vault.
+    _VAULT_STOPWORDS = {
+        "para", "como", "esta", "este", "esto", "esos", "esas", "pero", "porque", "con",
+        "los", "las", "del", "una", "uno", "unos", "unas", "que", "qué", "cual", "cuál",
+        "donde", "dónde", "cuando", "cuándo", "sobre", "entre", "hacia", "desde", "hasta",
+        "claudy", "felipe", "tengo", "quiero", "puedes", "dame", "the", "and", "for", "with",
+        "qcore", "memoria", "memorias", "contexto", "nota", "notas",
+    }
+
+    def _load_vault_notes(self, max_age=300):
+        """Carga (con caché de 5 min) todas las notas .md del vault QCORE como
+        lista de (ruta_rel, nombre, contenido). Permite búsqueda por relevancia."""
+        import time as _t
+        now = _t.time()
+        if getattr(self, "_vault_notes_cache", None) is not None and (now - getattr(self, "_vault_cache_time", 0)) < max_age:
+            return self._vault_notes_cache
+        notes = []
+        try:
+            vault = self._get_obsidian_vault()
+            if vault and os.path.isdir(vault):
+                for root, dirs, files in os.walk(vault):
+                    dirs[:] = [d for d in dirs if d not in (".obsidian", ".git", "Templates")]
+                    for f in files:
+                        if f.endswith(".md"):
+                            fp = os.path.join(root, f)
+                            try:
+                                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                                    content = fh.read()
+                            except Exception:
+                                continue
+                            rel = os.path.relpath(fp, vault)
+                            notes.append((rel, f, content))
+        except Exception:
+            pass
+        self._vault_notes_cache = notes
+        self._vault_cache_time = now
+        return notes
+
+    def _search_vault_relevant(self, query, max_notes=4, max_chars=5000):
+        """Devuelve las notas del vault más relevantes al query (campañas, facturas,
+        procesos, agentes, etc.). Scoring por coincidencia de palabras clave."""
+        import re as _re
+        notes = self._load_vault_notes()
+        if not notes:
             return ""
+        words = [w for w in _re.findall(r"[a-záéíóúñ0-9]{4,}", (query or "").lower())
+                 if w not in self._VAULT_STOPWORDS]
+        if not words:
+            return ""
+        scored = []
+        for rel, name, content in notes:
+            low = content.lower()
+            namelow = (rel + " " + name).lower()
+            score = 0
+            for w in set(words):
+                score += low.count(w)
+                if w in namelow:
+                    score += 8  # coincidencia en nombre/carpeta pesa más
+            if score > 0:
+                scored.append((score, rel, content))
+        if not scored:
+            return ""
+        scored.sort(key=lambda x: -x[0])
+        parts = []
+        total = 0
+        for score, rel, content in scored[:max_notes]:
+            snippet = f"--- {rel} ---\n{content.strip()}\n"
+            if total + len(snippet) > max_chars:
+                snippet = snippet[:max(0, max_chars - total)] + "...\n"
+            parts.append(snippet)
+            total += len(snippet)
+            if total >= max_chars:
+                break
+        return ("[Memoria del ecosistema QCORE — notas relevantes del vault]\n"
+                + "".join(parts) + "[/Memoria del ecosistema]\n\n") if parts else ""
+
+    def _build_memory_context(self, prompt=None):
+        messages = self._load_memory()
+        # Notas relevantes del vault (campañas, facturas, procesos, agentes...).
+        relevant_vault = ""
+        if prompt:
+            try:
+                relevant_vault = self._search_vault_relevant(prompt)
+            except Exception:
+                relevant_vault = ""
+        if not messages:
+            return relevant_vault
         recent = messages[-MEMORY_CONTEXT_MESSAGES * 2:]
         context_parts = []
         total_chars = 0
@@ -6099,7 +11537,7 @@ class ClawdPet(tk.Tk):
         except Exception as e:
             print(f"Error reading Obsidian context: {e}")
 
-        return chat_context + obs_context
+        return relevant_vault + chat_context + obs_context
 
     def _get_user_location(self):
         try:
@@ -6366,6 +11804,77 @@ class ClawdPet(tk.Tk):
         if len(parts) > 50:
             parts = parts[:50]
         return "Resumen de conversacion anterior: " + "; ".join(parts)
+
+    def _compress_and_save_to_obsidian(self):
+        """Compress current session messages and save summary to Obsidian."""
+        session_msgs = getattr(self, "_current_session_msgs", [])
+        if not session_msgs or len(session_msgs) < 2:
+            return
+        # Build summary text
+        parts = []
+        for m in session_msgs:
+            role = m.get("role", "")
+            text = (m.get("text", "") or "")[:300]
+            parts.append(f"[{role}]: {text}")
+        summary = "Resumen de sesion: " + "; ".join(parts[:30])
+        # Save to SQLite summaries
+        try:
+            db_path = self._memory_db_path()
+            if os.path.exists(db_path):
+                conn = sqlite3.connect(db_path)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_summaries (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        text TEXT NOT NULL,
+                        range_start INTEGER, range_end INTEGER,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                    )
+                """)
+                conn.execute(
+                    "INSERT INTO memory_summaries (text, range_start, range_end) VALUES (?, ?, ?)",
+                    (summary, 0, len(session_msgs)),
+                )
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            print(f"[compress] db error: {e}")
+        # Save to Obsidian
+        try:
+            vault = self._get_or_create_obsidian_vault()
+            root = os.path.join(vault, "Claudy", "Summaries")
+            os.makedirs(root, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            product = getattr(self, "_active_product", "General")
+            path = os.path.join(root, f"sesion_{product}_{ts}.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"---\ntags: [claudy, summary, {product.lower().replace(' ','-')}]\ndate: {ts[:10]}\nproduct: {product}\n---\n\n")
+                f.write(f"# Sesion {product} — {ts[:10]}\n\n")
+                for m in session_msgs:
+                    role = "**Felipe**" if m.get("role") in ("user", "Usuario") else "**Claudy**"
+                    text = (m.get("text", "") or "")[:500]
+                    f.write(f"{role}: {text}\n\n")
+        except Exception as e:
+            print(f"[obsidian summary] error: {e}")
+
+    def _get_or_create_obsidian_vault(self):
+        """Auto-detect or create Obsidian vault for Claudy memory.
+        Priority: 1) config, 2) QCORE Drive vault, 3) local fallback.
+        """
+        try:
+            cfg = self.load_claudy_config()
+            vault = (cfg.get("obsidian", {}) or {}).get("vault", "")
+            if vault and os.path.isdir(vault):
+                return vault
+        except Exception:
+            pass
+        # Primary: QCORE ecosystem vault on Google Drive
+        drive_vault = r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\VAULT"
+        if os.path.isdir(drive_vault):
+            return drive_vault
+        # Fallback: local
+        default = os.path.join(os.path.expanduser("~"), "Documents", "Claudy", "Obsidian")
+        os.makedirs(default, exist_ok=True)
+        return default
 
     # ------------------------------------------------------------------
     # Checkpoints / Rollback
@@ -6700,6 +12209,215 @@ class ClawdPet(tk.Tk):
             return f"Error eliminando skill: {e}"
 
     # ==============================================================
+    # SELF-IMPROVING SKILLS (estilo Hermes: crear Y refinar solo)
+    # ==============================================================
+
+    def _skill_slug(self, name):
+        import re as _re
+        return _re.sub(r'[^a-z0-9_-]+', '-', (name or "").lower().strip()).strip('-')
+
+    def _skill_dir(self, slug):
+        return os.path.join(os.path.expanduser("~"), ".claudy", "skills", slug)
+
+    def _skill_meta_path(self, slug):
+        return os.path.join(self._skill_dir(slug), "_meta.json")
+
+    def _load_skill_meta(self, slug):
+        """Telemetría por skill. Crea valores por defecto si no existe."""
+        path = self._skill_meta_path(slug)
+        meta = {
+            "slug": slug, "version": 1, "uses": 0, "uses_since_refine": 0,
+            "created": datetime.datetime.now().isoformat(timespec="seconds"),
+            "last_used": None, "last_refined": None, "observations": [],
+        }
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    meta.update(json.load(f) or {})
+        except Exception:
+            pass
+        return meta
+
+    def _save_skill_meta(self, slug, meta):
+        try:
+            os.makedirs(self._skill_dir(slug), exist_ok=True)
+            with open(self._skill_meta_path(slug), "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _installed_skill_slugs(self):
+        skills_dir = os.path.join(os.path.expanduser("~"), ".claudy", "skills")
+        if not os.path.isdir(skills_dir):
+            return []
+        out = []
+        for folder in sorted(os.listdir(skills_dir)):
+            if os.path.isfile(os.path.join(skills_dir, folder, "SKILL.md")):
+                out.append(folder)
+        return out
+
+    def _match_relevant_skills(self, prompt):
+        """Devuelve los slugs de skills cuya descripción/nombre se solapan con el prompt.
+
+        Heurística liviana de overlap de tokens — suficiente para contar 'usos'
+        sin un segundo llamado al LLM."""
+        import re as _re
+        if not prompt:
+            return []
+        p_tokens = set(t for t in _re.findall(r"[a-záéíóúñ0-9]{4,}", prompt.lower()) if t)
+        if not p_tokens:
+            return []
+        matched = []
+        for slug in self._installed_skill_slugs():
+            try:
+                with open(os.path.join(self._skill_dir(slug), "SKILL.md"), "r", encoding="utf-8") as f:
+                    head = f.read(600).lower()
+            except Exception:
+                continue
+            s_tokens = set(_re.findall(r"[a-záéíóúñ0-9]{4,}", slug.replace("-", " ").lower()))
+            for line in head.splitlines():
+                if line.startswith("description:") or line.startswith("## cuándo") or line.startswith("## cuando"):
+                    s_tokens |= set(_re.findall(r"[a-záéíóúñ0-9]{4,}", line.lower()))
+            overlap = p_tokens & s_tokens
+            # nombre directo en el prompt, o solapamiento de 2+ términos significativos
+            if slug.replace("-", " ") in prompt.lower() or len(overlap) >= 2:
+                matched.append(slug)
+        return matched
+
+    def _record_skill_usage(self, prompt):
+        """Cuenta el uso de las skills relevantes a este prompt y dispara
+        auto-refinamiento al cruzar el umbral. Pensado para correr en background."""
+        if self._refining_skill:
+            return
+        try:
+            slugs = self._match_relevant_skills(prompt)
+        except Exception:
+            slugs = []
+        for slug in slugs:
+            try:
+                meta = self._load_skill_meta(slug)
+                meta["uses"] = int(meta.get("uses", 0)) + 1
+                meta["uses_since_refine"] = int(meta.get("uses_since_refine", 0)) + 1
+                meta["last_used"] = datetime.datetime.now().isoformat(timespec="seconds")
+                obs = meta.get("observations", [])
+                obs.append(prompt[:200])
+                meta["observations"] = obs[-10:]  # ventana rodante
+                self._save_skill_meta(slug, meta)
+                if meta["uses_since_refine"] >= self._skill_refine_threshold:
+                    self._refine_skill(slug, auto=True)
+            except Exception:
+                continue
+
+    def _refine_skill(self, slug, auto=False):
+        """Refina una SKILL.md existente fusionando lo aprendido en usos recientes.
+
+        Hace backup de la versión previa, sube el número de versión y resetea el
+        contador. Este es el otro 50% del bucle de Hermes: no solo crear, también
+        MEJORAR con la experiencia."""
+        slug = self._skill_slug(slug)
+        skill_file = os.path.join(self._skill_dir(slug), "SKILL.md")
+        if not os.path.isfile(skill_file):
+            return f"No existe la skill '{slug}'. Créala primero con /aprender {slug}"
+        if self._refining_skill:
+            return "Ya hay un refinamiento en curso, espera un momento."
+
+        import re as _re
+        self._refining_skill = True
+        try:
+            with open(skill_file, "r", encoding="utf-8") as f:
+                current = f.read().strip()
+            meta = self._load_skill_meta(slug)
+
+            # Contexto: la skill actual + qué situaciones la dispararon últimamente
+            obs = meta.get("observations", [])
+            obs_block = "\n".join(f"- {o}" for o in obs[-10:]) or "(sin observaciones registradas)"
+            try:
+                recent = self._load_memory()[-16:]
+                transcript = "\n".join(
+                    f"{'Usuario' if m.get('role') == 'Usuario' else 'Claudy'}: {m.get('text','')}"
+                    for m in recent
+                )[-3500:]
+            except Exception:
+                transcript = ""
+
+            refine_prompt = (
+                "Eres un curador de skills. Vas a MEJORAR una skill existente (un archivo "
+                "SKILL.md) usando la experiencia acumulada de cómo se usó realmente.\n\n"
+                "=== SKILL ACTUAL ===\n" + current + "\n\n"
+                "=== SITUACIONES RECIENTES QUE LA DISPARARON ===\n" + obs_block + "\n\n"
+                "=== CONVERSACIÓN RECIENTE (contexto) ===\n" + (transcript or "(sin contexto)") + "\n\n"
+                "Reescribe la skill COMPLETA, mejorándola: corrige pasos imprecisos, agrega "
+                "reglas nuevas aprendidas, cubre los casos reales de arriba, y elimina lo que "
+                "sobra. Mantén EXACTAMENTE el mismo formato (frontmatter ---, # título, "
+                "## Cuándo usarla, ## Pasos, ## Reglas, ## Ejemplo). Conserva el mismo "
+                "'name:' en el frontmatter. Devuelve SOLO el contenido del archivo, sin "
+                "explicaciones ni fences de markdown."
+            )
+
+            try:
+                improved = self.send_quick_message(refine_prompt, _skip_skill_action=True)
+            except Exception as e:
+                return f"Error al refinar la skill: {e}"
+
+            improved = _re.sub(r'^```[a-z]*\n', '', (improved or "").strip())
+            improved = _re.sub(r'\n```$', '', improved).strip()
+            if not improved or len(improved) < 40 or not improved.startswith("---"):
+                return f"El refinamiento no produjo una skill válida. '{slug}' queda igual."
+
+            # Backup de la versión previa antes de sobrescribir
+            old_ver = int(meta.get("version", 1))
+            try:
+                backup = os.path.join(self._skill_dir(slug), f"SKILL.v{old_ver}.bak.md")
+                with open(backup, "w", encoding="utf-8") as f:
+                    f.write(current)
+            except Exception:
+                pass
+
+            with open(skill_file, "w", encoding="utf-8") as f:
+                f.write(improved)
+
+            meta["version"] = old_ver + 1
+            meta["uses_since_refine"] = 0
+            meta["last_refined"] = datetime.datetime.now().isoformat(timespec="seconds")
+            self._save_skill_meta(slug, meta)
+
+            msg = (
+                f"✨ Skill '{slug}' refinada → v{meta['version']} "
+                f"(tras {meta.get('uses', 0)} usos).\n"
+                f"Backup: SKILL.v{old_ver}.bak.md"
+            )
+            if auto:
+                # Aviso discreto: la mejora ocurrió sola en background
+                try:
+                    self.after(0, lambda: self._show_notification(
+                        "Claudy aprendió", f"Mejoré la skill '{slug}' sola (v{meta['version']})."))
+                except Exception:
+                    pass
+                self._debug_log("AUTO-REFINED SKILL", f"{slug} -> v{meta['version']}")
+            return msg
+        finally:
+            self._refining_skill = False
+
+    def _skill_stats(self):
+        """Reporte de uso/versión de las skills — visibiliza el bucle de aprendizaje."""
+        slugs = self._installed_skill_slugs()
+        if not slugs:
+            return "No hay skills instaladas todavía. Crea una con /aprender <nombre>."
+        lines = []
+        for slug in slugs:
+            m = self._load_skill_meta(slug)
+            usr = int(m.get("uses_since_refine", 0))
+            falta = max(0, self._skill_refine_threshold - usr)
+            lines.append(
+                f"  {slug}  ·  v{m.get('version', 1)}  ·  {m.get('uses', 0)} usos"
+                + (f"  ·  auto-mejora en {falta}" if falta else "  ·  lista para refinar")
+            )
+        return (
+            f"Skills y su aprendizaje ({len(slugs)}):\n\n" + "\n".join(lines)
+            + "\n\nRefinar manual: /skill mejorar <nombre>"
+        )
+
+    # ==============================================================
     # CRON ENGINE
     # ==============================================================
 
@@ -6744,7 +12462,18 @@ class ClawdPet(tk.Tk):
                             if last and last[:10] == now.strftime("%Y-%m-%d"):
                                 continue
                             h, m = job.get("hour", 0), job.get("minute", 0)
-                            if now.hour == h and now.minute == m:
+                            # Catch-up: dispara una vez al día si ya pasó la hora,
+                            # aunque Claudy se haya abierto más tarde (no solo en el minuto exacto).
+                            if now.hour > h or (now.hour == h and now.minute >= m):
+                                fire = True
+                        elif job["type"] == "weekly":
+                            if last and last[:10] == now.strftime("%Y-%m-%d"):
+                                continue
+                            wd = job.get("weekday", 0)  # 0=lunes ... 6=domingo
+                            h, m = job.get("hour", 0), job.get("minute", 0)
+                            # Catch-up: dispara una vez si es el día objetivo y ya pasó la hora,
+                            # aunque Claudy se haya abierto más tarde (no solo en el minuto exacto).
+                            if now.weekday() == wd and (now.hour > h or (now.hour == h and now.minute >= m)):
                                 fire = True
                         if fire:
                             job["last_fired"] = now.isoformat()
@@ -6757,6 +12486,14 @@ class ClawdPet(tk.Tk):
         threading.Thread(target=engine_loop, daemon=True, name="cron-engine").start()
 
     def _execute_cron_job(self, job):
+        # Trabajos de recordatorio: alarma de Claudy + correo, sin pasar por el LLM.
+        if job.get("action") == "reminder":
+            self._execute_cron_reminder(job)
+            return
+        # Trabajos de comando: ejecuta un programa/script externo (sin pasar por el LLM).
+        if job.get("action") == "command":
+            self._execute_cron_command(job)
+            return
         msg = job.get("message", "")
         if not msg:
             return
@@ -6780,6 +12517,101 @@ class ClawdPet(tk.Tk):
             self._cron_notify_telegram(notification[:500])
         except Exception:
             pass
+
+    def _execute_cron_command(self, job):
+        """Ejecuta un comando/script externo programado.
+        El job define: "command" (lista de args o string), "cwd" (opcional) y
+        "label" (opcional, para la notificación). Pensado para automatizaciones
+        como el correo de facturación QCORE SPA."""
+        cmd = job.get("command")
+        if not cmd:
+            return
+        label = job.get("label") or "Tarea programada"
+        cwd = job.get("cwd") or None
+
+        def _run():
+            try:
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                shell = isinstance(cmd, str)
+                proc = subprocess.run(
+                    cmd, cwd=cwd, shell=shell, capture_output=True, text=True,
+                    timeout=job.get("timeout", 180), creationflags=flags,
+                )
+                ok = proc.returncode == 0
+                out = (proc.stdout or "").strip()[-200:]
+                err = (proc.stderr or "").strip()[-200:]
+                estado = "OK" if ok else f"ERROR (code {proc.returncode})"
+                resumen = f"[CRON cmd] {label}: {estado}"
+                if not job.get("silent"):
+                    try:
+                        self.after(0, lambda: self._notify("Claudy CRON", resumen[:200]))
+                    except Exception:
+                        pass
+                # Telegram + log
+                self._cron_notify_telegram(f"{resumen}\n{out or err}")
+                self._fire_hook("on_cron", message=label, result=out or err)
+            except Exception as e:
+                try:
+                    self._cron_notify_telegram(f"[CRON cmd] {label}: EXCEPTION {e}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run, daemon=True, name="cron-command").start()
+
+    def _execute_cron_reminder(self, job):
+        """Dispara un recordatorio: alarma visual/sonora de Claudy + (opcional) correo.
+        Si el job trae "silent": true, NO muestra la alarma emergente y se entrega
+        solo como correo (y Telegram), p.ej. para digests diarios por email."""
+        msg = job.get("message") or "Recordatorio"
+        silent = job.get("silent", False)
+        # 1) Alarma de Claudy (burbuja + beep + toast + chat) — se omite si es silencioso.
+        if not silent:
+            try:
+                self._fire_alarm_notify(msg)
+            except Exception:
+                pass
+        # 2) Telegram, si está disponible
+        try:
+            self._cron_notify_telegram(msg)
+        except Exception:
+            pass
+        # 3) Correo, si el job lo pide y hay SMTP configurado
+        email = job.get("email")
+        if email and email.get("to"):
+            threading.Thread(
+                target=self._send_reminder_email, args=(email,), daemon=True
+            ).start()
+
+    def _send_reminder_email(self, email):
+        """Envía el correo del recordatorio por SMTP (config.json -> email).
+        Si no hay credenciales, avisa en el chat sin romper la alarma."""
+        try:
+            import claudy_extras as ex
+        except Exception:
+            return
+        try:
+            cfg = self.load_claudy_config().get("email", {})
+        except Exception:
+            cfg = {}
+        to_list = email.get("to") or []
+        subject = email.get("subject") or "Recordatorio Claudy"
+        body = email.get("body") or ""
+        if not cfg.get("smtp_host"):
+            chat = getattr(self, "_chat_view", None)
+            if chat:
+                self.after(0, lambda: chat.add_system(
+                    "📧 Recordatorio listo, pero falta configurar el correo para enviarlo. "
+                    "Agrega en `~/.claudy/config.json`:\n"
+                    '`{"email":{"smtp_host":"smtp.gmail.com","smtp_port":465,'
+                    '"smtp_user":"jorge.castro@qcorespa.com","smtp_pass":"APP_PASSWORD",'
+                    '"from":"jorge.castro@qcorespa.com"}}`'
+                ))
+            return
+        for to in to_list:
+            try:
+                ex.send_email_smtp(to, subject, body, cfg)
+            except Exception:
+                pass
 
     def _cron_notify_telegram(self, text):
         if not self._telegram_bot_app or not self._telegram_allowed_users:
@@ -6870,6 +12702,143 @@ class ClawdPet(tk.Tk):
         t = re.sub(r'^(recuerdame|recuérdame|avisame|avísame|avisa|agenda|programa|recordatorio[:\s]*|que)\s+', '', t, flags=re.IGNORECASE)
         return t.strip()
 
+    def _generate_cron_expression(self, prompt):
+        """Generate a standard 5-field cron expression from Spanish text."""
+        text = (prompt or "").strip()
+        low = text.lower()
+        if not any(k in low for k in (
+            "/cron expr", "/cronexp", "generar cron", "genera cron", "crear cron",
+            "crea cron", "expresion cron", "expresión cron", "cron para", "cron de"
+        )):
+            return None
+
+        spec = re.sub(
+            r'^(/cron\s+expr|/cronexp|generar\s+cron|genera\s+cron|crear\s+cron|crea\s+cron|'
+            r'expresi[oó]n\s+cron|cron\s+(?:para|de))\s*[:\-]?\s*',
+            '',
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not spec:
+            return (
+                "Dime el horario que quieres convertir a cron.\n\n"
+                "Ejemplos:\n"
+                "  /cron expr cada 15 minutos\n"
+                "  genera cron lunes a viernes a las 9:30\n"
+                "  cron para el dia 1 de cada mes a las 8"
+            )
+
+        low_spec = spec.lower()
+
+        def parse_time(default_hour=9, default_minute=0):
+            m = re.search(
+                r'a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|hrs|h)?'
+                r'(?:\s+de\s+la\s+(manana|mañana|tarde|noche))?',
+                low_spec,
+            )
+            if not m:
+                return default_hour, default_minute, "hora por defecto 09:00"
+            h = int(m.group(1))
+            minute = int(m.group(2) or 0)
+            ampm = (m.group(3) or "").lower()
+            partofday = (m.group(4) or "").lower()
+            if ampm == "pm" and h < 12:
+                h += 12
+            if ampm == "am" and h == 12:
+                h = 0
+            if partofday in ("tarde", "noche") and h < 12:
+                h += 12
+            if partofday in ("manana", "mañana") and h == 12:
+                h = 0
+            if not (0 <= h <= 23 and 0 <= minute <= 59):
+                raise ValueError("Hora invalida. Usa 0-23 para hora y 0-59 para minutos.")
+            return h, minute, f"{h:02d}:{minute:02d}"
+
+        day_names = {
+            "domingo": "0", "domingos": "0",
+            "lunes": "1",
+            "martes": "2",
+            "miercoles": "3", "miércoles": "3",
+            "jueves": "4",
+            "viernes": "5",
+            "sabado": "6", "sábado": "6", "sabados": "6", "sábados": "6",
+        }
+
+        try:
+            # Intervals.
+            m = re.search(r'cada\s+(\d+)\s*(minutos?|mins?|m\b)', low_spec)
+            if m:
+                n = max(1, min(59, int(m.group(1))))
+                expr = f"*/{n} * * * *"
+                desc = f"cada {n} minuto(s)"
+                return self._format_cron_expression_result(expr, desc, spec)
+
+            m = re.search(r'cada\s+(\d+)\s*(horas?|hrs?|h\b)', low_spec)
+            if m:
+                n = max(1, min(23, int(m.group(1))))
+                expr = f"0 */{n} * * *"
+                desc = f"cada {n} hora(s)"
+                return self._format_cron_expression_result(expr, desc, spec)
+
+            if re.search(r'\bcada\s+minuto\b|\btodos\s+los\s+minutos\b', low_spec):
+                return self._format_cron_expression_result("* * * * *", "cada minuto", spec)
+
+            if re.search(r'\bcada\s+hora\b|\btodas\s+las\s+horas\b', low_spec):
+                return self._format_cron_expression_result("0 * * * *", "cada hora", spec)
+
+            # Monthly by day number.
+            m = re.search(r'(?:dia|día)\s+(\d{1,2})\s+de\s+cada\s+mes|cada\s+mes\s+(?:el\s+)?(?:dia|día)\s+(\d{1,2})', low_spec)
+            if m:
+                day = int(m.group(1) or m.group(2))
+                if not 1 <= day <= 31:
+                    raise ValueError("Dia de mes invalido. Usa 1-31.")
+                h, minute, time_desc = parse_time()
+                expr = f"{minute} {h} {day} * *"
+                return self._format_cron_expression_result(expr, f"el dia {day} de cada mes a las {time_desc}", spec)
+
+            # Week ranges and named days.
+            h, minute, time_desc = parse_time()
+            if re.search(r'lunes\s+a\s+viernes|d[ií]as\s+h[aá]biles|entre\s+semana', low_spec):
+                return self._format_cron_expression_result(f"{minute} {h} * * 1-5", f"lunes a viernes a las {time_desc}", spec)
+
+            if re.search(r'fines?\s+de\s+semana|sabados?\s+y\s+domingos?|s[aá]bados?\s+y\s+domingos?', low_spec):
+                return self._format_cron_expression_result(f"{minute} {h} * * 6,0", f"fines de semana a las {time_desc}", spec)
+
+            selected_days = []
+            for name, value in day_names.items():
+                if re.search(rf'\b{name}\b', low_spec) and value not in selected_days:
+                    selected_days.append(value)
+            if selected_days:
+                expr = f"{minute} {h} * * {','.join(selected_days)}"
+                return self._format_cron_expression_result(expr, f"dias seleccionados a las {time_desc}", spec)
+
+            # Daily fallback when time is present or text says daily.
+            if re.search(r'todos\s+los\s+d[ií]as|diario|diariamente|cada\s+d[ií]a|a\s+las?', low_spec):
+                expr = f"{minute} {h} * * *"
+                return self._format_cron_expression_result(expr, f"todos los dias a las {time_desc}", spec)
+
+        except ValueError as e:
+            return f"No pude generar el cron: {e}"
+
+        return (
+            "No pude convertirlo a cron con seguridad.\n\n"
+            "Prueba con algo como:\n"
+            "  genera cron cada 10 minutos\n"
+            "  genera cron todos los dias a las 8:30\n"
+            "  genera cron lunes a viernes a las 18:00\n"
+            "  genera cron dia 1 de cada mes a las 9"
+        )
+
+    def _format_cron_expression_result(self, expr, description, original):
+        return (
+            "Expresion cron generada:\n\n"
+            f"  {expr}\n\n"
+            f"Significado: {description}\n"
+            f"Entrada: {original}\n\n"
+            "Formato: minuto hora dia_mes mes dia_semana\n"
+            "Nota: usa cron Unix de 5 campos."
+        )
+
     def _add_cron_interval(self, interval_min, message):
         job = {
             "id": str(int(time.time())),
@@ -6899,19 +12868,70 @@ class ClawdPet(tk.Tk):
         self._save_cron_json()
         return f"Tarea diaria a las {hour:02d}:{minute:02d}: {message[:80]}"
 
+    _WEEKDAY_NAMES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+    # Nombre de día -> índice de la semana del motor cron (0=lunes ... 6=domingo,
+    # igual que datetime.weekday()). Incluye variantes con/sin acento y plurales.
+    _WEEKDAY_MAP = {
+        "lunes": 0,
+        "martes": 1,
+        "miercoles": 2, "miércoles": 2,
+        "jueves": 3,
+        "viernes": 4,
+        "sabado": 5, "sábado": 5, "sabados": 5, "sábados": 5,
+        "domingo": 6, "domingos": 6,
+    }
+
+    def _add_cron_weekly(self, weekday, hour, minute, message, action=None, email=None):
+        job = {
+            "id": str(int(time.time())),
+            "type": "weekly",
+            "weekday": weekday,
+            "hour": hour,
+            "minute": minute,
+            "message": message,
+            "last_fired": "",
+            "enabled": True,
+            "created": datetime.datetime.now().isoformat(),
+        }
+        if action:
+            job["action"] = action
+        if email:
+            job["email"] = email
+        self._cron_jobs.append(job)
+        self._save_cron_json()
+        day = self._WEEKDAY_NAMES[weekday] if 0 <= weekday < 7 else "?"
+        return f"Tarea semanal los {day} a las {hour:02d}:{minute:02d}: {message[:80]}"
+
     def _list_cron_jobs(self):
         if not self._cron_jobs:
-            return "No hay tareas programadas.\n\n/cron cada 30 min <mensaje>\n/cron a las 22:00 <mensaje>\n/cron list\n/cron delete <num>"
+            return ("No hay tareas programadas.\n\n"
+                    "/cron cada 30 min <mensaje>\n"
+                    "/cron a las 22:00 <mensaje>\n"
+                    "/cron los martes a las 9 <mensaje>\n"
+                    "/cron list\n"
+                    "/cron editar <num> <campo> <valor>\n"
+                    "/cron off|on <num>\n"
+                    "/cron delete <num>")
         lines = ["Tareas programadas:", "=" * 40]
         for i, j in enumerate(self._cron_jobs, 1):
             t = j["type"]
             if t == "interval":
                 schedule = f"cada {j['interval_min']} min"
+            elif t == "weekly":
+                wd = j.get("weekday", 0)
+                day = self._WEEKDAY_NAMES[wd] if 0 <= wd < 7 else "?"
+                schedule = f"los {day} a las {j.get('hour',0):02d}:{j.get('minute',0):02d}"
             else:
                 schedule = f"diario a las {j.get('hour',0):02d}:{j.get('minute',0):02d}"
             enabled = "ON" if j.get("enabled", True) else "OFF"
-            lines.append(f"  [{i}] [{enabled}] {schedule}: {j.get('message','')[:60]}")
-        lines.append(f"\n/cron delete <num> para eliminar")
+            desc = j.get("message") or j.get("label") or (f"[{j.get('action')}]" if j.get("action") else "")
+            lines.append(f"  [{i}] [{enabled}] {schedule}: {desc[:60]}")
+        lines.append("")
+        lines.append("Gestionar:")
+        lines.append("  /cron editar <num> hora 22:30   (o: cada 45 min / dia martes / mensaje ...)")
+        lines.append("  /cron off <num>   pausar      /cron on <num>   activar")
+        lines.append("  /cron delete <num>   eliminar")
         return "\n".join(lines)
 
     def _delete_cron_job(self, idx):
@@ -6920,6 +12940,150 @@ class ClawdPet(tk.Tk):
         removed = self._cron_jobs.pop(idx)
         self._save_cron_json()
         return f"Tarea eliminada: {removed.get('message','')[:60]}"
+
+    def _toggle_cron_job(self, idx, enabled):
+        """Pausa (enabled=False) o reanuda (enabled=True) una tarea."""
+        if idx < 0 or idx >= len(self._cron_jobs):
+            return f"Numero invalido. Hay {len(self._cron_jobs)} tareas."
+        self._cron_jobs[idx]["enabled"] = bool(enabled)
+        self._save_cron_json()
+        estado = "activada" if enabled else "pausada"
+        return f"Tarea {idx+1} {estado}: {self._cron_jobs[idx].get('message','')[:60]}"
+
+    def _edit_cron_job(self, idx, *, message=None, hour=None, minute=None,
+                       interval_min=None, weekday=None):
+        """Modifica una tarea existente. Solo cambia los campos indicados."""
+        if idx < 0 or idx >= len(self._cron_jobs):
+            return f"Numero invalido. Hay {len(self._cron_jobs)} tareas."
+        job = self._cron_jobs[idx]
+        cambios = []
+        if message is not None:
+            job["message"] = message
+            cambios.append(f"mensaje «{message[:50]}»")
+        if interval_min is not None:
+            job["type"] = "interval"
+            job["interval_min"] = interval_min
+            cambios.append(f"cada {interval_min} min")
+        if weekday is not None:
+            job["type"] = "weekly"
+            job["weekday"] = weekday
+            day = self._WEEKDAY_NAMES[weekday] if 0 <= weekday < 7 else "?"
+            cambios.append(f"día {day}")
+        if hour is not None:
+            job["hour"] = hour
+            if minute is not None:
+                job["minute"] = minute
+            # Cambiar la hora implica un horario fijo (diario salvo que ya sea semanal).
+            if job.get("type") not in ("daily", "weekly"):
+                job["type"] = "daily"
+            cambios.append(f"hora {hour:02d}:{job.get('minute', 0):02d}")
+        elif minute is not None:
+            job["minute"] = minute
+            cambios.append(f"minuto {minute:02d}")
+        if not cambios:
+            return ("No indicaste qué cambiar.\n"
+                    "Ej: /cron editar 1 hora 22:30  |  /cron editar 1 mensaje nuevo texto  |  "
+                    "/cron editar 1 cada 45 min  |  /cron editar 1 dia martes")
+        # Reinicia el disparo para que el nuevo horario aplique limpio.
+        job["last_fired"] = ""
+        self._save_cron_json()
+        return f"Tarea {idx+1} actualizada ({', '.join(cambios)})."
+
+    def _apply_cron_edit_spec(self, idx, rest):
+        """Interpreta el 'campo valor' de una edición y aplica el cambio."""
+        rest = rest.strip()
+        rlow = rest.lower()
+        m = re.match(r'cada\s+(\d+)\s*(minutos?|mins?|m|horas?|hrs?|h)\b', rlow)
+        if m:
+            n = int(m.group(1))
+            interval = n * 60 if m.group(2).startswith("h") else n
+            return self._edit_cron_job(idx, interval_min=max(1, interval))
+        m = re.search(r'(?:hora|a\s+las?)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', rlow)
+        if m:
+            h = int(m.group(1))
+            minute = int(m.group(2) or 0)
+            ampm = (m.group(3) or "")
+            if ampm == "pm" and h < 12:
+                h += 12
+            if ampm == "am" and h == 12:
+                h = 0
+            if not (0 <= h <= 23 and 0 <= minute <= 59):
+                return "Hora inválida. Usa 0-23 y 0-59."
+            return self._edit_cron_job(idx, hour=h, minute=minute)
+        m = re.match(r'(?:dia|día)\s+(\w+)', rlow)
+        if m:
+            wd = self._WEEKDAY_MAP.get(m.group(1))
+            if wd is None:
+                return "Día no reconocido. Usa lunes..domingo."
+            return self._edit_cron_job(idx, weekday=wd)
+        m = re.match(r'(?:mensaje|texto|msg)\s+(.+)', rest, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            return self._edit_cron_job(idx, message=m.group(1).strip())
+        # Sin campo explícito: se asume que es el nuevo mensaje.
+        return self._edit_cron_job(idx, message=rest)
+
+    def _manage_cron_command(self, prompt):
+        """Gestión avanzada de tareas: editar, pausar/activar y crear semanales.
+        Devuelve el texto de respuesta, o None si no es un comando de gestión."""
+        text = (prompt or "").strip()
+        low = text.lower()
+
+        # Pausar: /cron off|pausar|desactivar <num>
+        m = re.match(r'/cron\s+(?:off|pausar|pausa|desactivar)\s+(\d+)', low)
+        if m:
+            return self._toggle_cron_job(int(m.group(1)) - 1, False)
+        # Activar: /cron on|activar|reanudar <num>
+        m = re.match(r'/cron\s+(?:on|activar|activa|reanudar)\s+(\d+)', low)
+        if m:
+            return self._toggle_cron_job(int(m.group(1)) - 1, True)
+
+        # Editar: /cron editar|edit|modificar|cambiar <num> <campo> <valor>
+        m = re.match(r'/cron\s+(?:editar|edit|modificar|cambiar)\s+(\d+)\s+(.+)',
+                     text, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            return self._apply_cron_edit_spec(int(m.group(1)) - 1, m.group(2))
+
+        # Editar en lenguaje natural: "modifica/cambia/edita la tarea N ..."
+        m = re.match(r'(?:cambia|cambiar|modifica|modificar|edita|editar)\s+(?:la\s+)?'
+                     r'tarea\s+(\d+)\s+(?:a\s+|para\s+|por\s+)?(.+)',
+                     text, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            return self._apply_cron_edit_spec(int(m.group(1)) - 1, m.group(2))
+
+        # Pausar/activar en lenguaje natural.
+        m = re.match(r'(?:pausa|pausar|desactiva|desactivar|detén|deten)\s+(?:la\s+)?tarea\s+(\d+)', low)
+        if m:
+            return self._toggle_cron_job(int(m.group(1)) - 1, False)
+        m = re.match(r'(?:activa|activar|reanuda|reanudar)\s+(?:la\s+)?tarea\s+(\d+)', low)
+        if m:
+            return self._toggle_cron_job(int(m.group(1)) - 1, True)
+
+        # Crear semanal: requiere intención explícita (/cron, o una palabra de
+        # agenda como los/cada/todos los/programa/agenda/recuérdame/avísame) para
+        # no capturar frases normales tipo "lunes a las 10 entrego el informe".
+        m = re.match(
+            r'(?:/cron\s+|los?\s+|cada\s+|todos\s+los\s+|'
+            r'programa\s+|agenda\s+|recu[eé]rdame\s+(?:que\s+)?|av[ií]same\s+(?:que\s+)?)'
+            r'(?:los?\s+|cada\s+)?'
+            r'(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bados?|domingos?)'
+            r'\s+a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)',
+            text, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            wd = self._WEEKDAY_MAP.get(m.group(1).lower())
+            if wd is None:
+                return None
+            h = int(m.group(2))
+            minute = int(m.group(3) or 0)
+            ampm = (m.group(4) or "")
+            if ampm == "pm" and h < 12:
+                h += 12
+            if ampm == "am" and h == 12:
+                h = 0
+            if not (0 <= h <= 23 and 0 <= minute <= 59):
+                return "Hora inválida. Usa 0-23 y 0-59."
+            return self._add_cron_weekly(wd, h, minute, m.group(5).strip())
+
+        return None
 
     def _get_skills_context(self):
         return (
@@ -7318,6 +13482,70 @@ class ClawdPet(tk.Tk):
                 pass
         return None
 
+    _LOCAL_LOC_KWS = [
+        "en la carpeta", "en mi carpeta", "carpeta de descarga", "carpeta descarga",
+        "carpeta de descargas", "en descargas", "en la descarga", "en las descargas",
+        "en mi pc", "en mi computador", "en mi computadora", "en mi equipo",
+        "en el escritorio", "en mis documentos", "en documentos", "localmente",
+        "en local", "búscalo local", "buscalo local", "revisa la carpeta", "mira en la carpeta",
+    ]
+
+    def _try_local_file_action(self, prompt, lower):
+        """Si el usuario indica una UBICACIÓN local + buscar/analizar un archivo:
+        ubica el archivo por semejanza, lo analiza y devuelve un mensaje con el resumen.
+        Devuelve (handled, result)."""
+        if not any(kw in lower for kw in self._LOCAL_LOC_KWS):
+            return False, None
+        # 1) Nombre/consulta del archivo
+        fp = re.search(r'[\w.\-]{2,}\.\w{1,5}', prompt)
+        query = fp.group(0) if fp else ""
+        if not query:
+            m = re.search(r'(?:archivo|fichero)\s+(?:llamado\s+|que\s+se\s+llama\s+)?(.+)$', lower)
+            if m:
+                query = m.group(1).strip()
+        if not query:
+            cleaned = lower
+            for w in self._LOCAL_LOC_KWS:
+                cleaned = cleaned.replace(w, " ")
+            cleaned = re.sub(
+                r"\b(busca|buscar|búscalo|buscalo|encuentra|encuéntrame|encuentrame|esta|este|esto|ese|esa|eso|el|la|los|las|en|mi|archivo|fichero)\b",
+                " ", cleaned)
+            query = re.sub(r"\s+", " ", cleaned).strip()
+        # Quitar comandos que se cuelan al final ("... y analízalo", "y dime de qué trata")
+        query = re.sub(
+            r'\s*\b(y|e|,)?\s*(anal[ií]za\w*|anal[ií]zam\w*|dime|mu[eé]stra\w*|res[uú]m\w*|abre\w*|lee\w*|de\s+qu[eé]\s+(se\s+)?trata|qu[eé]\s+trata|por\s+favor)\b.*$',
+            '', query, flags=re.IGNORECASE)
+        query = query.strip(" .,:;¿?¡!y").strip()
+        if (not query or query in ("esta", "este", "esto", "ese", "esa", "eso")):
+            last = (getattr(self, "_last_file_query", "") or "").strip()
+            query = last.split()[0] if last else ""
+        if not query or len(query) < 2:
+            return True, "¿Qué archivo busco? Dime el nombre (o parte de él)."
+        self._last_file_query = query
+
+        # 2) Carpeta objetivo
+        home = os.path.expanduser("~")
+        if "descarga" in lower:
+            dirs = [os.path.join(home, "Downloads")]
+        elif "escritorio" in lower or "desktop" in lower:
+            dirs = [os.path.join(home, "Desktop")]
+        elif "documento" in lower:
+            dirs = [os.path.join(home, "Documents")]
+        else:
+            dirs = [os.path.join(home, d) for d in ("Downloads", "Desktop", "Documents")] + [home]
+
+        # 3) Buscar (fuzzy) y analizar el más parecido
+        scored = self._find_local_files(query, dirs)
+        if not scored:
+            return True, (f"No encontré ningún archivo parecido a '{query}' en esa carpeta. "
+                          "Prueba con otra parte del nombre.")
+        ambiguous = len(scored) > 1 and (scored[0][0] - scored[1][0]) < 0.4
+        if ambiguous:
+            listado = "\n".join(f"  • {os.path.basename(p)}" for _, p in scored[:6])
+            return True, (f"Encontré varios archivos parecidos a '{query}':\n{listado}\n\n"
+                          "¿Cuál analizo? (dime el nombre)")
+        return True, self._analyze_local_file_sync(scored[0][1])
+
     def _try_handle_skill_action(self, prompt):
         lower = prompt.lower().strip()
 
@@ -7326,6 +13554,33 @@ class ClawdPet(tk.Tk):
         try:
             import claudy_powers as cp
             cleaned_prompt = cp.clean_politeness_prefixes(prompt)
+        except Exception:
+            pass
+
+        # ===== Marcador directo para analizar un archivo por ruta (lo usa el bot de Telegram) =====
+        if prompt.strip().startswith("[CLAUDY_ANALYZE_FILE:") and prompt.strip().endswith("]"):
+            try:
+                path = prompt.strip()[len("[CLAUDY_ANALYZE_FILE:"):-1].strip().strip('"\'')
+                if os.path.exists(path):
+                    return True, self._analyze_local_file_sync(path)
+                return True, f"No encontré el archivo en {path}."
+            except Exception as e:
+                return True, f"No pude analizar el archivo: {e}"
+
+        # ===== Actualizar memoria (Claudy + agentes + Obsidian) bajo orden explícita =====
+        try:
+            mem_hit, mem_fact = self._extract_memory_fact(prompt, lower)
+            if mem_hit:
+                return True, self._remember_knowledge(mem_fact)
+        except Exception:
+            pass
+
+        # ===== Buscar + analizar un archivo LOCAL (debe ir ANTES de crear-documento,
+        # porque "analiza el archivo X de la carpeta Y" NO es crear un documento) =====
+        try:
+            loc_handled, loc_result = self._try_local_file_action(prompt, lower)
+            if loc_handled:
+                return True, loc_result
         except Exception:
             pass
 
@@ -7705,6 +13960,7 @@ class ClawdPet(tk.Tk):
                             break
                     break
             if what:
+                self._last_file_query = what
                 return True, self._download_by_name(what)
 
         # File search: detect explicit keywords + file names with extensions + search intent
@@ -7731,6 +13987,8 @@ class ClawdPet(tk.Tk):
                     break
             if not query and file_pattern:
                 query = file_pattern.group(0)
+            if query:
+                self._last_file_query = query
             return True, self._search_files(query) if query else "Qué archivo buscas?"
 
         # Execute: "abre", "ejecuta", "corre" + file path
@@ -7947,6 +14205,16 @@ class ClawdPet(tk.Tk):
                 return True, self._stop_voice_listen()
             return True, self._start_voice_listen()
 
+        # TELEGRAM TOKEN: "/telegram-token <TOKEN>" — guarda el token y arranca el bot
+        if lower.startswith("/telegram-token ") or lower.startswith("/telegram_token "):
+            token = prompt.split(None, 1)[1].strip().strip('"\'')
+            return True, self._set_telegram_token(token) if token else (
+                "Uso: /telegram-token <TOKEN>\nPide el token a @BotFather en Telegram.")
+
+        # TELEGRAM STATUS: "/telegram-status" — ver estado (token / usuarios / bot vivo)
+        if lower.strip() in ("/telegram-status", "/telegram_status", "telegram status", "estado telegram"):
+            return True, self._telegram_status()
+
         # VINCULAR Telegram: "/vincular <uid>"
         if lower.startswith("/vincular ") or lower.startswith("vincular "):
             uid = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
@@ -7971,6 +14239,23 @@ class ClawdPet(tk.Tk):
             name = parts[1].strip() if len(parts) > 1 else ""
             return True, self._learn_skill_from_conversation(name) if name else "Uso: /aprender <nombre-de-la-skill>"
 
+        # SKILLS: estadísticas de uso / aprendizaje
+        if lower.strip() in ("/skill stats", "/skills stats", "/skill estado", "estado de skills"):
+            return True, self._skill_stats()
+
+        # SKILLS: refinar/mejorar una skill existente (la otra mitad del bucle Hermes)
+        if (lower.startswith("/skill mejorar ") or lower.startswith("/skill refinar ")
+                or lower.startswith("/refinar ") or lower.startswith("/mejorar-skill ")):
+            parts = prompt.split(None, 2) if lower.startswith("/skill") else prompt.split(None, 1)
+            name = (parts[2] if lower.startswith("/skill") and len(parts) > 2
+                    else parts[1] if len(parts) > 1 else "").strip()
+            return True, self._refine_skill(name) if name else "Uso: /skill mejorar <nombre>"
+
+        refine_match = re.search(
+            r'(?:mejora|refina|actualiza)\s+(?:la\s+)?skill\s+([^\.\?!,]+)', lower, re.IGNORECASE)
+        if refine_match:
+            return True, self._refine_skill(refine_match.group(1).strip())
+
         # Auto-detección: "guarda esto como skill X", "aprende esto como X", "memoriza esto como X"
         learn_match = re.search(
             r'(?:guarda esto como|aprende esto como|aprende a|memoriza esto como|crea (?:una )?skill (?:de|para))\s+([^\.\?!,]+)',
@@ -7989,6 +14274,16 @@ class ClawdPet(tk.Tk):
         # CRON: programar / listar / eliminar tareas
         if lower.strip() in ("/cron list", "/cron listar", "cron list", "tareas programadas", "que tareas tienes"):
             return True, self._list_cron_jobs()
+
+        # Gestión avanzada: editar, pausar/activar y crear tareas semanales.
+        # Va antes del parser NL para que "los martes a las 9 ..." no se trate como diario.
+        cron_mgmt = self._manage_cron_command(prompt)
+        if cron_mgmt is not None:
+            return True, cron_mgmt
+
+        cron_expr = self._generate_cron_expression(prompt)
+        if cron_expr:
+            return True, cron_expr
 
         # CRON natural language: "recuerdame cada X" / "avisame a las HH" / etc.
         nl = self._parse_cron_nl(prompt)
@@ -8020,7 +14315,120 @@ class ClawdPet(tk.Tk):
             idx = int(cron_del_match.group(1) or cron_del_match.group(2) or cron_del_match.group(3)) - 1
             return True, self._delete_cron_job(idx)
 
+        # AGENDA: crear reunión en Google Calendar
+        if lower.startswith("/agendar") or re.search(r'\b(agenda|agendar|agéndame|agendame)\b.*\b(reuni[oó]n|meeting|cita|llamada|evento)\b', lower):
+            return True, self._handle_agendar(prompt)
+
         return False, ""
+
+    _MESES = {
+        "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+        "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+        "noviembre": 11, "diciembre": 12,
+    }
+
+    def _handle_agendar(self, prompt):
+        """Crea una reunión en Google Calendar desde texto en español.
+        Ej: /agendar Reunión con Jean Paul el 10 de junio a las 15:30 jeanpaul.harb@combas.cl"""
+        try:
+            import google_calendar as gcal
+        except Exception as e:
+            return f"No pude cargar el módulo de calendario: {e}"
+        st = gcal.status()
+        if not st.get("connected"):
+            reason = st.get("reason")
+            if reason == "falta-credencial":
+                return ("Aún no conectas Google Calendar. Crea un cliente OAuth de escritorio y guarda "
+                        f"el client_secret en:\n{gcal.CLIENT_SECRET_FILE}\n"
+                        "Luego abre el panel Calendario (botón) y pulsa 'Conectar'.")
+            if reason == "no-autorizado":
+                return "Falta autorizar Google Calendar. Abre el panel Calendario y pulsa 'Conectar Google Calendar'."
+            return f"Google Calendar no está disponible: {reason}"
+
+        text = prompt
+        low = text.lower()
+        now = datetime.datetime.now()
+
+        # ── Fecha ──
+        date = None
+        m = re.search(r'(\d{4})-(\d{2})-(\d{2})', text)
+        if m:
+            try:
+                date = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except Exception:
+                date = None
+        if not date:
+            m = re.search(r'\b(\d{1,2})\s*/\s*(\d{1,2})(?:\s*/\s*(\d{2,4}))?\b', text)
+            if m:
+                d, mo = int(m.group(1)), int(m.group(2))
+                y = int(m.group(3)) if m.group(3) else now.year
+                if y < 100:
+                    y += 2000
+                try:
+                    date = datetime.date(y, mo, d)
+                except Exception:
+                    date = None
+        if not date:
+            m = re.search(r'\b(\d{1,2})\s+de\s+([a-záéíóú]+)', low)
+            if m and m.group(2) in self._MESES:
+                d, mo = int(m.group(1)), self._MESES[m.group(2)]
+                try:
+                    date = datetime.date(now.year, mo, d)
+                    if date < now.date():
+                        date = datetime.date(now.year + 1, mo, d)
+                except Exception:
+                    date = None
+        if not date:
+            if "mañana" in low or "manana" in low:
+                date = (now + datetime.timedelta(days=1)).date()
+            elif "hoy" in low:
+                date = now.date()
+
+        # ── Hora ──
+        hh = mm = None
+        m = re.search(r'a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', low)
+        if m:
+            hh, mm = int(m.group(1)), int(m.group(2) or 0)
+            ampm = (m.group(3) or "")
+            if ampm == "pm" and hh < 12:
+                hh += 12
+            if ampm == "am" and hh == 12:
+                hh = 0
+        else:
+            m = re.search(r'\b(\d{1,2}):(\d{2})\b', low)
+            if m:
+                hh, mm = int(m.group(1)), int(m.group(2))
+
+        if not date or hh is None:
+            return ("Para agendar dime al menos fecha y hora. Ej:\n"
+                    "/agendar Reunión con Jean Paul el 10 de junio a las 15:30 correo@dominio.cl")
+
+        # ── Invitados ──
+        attendees = re.findall(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', text)
+
+        # ── Título (limpia disparadores, fecha, hora, correos) ──
+        title = re.sub(r'^/agendar\s*', '', text, flags=re.IGNORECASE)
+        title = re.sub(r'\b(ag[eé]ndame|agendame|agenda|agendar)\b', '', title, flags=re.IGNORECASE)
+        for a in attendees:
+            title = title.replace(a, '')
+        title = re.sub(r'\b\d{4}-\d{2}-\d{2}\b', '', title)
+        title = re.sub(r'\b\d{1,2}\s*/\s*\d{1,2}(?:\s*/\s*\d{2,4})?\b', '', title)
+        title = re.sub(r'\bel\s+', ' ', title, flags=re.IGNORECASE)
+        title = re.sub(r'\b\d{1,2}\s+de\s+[a-záéíóú]+', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'a\s+las?\s+\d{1,2}(?::\d{2})?\s*(am|pm)?', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\b(mañana|manana|hoy)\b', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\s+', ' ', title).strip(" .,-")
+        if not title:
+            title = "Reunión"
+
+        start_iso = f"{date.isoformat()}T{hh:02d}:{(mm or 0):02d}:00"
+        res = gcal.create_event(summary=title, start_iso=start_iso, attendees=attendees, add_meet=True)
+        if res.get("ok"):
+            cuando = f"{date.strftime('%d/%m/%Y')} {hh:02d}:{(mm or 0):02d}"
+            inv = (" · invitados: " + ", ".join(attendees)) if attendees else ""
+            link = res.get("hangoutLink") or res.get("htmlLink") or ""
+            return f"✅ Reunión agendada: «{title}» el {cuando}{inv}.\n{link}"
+        return f"No pude agendar: {res.get('reason', 'error')}"
 
     def _execute_find_skills(self, query):
         try:
@@ -8166,6 +14574,7 @@ class ClawdPet(tk.Tk):
         )
 
         llm_answer = ""
+        llm_source = ""
         try:
             if is_local:
                 self.ensure_opencode_server(base_url, config)
@@ -8184,6 +14593,7 @@ class ClawdPet(tk.Tk):
                 response = self.request_json(f"{base_url}/session/{self.quick_session_id}/message", payload, config, timeout=180)
                 parts = response.get("parts") or []
                 llm_answer = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+                llm_source = model
             else:
                 response = self._call_remote_provider(model, "Eres Claudy. Analiza carpetas en Markdown.", "", analysis_prompt, config)
                 # Extract text from any provider format
@@ -8191,16 +14601,60 @@ class ClawdPet(tk.Tk):
                     llm_answer = "\n".join(b.get("text", "") for b in response["content"] if b.get("type") == "text").strip()
                 elif response.get("choices"):
                     llm_answer = response["choices"][0].get("message", {}).get("content", "").strip()
+                llm_source = model
         except Exception as e:
-            llm_answer = f"_(No se pudo consultar al LLM: {e})_"
+            self._debug_log("ANALYZE_FOLDER LLM PRIMARY FAILED", str(e))
+            # Fallback: try remote providers if local failed
+            if is_local:
+                try:
+                    _status("OpenCode no disponible, probando proveedor remoto...")
+                    response = self._call_remote_provider(model, "Eres Claudy. Analiza carpetas en Markdown.", "", analysis_prompt, config)
+                    if response.get("content") and isinstance(response["content"], list):
+                        llm_answer = "\n".join(b.get("text", "") for b in response["content"] if b.get("type") == "text").strip()
+                    elif response.get("choices"):
+                        llm_answer = response["choices"][0].get("message", {}).get("content", "").strip()
+                    llm_source = f"{model} (remoto)"
+                except Exception:
+                    pass
 
-        _status("Guardando en Obsidian...")
+        # Ultimate fallback: Pollinations API (free, no API key needed)
+        if not llm_answer:
+            try:
+                _status("Usando Pollinations (fallback gratuito)...")
+                poll_payload = {
+                    "model": "openai",
+                    "messages": [
+                        {"role": "system", "content": "Eres Claudy, un asistente experto en analisis de codigo y proyectos. Responde en espanol. Devuelves Markdown estructurado, conciso y accionable."},
+                        {"role": "user", "content": analysis_prompt[:12000]},
+                    ],
+                    "max_tokens": 2000,
+                }
+                req = urllib.request.Request(
+                    "https://text.pollinations.ai/openai",
+                    data=json.dumps(poll_payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": "Claudy/1.0"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    poll_data = json.loads(resp.read().decode("utf-8"))
+                choices = poll_data.get("choices") or []
+                if choices:
+                    msg = choices[0].get("message") or {}
+                    llm_answer = msg.get("content", "").strip()
+                if not llm_answer:
+                    llm_answer = poll_data.get("response", "").strip()
+                llm_source = "Pollinations (fallback gratuito)"
+            except Exception as poll_err:
+                llm_answer = f"_(No se pudo consultar a ningun LLM. Ultimo error: {poll_err})_"
+                llm_source = "ninguno"
+
+        _status("Guardando analisis...")
         folder_name = os.path.basename(os.path.abspath(folder_path)) or "raiz"
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         md_content = (
             f"**Carpeta:** `{folder_path}`\n"
             f"**Analizada:** {ts}\n"
-            f"**Modelo:** {model}\n\n"
+            f"**Modelo:** {llm_source or model}\n\n"
             f"## Analisis del LLM\n\n{llm_answer or '_(sin respuesta)_'}\n\n"
             f"---\n\n## Estructura\n\n```\n{structure[:6000]}\n```\n\n"
             f"## Estadisticas\n\n```\n{stats[:2000]}\n```\n\n"
@@ -8237,23 +14691,54 @@ class ClawdPet(tk.Tk):
             except Exception as e:
                 result = f"Error guardando nota: {e}"
         else:
-            result = "No encuentro tu vault de Obsidian. Configura 'obsidian.vaultPath' en ~/.claudy/config.json."
+            # Fallback: save locally in ~/.claudy/analisis/ when Obsidian is not configured
+            local_dir = os.path.join(os.path.expanduser("~"), ".claudy", "analisis")
+            try:
+                os.makedirs(local_dir, exist_ok=True)
+                safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:120]
+                fname = f"{safe_title}.md"
+                fpath = os.path.join(local_dir, fname)
+                counter = 1
+                while os.path.exists(fpath):
+                    fname = f"{safe_title}_{counter}.md"
+                    fpath = os.path.join(local_dir, fname)
+                    counter += 1
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(f"# {title}\n\n")
+                    f.write(md_content)
+                size_kb = round(os.path.getsize(fpath) / 1024, 1)
+                result = f"Analisis guardado en: {fpath}"
+                note_info = f"\nTamano: {size_kb} KB"
+            except Exception as e:
+                result = f"Analisis generado (no se pudo guardar: {e})"
 
         word_count = len((llm_answer or "").split())
         char_count = len(llm_answer or "")
-        completion_status = (
-            f"\nAnalisis completado: {word_count} palabras, {char_count} caracteres.\n"
-            f"MD total: {len(md_content)} caracteres."
-        )
 
         _status("Listo.")
-        full_text = (
-            f"{result}{note_info}\n"
-            f"{completion_status}\n\n"
-            f"=== ANALISIS COMPLETO ===\n\n"
+        # Build the display text (analysis only, no file paths that confuse _set_response_text)
+        display_text = (
+            f"Analisis de: {folder_name}\n"
+            f"Fuente: {llm_source or model}\n"
+            f"{word_count} palabras\n\n"
             f"{llm_answer or '_(sin respuesta del LLM)_'}"
         )
-        return full_text
+        # Persistir el análisis en la memoria de agentes (memory.db) + Obsidian
+        # para que quede como contexto recuperable a futuro.
+        try:
+            resumen = " ".join((llm_answer or "").split())[:3000]
+            if resumen:
+                self._save_memory("claudy", f"[Análisis de carpeta: {folder_path}] {resumen}")
+        except Exception:
+            pass
+
+        # Return (display_text, saved_file_path) so caller can show both separately
+        saved_path = ""
+        try:
+            saved_path = fpath  # type: ignore[possibly-undefined]
+        except NameError:
+            pass
+        return (display_text, saved_path)
 
     def _get_obsidian_vault(self):
         """Find Obsidian vault path from config or common locations."""
@@ -8266,8 +14751,9 @@ class ClawdPet(tk.Tk):
                 return vault
         except Exception:
             pass
-        # Common default locations.
+        # Common default locations. El vault QCORE en Drive tiene prioridad.
         defaults = [
+            r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\VAULT",
             os.path.join(os.path.expanduser("~"), "Obsidian"),
             os.path.join(os.path.expanduser("~"), "Documents", "Obsidian"),
             os.path.join(os.path.expanduser("~"), "OneDrive", "Obsidian"),
@@ -8275,7 +14761,11 @@ class ClawdPet(tk.Tk):
         for d in defaults:
             if os.path.isdir(d):
                 return d
-        return None
+        # Último recurso: el resolver de escritura (config → Drive QCORE → local).
+        try:
+            return self._get_or_create_obsidian_vault()
+        except Exception:
+            return None
 
     def _create_obsidian_note(self, title, content):
         vault = self._get_obsidian_vault()
@@ -8301,6 +14791,118 @@ class ClawdPet(tk.Tk):
             return f"Nota creada en Obsidian: {fname}\nRuta: {fpath}\n[CLAUDY_PATH:{fpath}]"
         except Exception as e:
             return f"Error creando nota: {e}"
+
+    # ------------------------------------------------------------------
+    # Memoria deliberada: que Claudy actualice su memoria / agentes / Obsidian
+    # ------------------------------------------------------------------
+    # Frases que ordenan GUARDAR un conocimiento duradero (ordenadas de más
+    # larga a más corta para recortar el prefijo correctamente).
+    _MEMORY_UPDATE_TRIGGERS = [
+        "actualiza la memoria de los agentes",
+        "actualiza tu memoria y la de obsidian",
+        "guarda esto en tu memoria y en obsidian",
+        "actualiza tus memorias",
+        "actualiza tu memoria",
+        "actualiza la memoria",
+        "actualiza obsidian",
+        "guarda esto en tu memoria",
+        "guarda esto en obsidian",
+        "guarda en tu memoria",
+        "guarda en la memoria",
+        "guarda en memoria",
+        "guarda en obsidian",
+        "guárdalo en tu memoria",
+        "guardalo en tu memoria",
+        "guárdalo en memoria",
+        "guardalo en memoria",
+        "agrega a tu memoria",
+        "agrégalo a tu memoria",
+        "agregalo a tu memoria",
+        "agrega a la memoria",
+        "memoriza esto",
+        "memoriza que",
+        "memoriza:",
+        "graba en memoria",
+        "ten esto en tu memoria",
+        "recuérdalo en tu memoria",
+        "recuerdalo en tu memoria",
+    ]
+
+    def _extract_memory_fact(self, prompt, lower):
+        """Si el prompt ordena guardar conocimiento en memoria, devuelve
+        (True, fact). `fact` puede venir vacío (=> resumir conversación reciente).
+        Si no es una orden de memoria, devuelve (False, '')."""
+        hit = None
+        for t in self._MEMORY_UPDATE_TRIGGERS:
+            if t in lower:
+                hit = t
+                break
+        if not hit:
+            return False, ""
+        idx = lower.find(hit)
+        fact = prompt[idx + len(hit):].strip()
+        # Quitar conectores iniciales ("con", "que", "lo siguiente:", ":", "esto:")
+        fact = re.sub(r'^(?:\s*[:\-,]\s*)?(?:con|que|de que|lo siguiente|esto|esto que|el dato de que|el hecho de que)\b[:\s]*',
+                      '', fact, flags=re.IGNORECASE).strip(" :,-")
+        # Referencias a la conversación => resumir (fact vacío)
+        if re.match(r'^(lo que|lo último|lo ultimo|lo de|nuestra conversaci|la conversaci|lo que hablamos|lo que te dije|eso|esto)\b',
+                    fact, flags=re.IGNORECASE):
+            fact = ""
+        return True, fact
+
+    def _remember_knowledge(self, fact, summarize_if_empty=True):
+        """Guarda un conocimiento DURADERO en las capas de memoria de Claudy:
+        memory.db (memoria compartida de Claudy + agentes) y el vault de Obsidian.
+        Si `fact` viene vacío, resume la conversación reciente. Devuelve el mensaje
+        de confirmación para mostrar a Felipe."""
+        fact = (fact or "").strip()
+        if not fact and summarize_if_empty:
+            try:
+                recent = self._load_memory()[-10:]
+                convo = "\n".join(f"{m.get('role','')}: {m.get('text','')}" for m in recent if m.get("text"))
+                if convo.strip():
+                    sp = ("Extrae en 1-3 frases concisas el DATO o CONOCIMIENTO duradero que "
+                          "Claudy debe recordar de esta conversación (hechos, decisiones, "
+                          "preferencias de Felipe; NADA de saludos ni relleno). Devuelve solo el "
+                          "dato, sin preámbulo:\n\n" + convo)
+                    fact = (self.send_quick_message(sp, _skip_skill_action=True, timeout=60) or "").strip()
+            except Exception:
+                pass
+        if not fact:
+            return ("¿Qué quieres que recuerde? Dime el dato, o di "
+                    "\"actualiza tu memoria con lo último que hablamos\".")
+
+        saved = []
+        # 1) memory.db — base compartida por Claudy y los agentes (AGENTES-MEMORY)
+        try:
+            self._save_memory_sqlite("Conocimiento", f"[MEMORIA] {fact}")
+            saved.append("memoria de Claudy y agentes (memory.db)")
+        except Exception:
+            pass
+        # 2) Obsidian — nota duradera y recuperable por búsqueda de relevancia
+        try:
+            vault = self._get_obsidian_vault()
+            if vault and os.path.isdir(vault):
+                note_dir = os.path.join(vault, "Claudy")
+                os.makedirs(note_dir, exist_ok=True)
+                note_path = os.path.join(note_dir, "Memoria-Claudy.md")
+                if not os.path.exists(note_path):
+                    with open(note_path, "w", encoding="utf-8") as f:
+                        f.write("---\ntags: [claudy, memoria]\n---\n\n# Memoria de Claudy\n\n"
+                                "Conocimiento duradero que Claudy debe tener presente.\n\n")
+                stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                with open(note_path, "a", encoding="utf-8") as f:
+                    f.write(f"- {stamp} · {fact}\n")
+                saved.append("Obsidian (Claudy/Memoria-Claudy.md)")
+        except Exception:
+            pass
+        # 3) Refrescar la caché del vault para que el dato sea recuperable de inmediato
+        self._vault_notes_cache = None
+
+        if not saved:
+            return "No pude guardar el dato (revisa memory.db y el vault de Obsidian)."
+        return ("Memoria actualizada ✓\nGuardé: \"" + (fact[:200] + ("..." if len(fact) > 200 else "")) +
+                "\"\nEn: " + " · ".join(saved) + ".\nLo tendré presente cuando me preguntes.")
 
     def _search_obsidian_notes(self, query):
         vault = self._get_obsidian_vault()
@@ -8900,6 +15502,81 @@ class ClawdPet(tk.Tk):
     # ------------------------------------------------------------------
     # 11. File Search
     # ------------------------------------------------------------------
+    def _find_local_files(self, query, dirs, max_results=8):
+        """Busca archivos por SEMEJANZA (fuzzy) entre el nombre dado y el real.
+        Combina tokens contenidos + similitud difflib, tolerando typos y separadores.
+        Devuelve lista de (score, ruta) ordenada de mejor a peor."""
+        import re as _re
+        import difflib as _dl
+        qn = _re.sub(r'[\s_\-.]+', ' ', (query or "").lower()).strip()
+        qtoks = [t for t in qn.split() if t]
+        results = []
+        seen = set()
+        for d in dirs:
+            if not d or not os.path.isdir(d):
+                continue
+            for root, dnames, files in os.walk(d):
+                if root[len(d):].count(os.sep) >= 3:
+                    dnames[:] = []
+                for f in files:
+                    fp = os.path.join(root, f)
+                    if fp in seen:
+                        continue
+                    base = os.path.splitext(f)[0]
+                    nn = _re.sub(r'[\s_\-.]+', ' ', base.lower()).strip()
+                    contained = sum(1 for t in qtoks if t and t in nn)
+                    # Similitud global + mejor similitud token-a-token (para nombres largos)
+                    ratio = _dl.SequenceMatcher(None, qn, nn).ratio()
+                    tok_ratio = 0.0
+                    ntoks = nn.split()
+                    for qt in qtoks:
+                        best = max((_dl.SequenceMatcher(None, qt, nt).ratio() for nt in ntoks), default=0.0)
+                        tok_ratio = max(tok_ratio, best)
+                    frac = (contained / len(qtoks)) if qtoks else 0
+                    # Aceptar si contiene tokens, o si se parece lo suficiente
+                    if contained == 0 and ratio < 0.45 and tok_ratio < 0.7:
+                        continue
+                    score = frac * 3 + ratio + tok_ratio
+                    seen.add(fp)
+                    results.append((round(score, 3), fp))
+        results.sort(key=lambda x: (-x[0], len(os.path.basename(x[1]))))
+        return results[:max_results]
+
+    def _analyze_local_file_sync(self, path):
+        """Lee, analiza y resume un archivo local; guarda el análisis en memoria
+        de agentes + Obsidian. Devuelve el resumen (texto)."""
+        name = os.path.basename(path)
+        folder = os.path.dirname(path)
+        try:
+            size_kb = round(os.path.getsize(path) / 1024, 1)
+        except Exception:
+            size_kb = 0
+        ext = os.path.splitext(path)[1].lower()
+        image_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+        try:
+            if ext in image_exts:
+                answer = self._analyze_image_native(
+                    path, "Describe esta imagen en español y extrae el texto visible.")
+            else:
+                text = self._extract_attachment_text(path)
+                if not text.strip():
+                    return f"📄 Encontré **{name}** en {folder} ({size_kb} KB), pero no pude extraer contenido legible."
+                prompt2 = (
+                    f"Analiza este archivo y dime de qué trata.\nArchivo: {name}\n\n"
+                    "Contenido (puede venir truncado):\n```\n" + text + "\n```\n\n"
+                    "Responde en español: (1) de qué trata en 1-2 frases, (2) puntos/datos clave, "
+                    "(3) si aplica, montos, fechas o totales relevantes."
+                )
+                answer = self.send_quick_message(prompt2, _skip_skill_action=True, timeout=120)
+        except Exception as e:
+            return f"Encontré **{name}** en {folder} pero falló el análisis: {e}"
+        try:
+            self._save_memory("Usuario", f"Analizar archivo local: {name} ({folder})")
+            self._save_memory("Claudy", f"[Análisis de archivo: {name}] {answer}")
+        except Exception:
+            pass
+        return f"📄 **{name}**  ·  {folder}  ·  {size_kb} KB\n\n{answer}"
+
     def _search_files(self, query):
         """Search for files on the system using Windows search."""
         import fnmatch
@@ -9145,11 +15822,7 @@ class ClawdPet(tk.Tk):
                     break
         
         if not console:
-            # Default to NES if nothing found but game name is like 'megaman'
-            if any(x in game_name.lower() for x in ["megaman", "mario", "zelda", "metroid"]):
-                console = "nes"
-            else:
-                return "No pude determinar para qué consola es el juego. Por favor especifica (ej: 'quiero jugar megaman de nes')."
+            return "No pude determinar para qué consola es el juego. Por favor especifica la consola (ej: 'quiero jugar robocop de nes')."
 
         emu_name = console_map.get(console)
         self._update_progress(f"Iniciando flujo para jugar '{game_name}' en {console.upper()}...")
@@ -10421,6 +17094,11 @@ CONSULTAS
   /calc <expr>                Calcular expresion
   /noticias                   Ultimas noticias
   /recordar <min> <msg>       Recordatorio
+  /cron expr <horario>         Generar expresion cron
+  /cron cada <n> min <msg>     Programar tarea recurrente
+  /cron los <dia> a las <h>    Programar tarea semanal
+  /cron editar <num> ...       Modificar una tarea existente
+  /cron on|off <num>           Activar / pausar una tarea
 
 MAS
   /instalar <app>             Instalar aplicacion
@@ -10510,11 +17188,47 @@ Tambien puedes hablar naturalmente:
                             result = pet.send_quick_message(last_user)
                         result = pet._process_embedded_commands(result)
                         result = pet._strip_markdown(result)
+                        model_name = data.get("model", "claudy")
+                        cmpl_id = f"chatcmpl-{int(time.time())}"
+                        created = int(time.time())
+
+                        # Streaming SSE (lo que Open WebUI / LobeChat esperan con stream:true)
+                        if data.get("stream"):
+                            _self.send_response(200)
+                            _self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                            _self.send_header("Cache-Control", "no-cache")
+                            _self.send_header("Connection", "keep-alive")
+                            _self.send_header("Access-Control-Allow-Origin", "*")
+                            _self.end_headers()
+
+                            def _sse(payload):
+                                _self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                                _self.wfile.flush()
+
+                            def _chunk(delta, finish=None):
+                                return {
+                                    "id": cmpl_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": model_name,
+                                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                                }
+                            try:
+                                _sse(_chunk({"role": "assistant"}))
+                                # trocea por palabras para un streaming fluido y fiable
+                                tokens = re.findall(r"\S+\s*", result) or ([result] if result else [])
+                                for tk in tokens:
+                                    _sse(_chunk({"content": tk}))
+                                _sse(_chunk({}, finish="stop"))
+                                _self.wfile.write(b"data: [DONE]\n\n")
+                                _self.wfile.flush()
+                            except (BrokenPipeError, ConnectionResetError):
+                                pass
+                            return
+
                         resp = {
-                            "id": f"chatcmpl-{int(time.time())}",
+                            "id": cmpl_id,
                             "object": "chat.completion",
-                            "created": int(time.time()),
-                            "model": data.get("model", "claudy"),
+                            "created": created,
+                            "model": model_name,
                             "choices": [{
                                 "index": 0,
                                 "message": {"role": "assistant", "content": result},
@@ -10745,7 +17459,7 @@ Tambien puedes hablar naturalmente:
         import threading
         threading.Thread(target=run_pipeline, daemon=True).start()
 
-    def send_quick_message(self, prompt, _skip_skill_action=False, timeout=90):
+    def send_quick_message(self, prompt, _skip_skill_action=False, timeout=90, on_delta=None):
         # Check for local skill commands first
         if not _skip_skill_action:
             handled, result = self._try_handle_skill_action(prompt)
@@ -10771,19 +17485,75 @@ Tambien puedes hablar naturalmente:
         model = _route_model(prompt, config, model)
 
         is_local = any(h in base_url for h in ("127.0.0.1", "localhost", "0.0.0.0"))
-        context = self._build_memory_context()
+        context = self._build_memory_context(prompt)
         superpowers = self._get_superpowers()
         base_sys = config["agent"].get(
             "systemPrompt",
-            "Eres Claudy, asistente personal de Felipe. Español natural, directo, sin formalidad. "
+            "Eres Claudy, asistente personal de Felipe Castro (jorge.castro@qcorespa.com), "
+            "CTO de QCORE SPA (QCORE Group Technologies SPA). "
+            "SIEMPRE llama al usuario 'Felipe' — nunca 'usuario', 'tú' genérico ni lo ignores. "
+            "Español natural, directo, sin formalidad excesiva. "
+            "QCORE SPA tiene estos productos propios: "
+            "SmartStudent (plataforma educativa SaaS, Next.js+Firebase+Gemini AI, 21 módulos, puerto 9002, cliente COMBAS), "
+            "Roadix (SaaS para talleres automotrices, React+Supabase, 21 módulos, roadix.cl, puerto 5173), "
+            "Mission Control (hub operativo central, React+Vite, 17 módulos, puerto 5200), "
+            "UnitCore (Clinical Research Management, dashboard clínico, 195 contactos oncológicos), "
+            "Campaign Studio (gestión Reels/Carruseles para Meta, React+Remotion), "
+            "Point (POS + inventario FEFO para comercios, Python/Flask, cliente Tentación a Granel), "
+            "Mi Portafolio (web personal/CV de Jorge Castro, jorgecastros.xyz, fuente en Documents/CV_JorgeCastro_v3.5), "
+            "Luxium (monorepo/engine base compartido). "
+            "Cuando Felipe pregunte por estos productos, SIEMPRE responde con info de los productos de QCORE SPA, "
+            "NUNCA confundas con productos de otras empresas con nombres similares. "
             "Clasifica la pregunta: saludo/definición → 1-3 líneas sin buscar. "
             "Dato actual → busca + da dato. Código → código exacto. "
             "Tarea multi-paso → anuncia plan, ejecuta cada paso. "
-            "PROHIBIDO: 'como modelo de IA', preámbulos, markdown, derivar a otros sitios. "
-            "Si no sabes, di 'No sé'. Resuelve, no informes."
+            "PROHIBIDO: 'como modelo de IA', preámbulos, markdown innecesario, derivar a otros sitios. "
+            "Si no sabes, di 'No sé, Felipe'. Resuelve, no informes."
         )
         local_skills = self._load_installed_skills()
-        enhanced_sys = superpowers + local_skills + base_sys
+        try:
+            from qcore_products import build_company_context
+            company_ctx = build_company_context() + "\n\n"
+        except Exception:
+            company_ctx = ""
+        enhanced_sys = superpowers + local_skills + company_ctx + base_sys
+        # Auto-detect product mention — robust matching with variations
+        _detected_product = None
+        try:
+            from qcore_products import build_context_prompt, PRODUCT_CONTEXTS
+            plow = prompt.lower().replace("-", " ").replace("_", " ")
+            # Map of aliases → canonical product name
+            _product_aliases = {
+                "smartstudent": "SmartStudent",
+                "smart student": "SmartStudent",
+                "roadix": "Roadix",
+                "luxium": "Luxium",
+                "unitcore": "UnitCore",
+                "unit core": "UnitCore",
+                "campaign studio": "Campaign Studio",
+                "campaignstudio": "Campaign Studio",
+                "mission control": "Mission Control",
+                "missioncontrol": "Mission Control",
+                "point": "Point",
+                "mi portafolio": "Mi Portafolio",
+                "portafolio": "Mi Portafolio",
+                "portfolio": "Mi Portafolio",
+            }
+            for alias, canonical in _product_aliases.items():
+                if alias in plow:
+                    _detected_product = canonical
+                    self._active_product = canonical
+                    self._product_context = build_context_prompt(canonical)
+                    break
+        except Exception:
+            pass
+        # Inject active QCORE product context (detailed) into system prompt
+        product_ctx = getattr(self, "_product_context", "")
+        if product_ctx:
+            enhanced_sys += "\n\n" + product_ctx
+        # Also inject into user prompt so the AI MUST use this info
+        if _detected_product and product_ctx:
+            prompt = f"[IMPORTANTE: Responde usando SOLO la información del producto {_detected_product} de QCORE SPA que tienes en tu contexto. NO busques información externa ni confundas con otros productos de otras empresas.]\n\n{prompt}"
 
         if is_local:
             try:
@@ -10816,10 +17586,10 @@ Tambien puedes hablar naturalmente:
             except Exception as local_err:
                 self._debug_log("LOCAL OPENCODE FAILED, FALLING BACK TO REMOTE", str(local_err))
                 # Auto-fallback to remote credentials if local server times out/fails
-                response = self._call_remote_provider(model, enhanced_sys, context, prompt, config)
+                response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, on_delta=on_delta)
         else:
             # Multi-provider remote path
-            response = self._call_remote_provider(model, enhanced_sys, context, prompt, config)
+            response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, on_delta=on_delta)
 
         # Robust text extraction: OpenCode native format, OpenAI format, or direct text.
         text = ""
@@ -10863,11 +17633,51 @@ Tambien puedes hablar naturalmente:
                 if not text:
                     text = response.get("content", "").strip()
             except Exception as remote_err:
-                text = f"Error llamando al proveedor remoto fallback: {remote_err}"
+                text = ""
+                self._debug_log("REMOTE FALLBACK ALSO FAILED", str(remote_err))
+
+        # Ultimate fallback: Pollinations API (free, no API key needed)
+        if not text or text.startswith("Error "):
+            try:
+                poll_payload = {
+                    "model": "openai",
+                    "messages": [
+                        {"role": "system", "content": enhanced_sys[:3000]},
+                        {"role": "user", "content": (context + prompt)[:12000] if context else prompt[:12000]},
+                    ],
+                    "max_tokens": 2000,
+                }
+                req = urllib.request.Request(
+                    "https://text.pollinations.ai/openai",
+                    data=json.dumps(poll_payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": "Claudy/1.0"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    poll_data = json.loads(resp.read().decode("utf-8"))
+                choices = poll_data.get("choices") or []
+                if choices:
+                    msg = choices[0].get("message") or {}
+                    poll_text = msg.get("content", "").strip()
+                    if poll_text:
+                        text = poll_text
+                if not text:
+                    text = poll_data.get("response", "").strip()
+            except Exception as poll_err:
+                self._debug_log("POLLINATIONS FALLBACK ALSO FAILED", str(poll_err))
 
         answer = text or "El oraculo me dejo en visto..."
         self._save_memory("Claudy", answer)
         self._fire_hook("on_response", user=prompt, response=answer, source="llm")
+        # Bucle de auto-mejora: registra qué skills fueron relevantes y, al cruzar
+        # el umbral, dispara un refinamiento solo (en background, sin bloquear).
+        if not self._refining_skill:
+            try:
+                threading.Thread(
+                    target=self._record_skill_usage, args=(prompt,), daemon=True,
+                    name="skill-usage").start()
+            except Exception:
+                pass
         # Animacion: feliz brevemente, luego talking si hay voz, sino idle
         try:
             if self._voice_enabled:
@@ -10918,7 +17728,7 @@ Tambien puedes hablar naturalmente:
                 keys = [env_key]
         return keys
 
-    def _call_remote_provider(self, model, system_prompt, context, user_prompt, config):
+    def _call_remote_provider(self, model, system_prompt, context, user_prompt, config, on_delta=None):
         """Call remote AI provider with credential pooling, retry, and inter-provider fallback."""
         last_error = None
 
@@ -10941,19 +17751,19 @@ Tambien puedes hablar naturalmente:
             actual_model = fb_model.partition("/")[2] if "/" in fb_model else fb_model
             for key in keys:
                 try:
-                    return self._call_provider_api(provider, api_url, is_anthropic, is_openai_compat, actual_model, system_prompt, context, user_prompt, key, config)
+                    return self._call_provider_api(provider, api_url, is_anthropic, is_openai_compat, actual_model, system_prompt, context, user_prompt, key, config, on_delta=on_delta)
                 except Exception as e:
                     last_error = e
                     continue
 
         raise RuntimeError(f"All providers/keys exhausted. Last error: {last_error}")
 
-    def _call_provider_api(self, provider, api_url, is_anthropic, is_openai_compat, model, system_prompt, context, user_prompt, key, config):
+    def _call_provider_api(self, provider, api_url, is_anthropic, is_openai_compat, model, system_prompt, context, user_prompt, key, config, on_delta=None):
         """Make a single API call to a provider."""
         if is_anthropic:
             return self._call_anthropic(api_url, model, system_prompt, context, user_prompt, key, config)
         elif is_openai_compat:
-            return self._call_openai_compat(api_url, model, system_prompt, context, user_prompt, key, config)
+            return self._call_openai_compat(api_url, model, system_prompt, context, user_prompt, key, config, on_delta=on_delta)
         else:
             return self._call_generic(api_url, model, system_prompt, context, user_prompt, key, provider)
 
@@ -11019,7 +17829,39 @@ Tambien puedes hablar naturalmente:
             with r.urlopen(req, timeout=90) as resp:
                 return json.loads(resp.read())
 
-    def _call_openai_compat(self, api_url, model, system_prompt, context, user_prompt, key, config=None):
+    def _stream_openai_compat(self, endpoint, payload, headers, on_delta):
+        """SSE streaming for OpenAI-compatible APIs. Calls on_delta(piece) for
+        each token and returns a synthesized response dict with the full text."""
+        import urllib.request as r
+        spayload = dict(payload)
+        spayload["stream"] = True
+        req = r.Request(endpoint, data=json.dumps(spayload).encode("utf-8"), headers=headers)
+        full = []
+        with r.urlopen(req, timeout=120) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", "replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                chunk = line[5:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(chunk)
+                    piece = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                except Exception:
+                    piece = None
+                if piece:
+                    full.append(piece)
+                    try:
+                        on_delta(piece)
+                    except Exception:
+                        pass
+        text = "".join(full)
+        if not text:
+            raise RuntimeError("empty stream")
+        return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+
+    def _call_openai_compat(self, api_url, model, system_prompt, context, user_prompt, key, config=None, on_delta=None):
         """Call OpenAI-compatible API."""
         endpoint = api_url
         messages = [{"role": "system", "content": system_prompt}]
@@ -11042,6 +17884,12 @@ Tambien puedes hablar naturalmente:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key}",
         }
+        # Streaming path: only when a delta callback is provided and tools are off.
+        if on_delta is not None and not (tools_enabled and self.TOOL_REGISTRY):
+            try:
+                return self._stream_openai_compat(endpoint, payload, headers, on_delta)
+            except Exception:
+                pass  # fall back to a normal blocking request on any streaming error
         import urllib.request as r
         req = r.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
         with r.urlopen(req, timeout=90) as resp:
@@ -11096,6 +17944,24 @@ Tambien puedes hablar naturalmente:
     # TELEGRAM BOT
     # ==============================================================
 
+    def _verify_telegram_connection(self):
+        """En segundo plano: confirma que el botToken es aceptado por Telegram
+        (endpoint getMe). Actualiza self._telegram_connected. No bloquea la UI."""
+        ok = False
+        try:
+            cfg = self.load_claudy_config()  # ya desencripta los secretos
+            token = (cfg.get("telegram", {}) or {}).get("botToken", "") or ""
+            if token and not token.startswith("enc:"):
+                import urllib.request
+                url = f"https://api.telegram.org/bot{token}/getMe"
+                with urllib.request.urlopen(url, timeout=6) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+                    ok = bool(data.get("ok"))
+        except Exception:
+            ok = False
+        self._telegram_connected = ok
+        self._telegram_last_check = time.time()
+
     def _start_telegram_if_configured(self):
         """Start the Telegram bot if a token is configured."""
         config = self.load_claudy_config()
@@ -11106,6 +17972,11 @@ Tambien puedes hablar naturalmente:
             return
         self._telegram_token = token
         self._run_telegram_bot(token)
+        # Verificar el estado del token para el indicador de la UI (no bloquea).
+        try:
+            threading.Thread(target=self._verify_telegram_connection, daemon=True).start()
+        except Exception:
+            pass
 
     def _run_telegram_bot(self, token):
         """Launch standalone Telegram bot as a subprocess via the Gateway API."""
@@ -11126,6 +17997,73 @@ Tambien puedes hablar naturalmente:
             )
         except Exception as e:
             print(f"[TelegramBot] Error starting: {e}")
+
+    def _set_telegram_token(self, token):
+        """Guarda el botToken en config y lanza el bot al instante. Sin reiniciar Claudy."""
+        token = (token or "").strip().strip('"\'')
+        if not re.match(r'^\d{6,12}:[A-Za-z0-9_-]{30,}$', token):
+            return ("El token no tiene el formato esperado de Telegram.\n"
+                    "Debe verse algo así: 1234567890:AAEx...AbC. Pide uno a @BotFather.")
+        config_path = os.path.join(os.path.expanduser("~"), ".claudy", "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
+                config = json.load(f)
+        except Exception:
+            config = {}
+        config.setdefault("telegram", {})["botToken"] = token
+        try:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            return f"No pude guardar el token: {e}"
+        self._telegram_token = token
+        try:
+            self._run_telegram_bot(token)
+        except Exception as e:
+            return f"Token guardado, pero falló al arrancar el bot: {e}"
+        try:
+            threading.Thread(target=self._verify_telegram_connection, daemon=True).start()
+        except Exception:
+            pass
+        bot_log = os.path.join(os.path.expanduser("~"), ".claudy", "telegram_bot.log")
+        return ("Token guardado y bot lanzado ✓\n"
+                "Ahora abre Telegram, busca tu bot y mándale /start.\n"
+                "Si no estás autorizado, te dará tu ID — copia ese ID y aquí escribe:\n"
+                "    /vincular <ID>\n"
+                f"Log del bot: {bot_log}")
+
+    def _telegram_status(self):
+        """Devuelve un resumen del estado actual de la integración con Telegram."""
+        config_path = os.path.join(os.path.expanduser("~"), ".claudy", "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+        tg = cfg.get("telegram", {}) or {}
+        token = tg.get("botToken", "") or ""
+        allowed = tg.get("allowedUsers", []) or []
+        tts = bool(tg.get("ttsReply", False))
+        # Estado de dependencias
+        deps = []
+        for mod, label in (("telegram", "python-telegram-bot"),
+                           ("edge_tts", "edge-tts (voz salida)"),
+                           ("faster_whisper", "faster-whisper (voz entrada)")):
+            try:
+                __import__(mod)
+                deps.append(f"✓ {label}")
+            except Exception:
+                deps.append(f"✗ {label} (no instalado)")
+        token_disp = (token[:6] + "…" + token[-4:]) if token else "(no configurado)"
+        return (
+            "Estado de Telegram\n"
+            f"  Token:          {token_disp}\n"
+            f"  Usuarios:       {', '.join(map(str, allowed)) if allowed else '(ninguno autorizado)'}\n"
+            f"  Voz de salida:  {'ON' if tts else 'OFF'}  (/telegram-voice on|off)\n"
+            "  Dependencias:\n    " + "\n    ".join(deps) + "\n"
+            "Comandos: /telegram-token <TOKEN>  ·  /vincular <ID>  ·  /telegram-voice on|off"
+        )
 
     def _vincular_telegram_user(self, uid):
         """Add a Telegram user ID to the allowed list."""
@@ -11270,6 +18208,9 @@ print(f"[Subagent] Completado")
     # --- Kanban Board ---
 
     def _kanban_db(self):
+        drive_dir = r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\AGENTES-MEMORY\claudy_local"
+        if os.path.isdir(drive_dir):
+            return os.path.join(drive_dir, "kanban.db")
         return os.path.join(os.path.expanduser("~"), ".claudy", "kanban.db")
 
     def _init_kanban_db(self):
@@ -11473,5 +18414,24 @@ print(f"[Subagent] Completado")
 
 
 if __name__ == "__main__":
-    app = ClawdPet()
-    app.mainloop()
+    app_ready = threading.Event()
+    app = None
+
+    def run_app():
+        global app
+        app = ClawdPet()
+        try:
+            app._restore_pending_alarms()
+        except Exception:
+            pass
+        app_ready.set()
+        app.mainloop()
+
+    t = threading.Thread(target=run_app, daemon=True, name="tkinter-mainloop")
+    t.start()
+
+    # Wait for the app to be initialized (with timeout to avoid indefinite blocking)
+    app_ready.wait(timeout=10.0)
+
+    # Now, run PyWebView on the main thread!
+    app._run_webview_main_thread()

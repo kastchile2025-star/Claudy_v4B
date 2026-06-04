@@ -654,6 +654,181 @@ def _artifact_marker(path):
     return f"Ubicacion: {folder}\n[CLAUDY_PATH:{path}]"
 
 
+def _resolve_existing_path(path):
+    target = _clean_user_path(path)
+    if not target:
+        return ""
+    if os.path.exists(target):
+        return target
+    return ""
+
+
+def _unique_destination(dest):
+    if not os.path.exists(dest):
+        return dest
+    base, ext = os.path.splitext(dest)
+    i = 1
+    while True:
+        candidate = f"{base} ({i}){ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
+
+
+def _parse_two_paths(raw):
+    raw = (raw or "").strip()
+    for sep in (" -> ", " => ", " | "):
+        if sep in raw:
+            left, right = raw.split(sep, 1)
+            return left.strip().strip('"\''), right.strip().strip('"\'')
+    m = re.match(r"(.+?)\s+(?:a|hacia|en|dentro de|to)\s+(.+)$", raw, re.I)
+    if m:
+        return m.group(1).strip().strip('"\''), m.group(2).strip().strip('"\'')
+    return raw.strip().strip('"\''), ""
+
+
+def _prepare_copy_move_paths(src, dest):
+    src_path = _resolve_existing_path(src)
+    if not src_path:
+        return "", "", f"No encuentro el origen: {src}"
+    dest_path = _clean_user_path(dest)
+    if not dest_path:
+        return "", "", "Falta la ruta destino."
+    if os.path.isdir(dest_path):
+        dest_path = os.path.join(dest_path, os.path.basename(src_path))
+    elif not os.path.splitext(os.path.basename(dest_path))[1] and os.path.isdir(os.path.dirname(dest_path) or "."):
+        # Treat a destination without extension as a folder-like target when it exists.
+        pass
+    return src_path, _unique_destination(dest_path), ""
+
+
+def search_local_files(query, root="", max_results=80):
+    """Find files/folders by name on this PC. Defaults to the user's home folder."""
+    query = (query or "").strip().strip('"\'')
+    if not query:
+        return "Dime que archivo o carpeta quieres buscar."
+    root_path = _clean_user_path(root) if root else os.path.expanduser("~")
+    if not os.path.isdir(root_path):
+        return f"No es directorio: {root_path}"
+    qlow = query.lower()
+    results = []
+    for r, dirs, files in os.walk(root_path):
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
+        for name in sorted(dirs + files):
+            if qlow in name.lower():
+                full = os.path.join(r, name)
+                try:
+                    kind = "carpeta" if os.path.isdir(full) else "archivo"
+                    size = "" if os.path.isdir(full) else f" {_human_size(os.path.getsize(full))}"
+                    results.append(f"{kind}: {full}{size}")
+                except Exception:
+                    results.append(full)
+                if len(results) >= int(max_results):
+                    return "\n".join(results) + f"\n\n[truncado a {max_results} resultados]"
+    return "\n".join(results) if results else f"Sin resultados para '{query}' en {root_path}."
+
+
+def copy_path(src, dest):
+    src_path, dest_path, err = _prepare_copy_move_paths(src, dest)
+    if err:
+        return err
+    try:
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        if os.path.isdir(src_path):
+            shutil.copytree(src_path, dest_path)
+        else:
+            shutil.copy2(src_path, dest_path)
+        return f"Copiado:\nOrigen: {src_path}\nDestino: {dest_path}\n{_artifact_marker(dest_path)}"
+    except Exception as e:
+        return f"Error copiando: {e}"
+
+
+def move_path(src, dest):
+    """Move is the filesystem equivalent of cut/paste. It never deletes extra targets."""
+    src_path, dest_path, err = _prepare_copy_move_paths(src, dest)
+    if err:
+        return err
+    try:
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        final_path = shutil.move(src_path, dest_path)
+        return f"Cortado/movido:\nOrigen anterior: {src_path}\nDestino: {final_path}\n{_artifact_marker(final_path)}"
+    except Exception as e:
+        return f"Error moviendo: {e}"
+
+
+_PENDING_DELETE = {}
+
+
+def _delete_token(path):
+    base = os.path.basename(path) or "ruta"
+    return re.sub(r"[^A-Za-z0-9]+", "", base).upper()[:12] or "RUTA"
+
+
+def _describe_delete_impact(path):
+    if os.path.isdir(path):
+        count = 0
+        for _, _, files in os.walk(path):
+            count += len(files)
+            if count > 500:
+                return "carpeta con mas de 500 archivos"
+        return f"carpeta con {count} archivos"
+    try:
+        return f"archivo de {_human_size(os.path.getsize(path))}"
+    except Exception:
+        return "archivo/carpeta"
+
+
+def request_delete_double_confirmation(path):
+    target = _resolve_existing_path(path)
+    if not target:
+        return f"No encuentro la ruta a borrar: {path}"
+    token = _delete_token(target)
+    _PENDING_DELETE[token] = {"path": target, "stage": 1, "ts": time.time()}
+    impact = _describe_delete_impact(target)
+    return (
+        "Borrado bloqueado por seguridad.\n"
+        f"Ruta: {target}\n"
+        f"Impacto: esto eliminaria {impact} y podria no recuperarse.\n\n"
+        "Confirmacion 1 de 2 requerida. Si realmente es necesario, responde exactamente:\n"
+        f"CONFIRMO BORRAR {token}"
+    )
+
+
+def confirm_delete(text):
+    cleaned = (text or "").strip()
+    m1 = re.match(r"^CONFIRMO BORRAR ([A-Z0-9]+)$", cleaned, re.I)
+    if m1:
+        token = m1.group(1).upper()
+        pending = _PENDING_DELETE.get(token)
+        if not pending:
+            return "No hay una solicitud de borrado pendiente con ese codigo."
+        pending["stage"] = 2
+        target = pending["path"]
+        return (
+            "Confirmacion 1 recibida. Aun no borro nada.\n"
+            f"Ruta: {target}\n"
+            "Confirmacion 2 de 2 requerida. Esto es irreversible o dificil de recuperar.\n"
+            f"Responde exactamente: CONFIRMO DEFINITIVO BORRAR {token}"
+        )
+    m2 = re.match(r"^CONFIRMO DEFINITIVO BORRAR ([A-Z0-9]+)$", cleaned, re.I)
+    if m2:
+        token = m2.group(1).upper()
+        pending = _PENDING_DELETE.get(token)
+        if not pending or pending.get("stage") != 2:
+            return "Falta la primera confirmacion o no hay solicitud pendiente."
+        target = pending["path"]
+        try:
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            else:
+                os.remove(target)
+            _PENDING_DELETE.pop(token, None)
+            return f"Borrado ejecutado tras doble confirmacion: {target}"
+        except Exception as e:
+            return f"No pude borrar: {e}"
+    return ""
+
+
 def _file_backups_dir():
     d = os.path.join(os.path.expanduser("~"), ".claudy", "file_backups")
     os.makedirs(d, exist_ok=True)
@@ -795,6 +970,102 @@ def create_docx(path, content=""):
         return f"Error creando docx: {e}"
 
 
+def create_docx_with_images(path, content="", image_paths=None):
+    """Create a .docx file with Markdown content and optionally embed local images."""
+    target = _clean_user_path(path) if not os.path.isabs(path) else path
+    if not target:
+        return "Falta la ruta del archivo."
+    if not target.lower().endswith(".docx"):
+        target += ".docx"
+    try:
+        from docx import Document
+        from docx.shared import Inches, Pt, RGBColor
+    except ImportError:
+        import sys, subprocess
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "python-docx"])
+            from docx import Document
+            from docx.shared import Inches, Pt, RGBColor
+        except Exception as e:
+            return f"Falta python-docx y no se pudo auto-instalar: {e}"
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        doc = Document()
+
+        # Professional margins
+        for section in doc.sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1.25)
+            section.right_margin = Inches(1.25)
+
+        # Typography
+        style = doc.styles["Normal"]
+        font = style.font
+        font.name = "Calibri"
+        font.size = Pt(11)
+        font.color.rgb = RGBColor(0x33, 0x33, 0x33)
+
+        h1_style = doc.styles["Heading 1"]
+        h1_style.font.name = "Georgia"
+        h1_style.font.size = Pt(20)
+        h1_style.font.bold = True
+        h1_style.font.color.rgb = RGBColor(0x1F, 0x4E, 0x78)
+
+        h2_style = doc.styles["Heading 2"]
+        h2_style.font.name = "Georgia"
+        h2_style.font.size = Pt(14)
+        h2_style.font.bold = True
+        h2_style.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
+
+        h3_style = doc.styles["Heading 3"]
+        h3_style.font.name = "Georgia"
+        h3_style.font.size = Pt(12)
+        h3_style.font.bold = True
+        h3_style.font.italic = True
+        h3_style.font.color.rgb = RGBColor(0x56, 0x56, 0x56)
+
+        # Parse and write content
+        for line in (content or "").split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                doc.add_heading(stripped[2:], level=1)
+            elif stripped.startswith("## "):
+                doc.add_heading(stripped[3:], level=2)
+            elif stripped.startswith("### "):
+                doc.add_heading(stripped[4:], level=3)
+            elif stripped.startswith("- ") or stripped.startswith("* "):
+                p = doc.add_paragraph(stripped[2:], style="List Bullet")
+                p.paragraph_format.space_after = Pt(3)
+            elif stripped.startswith("**") and stripped.endswith("**"):
+                p = doc.add_paragraph()
+                run = p.add_run(stripped.strip("*"))
+                run.bold = True
+                p.paragraph_format.space_after = Pt(4)
+            else:
+                p = doc.add_paragraph(line)
+                p.paragraph_format.space_after = Pt(6)
+
+        # Embed images if provided
+        if image_paths:
+            doc.add_page_break()
+            doc.add_heading("Imágenes de Referencia", level=2)
+            for img_path in (image_paths or []):
+                if img_path and os.path.isfile(img_path):
+                    try:
+                        doc.add_picture(img_path, width=Inches(5.5))
+                        cap = doc.add_paragraph(os.path.splitext(os.path.basename(img_path))[0].replace("_", " "))
+                        cap.alignment = 1  # centered
+                        cap.paragraph_format.space_after = Pt(12)
+                    except Exception:
+                        pass
+
+        doc.save(target)
+        size = os.path.getsize(target)
+        return f"Archivo creado: {target}\nTamano: {size} bytes\n{_artifact_marker(target)}"
+    except Exception as e:
+        return f"Error creando docx: {e}"
+
 def create_xlsx(path, data=None, title=""):
     """Create a styled .xlsx workbook.
 
@@ -804,6 +1075,7 @@ def create_xlsx(path, data=None, title=""):
       - list[dict]: rows; headers inferred from first dict
     """
     target = _clean_user_path(path)
+
     if not target:
         return "Falta la ruta del archivo."
     if not target.lower().endswith(".xlsx"):
@@ -1393,7 +1665,7 @@ def analyze_folder_with_llm(path, llm_callable):
 INTENT_PATTERNS = [
     # APPS
     (re.compile(r"^(?:instala(?:me|r)?|install|instalar)\s+(.+)$", re.I), "install"),
-    (re.compile(r"^(?:desinstala(?:me|r)?|quitame|borra(?:me)?|uninstall)\s+(.+)$", re.I), "uninstall"),
+    (re.compile(r"^(?:desinstala(?:me|r)?|uninstall)\s+(.+)$", re.I), "uninstall"),
     (re.compile(r"^(?:abre(?:me)?|abrir|lanza|launch|inicia|inicializa|ejecuta)\s+(.+)$", re.I), "launch"),
     (re.compile(r"^(?:cierra(?:me)?|cerrar|kill|mata|termina|cierralo)\s+(.+)$", re.I), "close"),
     (re.compile(r"^(?:descarga(?:me|r)?|baja(?:me|r)?|download)\s+(\S+)\s*$", re.I), "download"),
@@ -1405,6 +1677,7 @@ INTENT_PATTERNS = [
     (re.compile(r"^(?:env[ií]a(?:me)?|m[aá]nda(?:me)?|toma(?:me)?|saca(?:me)?|hazme|haceme|hac[eé]me|p[aá]same|comp[aá]rteme|dame)\s+(?:un(?:a|os|as)?\s+|el\s+|la\s+|los\s+|las\s+)?(?:print(?:\s+de\s+pantalla)?|pantallazo|captura(?:\s+de\s+pantalla)?|screenshot|screencap|recorte)(?:\s+(?:por|al|via|con)\s+\w+)?\s*$", re.I), "screenshot_send"),
     (re.compile(r"^(?:print(?:\s+de\s+pantalla)?|pantallazo|captura(?:\s+de\s+pantalla)?|screenshot|recorte)\s*$", re.I), "screenshot_send"),
     # FILESYSTEM
+    (re.compile(r"^(?:busca(?:me|r)?|encuentra|find)\s+(?:el\s+|la\s+)?(?:archivo|carpeta|file|folder)?\s*[\"']?(.+?)[\"']?\s+(?:en\s+)?(?:este\s+pc|mi\s+pc|la\s+computadora|el\s+computador|todo\s+el\s+pc)\s*$", re.I), "search_local"),
     (re.compile(r"^(?:analiza(?:me)?|analizar|revisa(?:me)?|explora(?:me)?|escanea(?:me)?)\s+(?:la\s+)?(?:carpeta|directorio|folder)?\s*(.+)$", re.I), "analyze_folder"),
     (re.compile(r"^(?:que\s+hay\s+en|listame\s+(?:la\s+)?(?:carpeta|directorio)|listar?)\s+(.+)$", re.I), "list_folder"),
     (re.compile(r"^(?:arbol|tree|estructura)\s+(?:de\s+)?(.+)$", re.I), "tree"),
@@ -1418,7 +1691,37 @@ def detect_intent_filesystem_smart(prompt):
     """Special handling for 'busca X en Y' to return two args."""
     text = prompt.strip()
 
+    delete_confirm = confirm_delete(text)
+    if delete_confirm:
+        return ("delete_confirm", delete_confirm)
+
     create_verb = r"(?:cr[eé]a(?:me|r)?|nuevo|nueva|genera|haz(?:me)?|hacer)"
+
+    m = re.match(
+        r"^(?:copia(?:me|r)?|duplic(?:a|ar)|copy)\s+(.+)$",
+        text,
+        re.I,
+    )
+    if m:
+        src, dest = _parse_two_paths(m.group(1))
+        return ("copy_path", (src, dest))
+
+    m = re.match(
+        r"^(?:corta(?:me|r)?|mueve(?:me|r)?|traslada(?:me|r)?|move|cut)\s+(.+)$",
+        text,
+        re.I,
+    )
+    if m:
+        src, dest = _parse_two_paths(m.group(1))
+        return ("move_path", (src, dest))
+
+    m = re.match(
+        r"^(?:borra(?:me|r)?|elimina(?:me|r)?|delete|remove|quita(?:me|r)?)\s+(.+)$",
+        text,
+        re.I,
+    )
+    if m:
+        return ("request_delete", m.group(1).strip())
 
     # "dentro de X / en X, crea (una) carpeta Y"
     m = re.match(
@@ -1510,6 +1813,9 @@ def detect_intent_filesystem_smart(prompt):
 
     m = re.match(r"^(?:busca(?:r)?|encuentra|find|grep)\s+[\"']?(.+?)[\"']?\s+en\s+(.+)$", text, re.I)
     if m:
+        location = m.group(2).strip()
+        if re.match(r"^(?:este\s+pc|mi\s+pc|la\s+computadora|el\s+computador|todo\s+el\s+pc)$", location, re.I):
+            return ("search_local", m.group(1).strip())
         return ("find_in", (m.group(1).strip(), m.group(2).strip()))
     return None
 
@@ -1557,6 +1863,15 @@ def detect_intent(prompt):
             if intent in ("analyze_folder", "list_folder", "tree", "folder_info"):
                 if not _looks_like_path(arg):
                     return None, None
+            # QCORE products are handled by pet.py's specialized launcher (with analysis)
+            if intent == "launch":
+                _qcore_names = [
+                    "mission control", "missioncontrol", "mision control", "misioncontrol",
+                    "smartstudent", "smart student", "roadix", "luxium",
+                    "unitcore", "unit core", "campaign studio", "campaignstudio",
+                ]
+                if any(q in arg.lower() for q in _qcore_names):
+                    return None, None
             return intent, arg
     return None, None
 
@@ -1593,6 +1908,8 @@ def _looks_like_file_target(s):
 
 
 def execute_intent(intent, arg):
+    if intent == "delete_confirm":
+        return arg
     if intent == "install":
         return install_app(arg)
     if intent == "uninstall":
@@ -1614,6 +1931,20 @@ def execute_intent(intent, arg):
     if intent == "screenshot_send":
         return screenshot_for_send()
     # FILESYSTEM intents
+    if intent == "search_local":
+        return search_local_files(arg)
+    if intent == "copy_path":
+        if isinstance(arg, tuple):
+            return copy_path(arg[0], arg[1] if len(arg) > 1 else "")
+        src, dest = _parse_two_paths(arg)
+        return copy_path(src, dest)
+    if intent == "move_path":
+        if isinstance(arg, tuple):
+            return move_path(arg[0], arg[1] if len(arg) > 1 else "")
+        src, dest = _parse_two_paths(arg)
+        return move_path(src, dest)
+    if intent == "request_delete":
+        return request_delete_double_confirmation(arg)
     if intent == "create_folder":
         return create_folder(arg)
     if intent == "write_file":

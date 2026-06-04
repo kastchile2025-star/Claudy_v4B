@@ -11,11 +11,99 @@ Design principles (impeccable / product register):
 from __future__ import annotations
 
 import math
+import re
 import time
 import tkinter as tk
 from datetime import datetime
 
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageTk
+
+
+# -------------------- markdown rendering helpers --------------------
+
+def _insert_inline_markdown(text_widget: tk.Text, text: str, base_tag: str) -> None:
+    # Regex to find **bold** or `code`
+    pattern = re.compile(r"(\*\*.*?\*\*|`.*?`)")
+    parts = pattern.split(text)
+    
+    for part in parts:
+        if part.startswith("**") and part.endswith("**"):
+            # Bold
+            clean_part = part[2:-2]
+            text_widget.insert("end", clean_part, "bold")
+        elif part.startswith("`") and part.endswith("`"):
+            # Inline code
+            clean_part = part[1:-1]
+            text_widget.insert("end", clean_part, "code")
+        else:
+            # Plain text
+            text_widget.insert("end", part, base_tag)
+
+
+def _insert_markdown(text_widget: tk.Text, text: str, theme: dict) -> None:
+    # Clear any previous content
+    text_widget.configure(state="normal")
+    text_widget.delete("1.0", "end")
+    
+    # Configure tags
+    accent = theme.get("accent", "#c4b5fd")
+    text_primary = theme.get("text_primary", "#ece9f5")
+    panel_soft = theme.get("panel_soft", "#171520")
+    accent_glow = theme.get("accent_glow", "#8bf7ff")
+    
+    # Fonts
+    font_family = "Bahnschrift"
+    font_normal = (font_family, 11)
+    font_bold = ("Bahnschrift SemiBold", 11)
+    font_header = ("Bahnschrift SemiBold", 13)
+    font_code = ("Consolas", 10)
+    
+    text_widget.tag_configure("normal", font=font_normal, foreground=text_primary)
+    text_widget.tag_configure("header", font=font_header, foreground=accent, spacing1=8, spacing3=4)
+    text_widget.tag_configure("bold", font=font_bold, foreground=text_primary)
+    text_widget.tag_configure("code", font=font_code, foreground=accent_glow, background=panel_soft)
+    text_widget.tag_configure("code_block", font=font_code, foreground=text_primary, background=panel_soft, lmargin1=15, lmargin2=15, rmargin=15, spacing1=4, spacing3=4)
+    text_widget.tag_configure("bullet", font=font_normal, foreground=text_primary, lmargin1=12, lmargin2=24)
+    
+    lines = text.split("\n")
+    in_code_block = False
+    
+    for i, line in enumerate(lines):
+        # Code block toggle
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+            
+        if in_code_block:
+            # Insert as code block line
+            text_widget.insert("end", line + "\n", "code_block")
+            continue
+            
+        # Header 1, 2, 3
+        if line.startswith("# ") or line.startswith("## ") or line.startswith("### ") or line.startswith("#### "):
+            # Strip markdown chars
+            clean_line = line.lstrip("#").strip()
+            text_widget.insert("end", clean_line + "\n", "header")
+            continue
+            
+        # Bullet list
+        if line.strip().startswith("- ") or line.strip().startswith("* "):
+            clean_line = line.strip()[2:]
+            text_widget.insert("end", "•  ", "bullet")
+            _insert_inline_markdown(text_widget, clean_line, "bullet")
+            text_widget.insert("end", "\n", "bullet")
+            continue
+            
+        # Standard line - parse inline markdown
+        _insert_inline_markdown(text_widget, line, "normal")
+        text_widget.insert("end", "\n", "normal")
+        
+    # Remove last trailing newline
+    if text_widget.get("end-2c", "end-1c") == "\n":
+        text_widget.configure(state="normal")
+        text_widget.delete("end-2c", "end-1c")
+        
+    text_widget.configure(state="disabled")
 
 
 # -------------------- helpers --------------------
@@ -48,41 +136,128 @@ def _font(size: int, weight: str = "normal") -> ImageFont.FreeTypeFont:
             return ImageFont.load_default()
 
 
+# Cache for bubble images — avoids re-rendering the same bubble shape repeatedly.
+_bubble_cache: dict[tuple, Image.Image] = {}
+
 def _bubble_asymmetric(
     width: int,
     height: int,
     fill: str,
     border: str | None,
     role: str,
+    style: str = "glass",
 ) -> Image.Image:
+    cache_key = (width, height, fill, border, role, style)
+    cached = _bubble_cache.get(cache_key)
+    if cached is not None:
+        return cached.copy()
     """Bubble with role-specific asymmetric corner radii.
 
-    user → squared top-right (16, 4, 16, 16)
-    bot  → squared top-left  (4, 16, 16, 16)
+    user → squared top-right (16, 4, 16, 16) + diagonal gradient (or solid in minimal)
+    bot  → squared top-left  (4, 16, 16, 16) + solid glass
     """
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    fill_rgb = _hex_to_rgb(fill)
+
+    mask = Image.new("L", (width, height), 0)
+    d_mask = ImageDraw.Draw(mask)
     if role == "user":
         radii = (16, 4, 16, 16)
     else:
         radii = (4, 16, 16, 16)
+
     try:
-        d.rounded_rectangle((0, 0, width - 1, height - 1),
-                            radius=14, fill=(*fill_rgb, 255), corners=radii)
+        d_mask.rounded_rectangle((0, 0, width - 1, height - 1),
+                                 radius=14, fill=255, corners=radii)
     except TypeError:
-        # Pillow < 9.2 fallback: uniform radius
-        d.rounded_rectangle((0, 0, width - 1, height - 1),
-                            radius=14, fill=(*fill_rgb, 255))
-    if border:
+        d_mask.rounded_rectangle((0, 0, width - 1, height - 1),
+                                 radius=14, fill=255)
+
+    fill_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d_fill = ImageDraw.Draw(fill_img)
+
+    def _fast_diagonal_gradient(cs, ce, w, h, img):
+        """Draw a diagonal gradient using fast scanline draws instead of putpixel.
+
+        Uses row-based color blending: each row gets a color that is the average
+        of the start-of-row and end-of-row diagonal interpolation. This is
+        visually identical to per-pixel but ~100x faster since ImageDraw.line()
+        runs in C.
+        """
+        d = ImageDraw.Draw(img)
+        max_d = max(1, w + h)
+        for y in range(h):
+            t0 = y / max_d           # left edge
+            t1 = (w + y) / max_d     # right edge
+            # start color for this row
+            r0 = int(cs[0] + (ce[0] - cs[0]) * t0)
+            g0 = int(cs[1] + (ce[1] - cs[1]) * t0)
+            b0 = int(cs[2] + (ce[2] - cs[2]) * t0)
+            # end color for this row
+            r1 = int(cs[0] + (ce[0] - cs[0]) * t1)
+            g1 = int(cs[1] + (ce[1] - cs[1]) * t1)
+            b1 = int(cs[2] + (ce[2] - cs[2]) * t1)
+            # mid color — simple average of start/end for a smooth look
+            rm = (r0 + r1) // 2
+            gm = (g0 + g1) // 2
+            bm = (b0 + b1) // 2
+            d.line([(0, y), (w, y)], fill=(rm, gm, bm, 255))
+
+    if role == "user":
+        if style == "minimal":
+            # Solid minimal user bubble (pure white)
+            fill_rgb = _hex_to_rgb(fill)
+            d_fill.rectangle((0, 0, width, height), fill=(*fill_rgb, 255))
+        elif style == "vintage":
+            # Parchment tinted user bubble — warm sepia gradient
+            _fast_diagonal_gradient(
+                (139, 69, 19), (160, 82, 45),
+                width, height, fill_img,
+            )
+        else:
+            # Gradient indigo-to-violet (vivid, high contrast)
+            _fast_diagonal_gradient(
+                (80, 40, 220), (180, 30, 255),
+                width, height, fill_img,
+            )
+    else:
+        if style == "vintage":
+            # Parchment bot bubble — warm cream
+            d_fill.rectangle((0, 0, width, height), fill=(203, 185, 143, 255))  # #cbb98f
+        else:
+            # Bot bubble: solid color matching the theme's bot message background
+            fill_rgb = _hex_to_rgb(fill)
+            d_fill.rectangle((0, 0, width, height), fill=(*fill_rgb, 255))
+
+    fill_img.putalpha(mask)
+    img = Image.alpha_composite(img, fill_img)
+
+    # Glow outline on user bubbles for extra pop
+    if role == "user" and style not in ("minimal", "vintage"):
+        glow_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow_layer)
         try:
-            d.rounded_rectangle((0, 0, width - 1, height - 1),
-                                radius=14, outline=(*_hex_to_rgb(border), 255),
-                                width=1, corners=radii)
+            glow_draw.rounded_rectangle((1, 1, width - 2, height - 2), radius=12,
+                                        outline=(88, 199, 255, 90), width=1)
         except TypeError:
-            d.rounded_rectangle((0, 0, width - 1, height - 1),
-                                radius=14, outline=(*_hex_to_rgb(border), 255),
-                                width=1)
+            glow_draw.rounded_rectangle((1, 1, width - 2, height - 2), radius=12,
+                                        outline=(88, 199, 255, 90))
+        img = Image.alpha_composite(img, glow_layer)
+
+    if border:
+        d_border = ImageDraw.Draw(img)
+        border_rgb = _hex_to_rgb(border)
+        try:
+            d_border.rounded_rectangle((0, 0, width - 1, height - 1),
+                                       radius=14, outline=(*border_rgb, 255),
+                                       width=1, corners=radii)
+        except TypeError:
+            d_border.rounded_rectangle((0, 0, width - 1, height - 1),
+                                       radius=14, outline=(*border_rgb, 255),
+                                       width=1)
+    # Store in cache (limit to 64 entries to avoid memory leaks)
+    if len(_bubble_cache) > 64:
+        _bubble_cache.clear()
+    _bubble_cache[cache_key] = img.copy()
     return img
 
 
@@ -109,18 +284,29 @@ def _avatar_monogram(size: int, fill: str, fg: str, char: str, role: str) -> Ima
 
 
 def _get_bot_avatar(size: int, fill: str, fg: str) -> Image.Image:
-    """Load the current active skin frame as bot avatar, fallback to monogram."""
+    """Load the current active skin frame as bot avatar with circular mask and accent ring."""
     import os
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         claudy_avatar_path = os.path.join(script_dir, "claudy_orbit_frame_0.png")
         if os.path.exists(claudy_avatar_path):
-            img = Image.open(claudy_avatar_path).convert("RGBA")
-            # Ensure clean binary transparency threshold matching the 3D sprite
-            r, g, b, alpha = img.split()
+            raw = Image.open(claudy_avatar_path).convert("RGBA")
+            r, g, b, alpha = raw.split()
             binary_alpha = alpha.point(lambda p: 255 if p > 30 else 0)
-            img = Image.merge("RGBA", (r, g, b, binary_alpha))
-            return img.resize((size, size), Image.Resampling.LANCZOS)
+            raw = Image.merge("RGBA", (r, g, b, binary_alpha))
+            inner = size - 4
+            raw = raw.resize((inner, inner), Image.Resampling.LANCZOS)
+            # Circular mask on the sprite
+            circle_mask = Image.new("L", (inner, inner), 0)
+            ImageDraw.Draw(circle_mask).ellipse((0, 0, inner - 1, inner - 1), fill=255)
+            raw.putalpha(circle_mask)
+            # Compose on canvas with accent ring
+            out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            ring_d = ImageDraw.Draw(out)
+            ring_rgb = _hex_to_rgb(fg)
+            ring_d.ellipse((0, 0, size - 1, size - 1), outline=(*ring_rgb, 200), width=2)
+            out.paste(raw, (2, 2), raw)
+            return out
     except Exception:
         pass
     return _avatar_monogram(size, fill, fg, "C", "bot")
@@ -129,10 +315,10 @@ def _get_bot_avatar(size: int, fill: str, fg: str) -> Image.Image:
 # -------------------- ChatView --------------------
 
 # Tipografía: escala 1.2, una familia.
-FONT_BODY = ("Segoe UI", 11)
-FONT_BADGE = ("Segoe UI", 8, "bold")
-FONT_TS = ("Segoe UI", 9)
-FONT_SYS = ("Segoe UI", 10, "italic")
+FONT_BODY = ("Bahnschrift", 12)
+FONT_BADGE = ("Bahnschrift SemiBold", 8)
+FONT_TS = ("Bahnschrift SemiBold", 9)
+FONT_SYS = ("Bahnschrift", 10, "italic")
 
 
 class ChatView(tk.Frame):
@@ -144,7 +330,8 @@ class ChatView(tk.Frame):
         height: int = 280,
         **kw,
     ) -> None:
-        super().__init__(parent, bg=theme.get("bg_bubble", "#0f0e14"),
+        panel_bg = theme.get("panel_bg", theme.get("bg_bubble", "#0f0e14"))
+        super().__init__(parent, bg=panel_bg,
                          highlightthickness=0, bd=0, **kw)
         self.theme = theme
         self._width = width
@@ -158,22 +345,22 @@ class ChatView(tk.Frame):
         self._last_role: str | None = None
 
         self.canvas = tk.Canvas(
-            self, bg=theme.get("bg_bubble", "#0f0e14"),
+            self, bg=panel_bg,
             highlightthickness=0, bd=0, width=width, height=height,
         )
         self.scroll = tk.Scrollbar(
-            self, orient="vertical", width=3,
-            bg=theme.get("bg_bubble_border", "#2a2733"),
-            troughcolor=theme.get("bg_bubble", "#0f0e14"),
+            self, orient="vertical", width=4,
+            bg=panel_bg, troughcolor=panel_bg,
             activebackground=theme.get("accent", "#c4b5fd"),
             highlightthickness=0, bd=0, relief="flat",
             command=self.canvas.yview,
         )
         self.canvas.configure(yscrollcommand=self.scroll.set)
+        # Scrollbar visible on right side for easy navigation
         self.scroll.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
 
-        self._inner = tk.Frame(self.canvas, bg=theme.get("bg_bubble", "#0f0e14"))
+        self._inner = tk.Frame(self.canvas, bg=panel_bg)
         self._inner_id = self.canvas.create_window(0, 0, anchor="nw", window=self._inner)
         self._inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
@@ -198,12 +385,12 @@ class ChatView(tk.Frame):
         message: str = "Listo. Archivo generado",
     ) -> None:
         """Compact card with file icon, name, message, and clickable folder button."""
-        bg_bubble = self.theme.get("bg_bubble", "#0f0e14")
-        surface = self.theme.get("bg_bubble_border", "#2a2733")
+        bg_bubble = self.theme.get("panel_bg", self.theme.get("bg_bubble", "#0f0e14"))
+        surface = self.theme.get("message_bot", self.theme.get("bg_bubble_border", "#2a2733"))
         accent = self.theme.get("accent", "#c4b5fd")
         text_primary = self.theme.get("text_primary", "#ece9f5")
         text_secondary = self.theme.get("text_secondary", "#8a8499")
-        divider = self.theme.get("divider", "#1d1b26")
+        divider = self.theme.get("message_bot_border", self.theme.get("divider", "#1d1b26"))
 
         pad_top = 10 if self._last_role else 6
         row = tk.Frame(self._inner, bg=bg_bubble)
@@ -218,8 +405,8 @@ class ChatView(tk.Frame):
         # Card body — bot-style bubble.
         ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").upper()
         card_w = max(220, min(self._width - 80, 300))
-        card_h = 64
-        bubble_img = _bubble_asymmetric(card_w, card_h, surface, divider, "bot")
+        card_h = 70
+        bubble_img = _bubble_asymmetric(card_w, card_h, surface, divider, "bot", self.theme.get("style", "glass"))
         btkimg = ImageTk.PhotoImage(bubble_img)
         self._image_refs.append(btkimg)
 
@@ -230,20 +417,21 @@ class ChatView(tk.Frame):
         canvas.create_image(0, 0, anchor="nw", image=btkimg)
 
         # File icon tag.
-        canvas.create_rectangle(14, 16, 46, 48, fill=accent, outline="",
+        canvas.create_rectangle(14, 19, 46, 51, fill=accent, outline="",
                                 tags=("file_icon",))
-        canvas.create_text(30, 32, text=ext or "DOC",
+        canvas.create_text(30, 35, text=ext or "DOC",
                            fill=self.theme.get("bg_bubble"),
                            font=("Segoe UI", 8, "bold"),
                            tags=("file_icon",))
 
         # Filename (truncated) + message.
         display_name = filename if len(filename) <= 38 else filename[:35] + "..."
-        canvas.create_text(56, 16, anchor="nw", text=display_name,
+        canvas.create_text(56, 14, anchor="nw", text=display_name,
                            fill=text_primary, font=("Segoe UI", 10, "bold"),
-                           tags=("file_open",))
-        canvas.create_text(56, 34, anchor="nw", text=message,
-                           fill=text_secondary, font=("Segoe UI", 9))
+                           width=card_w - 70, tags=("file_open",))
+        canvas.create_text(56, 32, anchor="nw", text=message,
+                           fill=text_secondary, font=("Segoe UI", 9),
+                           width=card_w - 70)
 
         if on_open_file:
             canvas.tag_bind("file_icon", "<Button-1>", lambda _e: on_open_file())
@@ -278,8 +466,8 @@ class ChatView(tk.Frame):
     def show_typing(self) -> None:
         if self._typing_widget is not None:
             return
-        bg_bubble = self.theme.get("bg_bubble", "#0f0e14")
-        surface = self.theme.get("bg_bubble_border", "#2a2733")
+        bg_bubble = self.theme.get("panel_bg", self.theme.get("bg_bubble", "#0f0e14"))
+        surface = self.theme.get("message_bot", self.theme.get("bg_bubble_border", "#2a2733"))
         accent = self.theme.get("accent", "#c4b5fd")
 
         wrap = tk.Frame(self._inner, bg=bg_bubble)
@@ -291,7 +479,7 @@ class ChatView(tk.Frame):
         av = tk.Label(wrap, image=atkimg, bg=bg_bubble, bd=0)
         av.pack(side="left", padx=(0, 8))
 
-        bubble = _bubble_asymmetric(46, 22, surface, self.theme.get("divider"), "bot")
+        bubble = _bubble_asymmetric(46, 22, surface, self.theme.get("divider"), "bot", self.theme.get("style", "glass"))
         bimg = ImageTk.PhotoImage(bubble)
         self._image_refs.append(bimg)
         canvas = tk.Canvas(wrap, width=bubble.width, height=bubble.height,
@@ -328,8 +516,8 @@ class ChatView(tk.Frame):
 
     def add_options(self, options: list, on_select) -> None:
         """Render beautiful, interactive, clickable options for guided flows."""
-        bg_bubble = self.theme.get("bg_bubble", "#0f0e14")
-        bg_input = self.theme.get("bg_input", "#171520")
+        bg_bubble = self.theme.get("panel_bg", self.theme.get("bg_bubble", "#0f0e14"))
+        bg_input = self.theme.get("panel_soft", self.theme.get("bg_input", "#171520"))
         accent = self.theme.get("accent", "#c4b5fd")
         text_primary = self.theme.get("text_primary", "#ece9f5")
         text_secondary = self.theme.get("text_secondary", "#8a8499")
@@ -429,76 +617,83 @@ class ChatView(tk.Frame):
 
     def add_summary_card(self, topic, depth, images, references, style, language) -> None:
         """Render a premium visual summary card for report configurations."""
-        bg_bubble = self.theme.get("bg_bubble", "#0f0e14")
-        bg_input = self.theme.get("bg_input", "#171520")
+        bg_bubble = self.theme.get("panel_bg", self.theme.get("bg_bubble", "#0f0e14"))
+        bg_input = self.theme.get("panel_soft", self.theme.get("bg_input", "#171520"))
         accent = self.theme.get("accent", "#c4b5fd")
         text_primary = self.theme.get("text_primary", "#ece9f5")
         text_secondary = self.theme.get("text_secondary", "#8a8499")
-        
+        border_col = self.theme.get("bg_input_border", "#2a2733")
+
+        # Wider card: only 12px left margin (same as bot bubble avatar offset)
         container = tk.Frame(
-            self._inner, 
-            bg=bg_input, 
-            bd=1, 
+            self._inner,
+            bg=bg_input,
+            bd=0,
             highlightthickness=1,
-            highlightbackground=self.theme.get("bg_input_border", "#2a2733")
+            highlightbackground=border_col
         )
-        container.pack(fill="x", padx=44, pady=(6, 6))
-        
-        # Header
+        container.pack(fill="x", padx=12, pady=(6, 6))
+
+        # Header row
         header = tk.Label(
             container,
-            text="📋 CONFIGURACIÓN DEL INFORME",
+            text="📋  CONFIGURACIÓN DEL INFORME",
             bg=bg_input,
             fg=accent,
             font=("Segoe UI", 9, "bold"),
-            anchor="w"
+            anchor="w",
+            padx=12,
+            pady=8,
         )
-        header.pack(fill="x", padx=12, pady=(10, 6))
-        
-        # Divider line
-        div = tk.Frame(container, height=1, bg=self.theme.get("bg_input_border", "#2a2733"))
-        div.pack(fill="x", padx=12, pady=(0, 8))
-        
-        # Config grid items
-        items = [
-            ("Tema", topic),
-            ("Alcance", depth),
-            ("Imágenes", images),
-            ("Referencias", references),
-            ("Estilo", style),
-            ("Idioma", language)
-        ]
-        
+        header.pack(fill="x")
+
+        # Divider
+        tk.Frame(container, height=1, bg=border_col).pack(fill="x", padx=0)
+
+        # Config grid — use grid() so label col is fixed and value col wraps freely
         grid_frame = tk.Frame(container, bg=bg_input)
-        grid_frame.pack(fill="x", padx=12, pady=(0, 10))
-        
-        for label, val in items:
-            row_frame = tk.Frame(grid_frame, bg=bg_input)
-            row_frame.pack(fill="x", pady=2)
-            
+        grid_frame.pack(fill="x", padx=12, pady=(8, 10))
+        grid_frame.columnconfigure(0, minsize=100)   # fixed label column
+        grid_frame.columnconfigure(1, weight=1)       # value column expands
+
+        items = [
+            ("Tema",        topic),
+            ("Alcance",     depth),
+            ("Imágenes",    images),
+            ("Referencias", references),
+            ("Estilo",      style),
+            ("Idioma",      language),
+        ]
+
+        # Compute wraplength for values dynamically (card width minus label col minus padding)
+        val_wrap = max(140, self._width - 100 - 12 - 12)
+
+        for row_idx, (label, val) in enumerate(items):
             lbl = tk.Label(
-                row_frame,
+                grid_frame,
                 text=f"{label}:",
                 bg=bg_input,
                 fg=text_secondary,
                 font=("Segoe UI", 9, "bold"),
-                anchor="w",
-                width=12
+                anchor="nw",
             )
-            lbl.pack(side="left")
-            
+            lbl.grid(row=row_idx, column=0, sticky="nw", pady=(0, 4))
+
             val_lbl = tk.Label(
-                row_frame,
+                grid_frame,
                 text=val,
                 bg=bg_input,
                 fg=text_primary,
                 font=("Segoe UI", 9),
-                anchor="w"
+                anchor="nw",
+                justify="left",
+                wraplength=val_wrap,
             )
-            val_lbl.pack(side="left", fill="x", expand=True)
-            
+            val_lbl.grid(row=row_idx, column=1, sticky="nw", pady=(0, 4))
+
         self._row_widgets.append(container)
         self.after(20, self._scroll_to_bottom)
+
 
     def clear(self) -> None:
         self.hide_typing()
@@ -514,7 +709,7 @@ class ChatView(tk.Frame):
 
     def apply_theme(self, theme: dict) -> None:
         self.theme = theme
-        bg = theme.get("bg_bubble", "#0f0e14")
+        bg = theme.get("panel_bg", theme.get("bg_bubble", "#0f0e14"))
         self.configure(bg=bg)
         self.canvas.configure(bg=bg)
         self._inner.configure(bg=bg)
@@ -589,22 +784,27 @@ class ChatView(tk.Frame):
         ts = ts or time.time()
         self._messages.append({"role": role, "text": text, "ts": ts})
 
-        bg_bubble = self.theme.get("bg_bubble", "#0f0e14")
-        surface = self.theme.get("bg_bubble_border", "#2a2733")
+        bg_bubble = self.theme.get("panel_bg", self.theme.get("bg_bubble", "#0f0e14"))
+        surface = self.theme.get("message_bot", self.theme.get("bg_bubble_border", "#2a2733"))
         accent = self.theme.get("accent", "#c4b5fd")
         text_primary = self.theme.get("text_primary", "#ece9f5")
         text_secondary = self.theme.get("text_secondary", "#8a8499")
-        divider = self.theme.get("divider", "#1d1b26")
+        divider = self.theme.get("message_bot_border", self.theme.get("divider", "#1d1b26"))
 
         # System: discreet centered note, no bubble.
         if role == "system":
             pad_top = 10 if self._last_role else 4
             row = tk.Frame(self._inner, bg=bg_bubble)
-            row.pack(fill="x", padx=12, pady=(pad_top, 4))
-            lbl = tk.Label(row, text=text, bg=bg_bubble, fg=text_secondary,
-                           font=FONT_SYS, justify="center",
-                           wraplength=self._width - 60)
-            lbl.pack()
+            row.pack(fill="x", padx=16, pady=(pad_top, 8))
+            pill = tk.Label(
+                row, text=text,
+                bg=self.theme.get("panel_soft", bg_bubble), fg=text_secondary,
+                font=FONT_SYS, justify="center", padx=10, pady=6,
+                wraplength=self._width - 90,
+                highlightthickness=1,
+                highlightbackground=self.theme.get("divider", "#1d1b26"),
+            )
+            pill.pack()
             self._row_widgets.append(row)
             self._last_role = "system"
             self.after(20, self._scroll_to_bottom)
@@ -622,11 +822,13 @@ class ChatView(tk.Frame):
         # Color choices — Restrained.
         if is_user:
             fill = accent
-            text_color = "#0f0e14"  # high contrast against accent
+            # Adaptive text: dark on light accents (e.g. minimal), white on dark
+            _ur, _ug, _ub = _hex_to_rgb(accent)
+            text_color = "#0a0a0c" if (_ur + _ug + _ub) > 450 else "#f8fbff"
             av_char = "T"
-            av_fill = accent
-            av_fg = "#0f0e14"
-            pad_x, pad_y = 14, 10
+            av_fill = "#2d56ff"
+            av_fg = "#f3f6ff"
+            pad_x, pad_y = 16, 12
             avatar_radius = "circle"
         else:
             fill = surface
@@ -638,12 +840,32 @@ class ChatView(tk.Frame):
             avatar_radius = "square"
 
         row = tk.Frame(self._inner, bg=bg_bubble)
-        row.pack(fill="x", padx=12, pady=(pad_top, 2))
+        row.pack(fill="x", padx=16, pady=(pad_top, 4))
+
+        # Timeline / vine indicator for vintage theme
+        _is_vintage = self.theme.get("style") == "vintage"
+        if _is_vintage:
+            vine_color = self.theme.get("accent", "#8b4513")
+            vine_w = 20
+            vine_canvas = tk.Canvas(row, width=vine_w, height=1,
+                                    bg=bg_bubble, highlightthickness=0, bd=0)
+            vine_canvas.pack(side="left", fill="y", padx=(0, 4))
+            # Vertical line spanning full height
+            vine_canvas.create_line(vine_w // 2, 0, vine_w // 2, 999,
+                                    fill=vine_color, width=2, tags="vine")
+            # Node dot at center
+            cx = vine_w // 2
+            node_r = 4
+            vine_canvas.create_oval(cx - node_r, 14 - node_r, cx + node_r, 14 + node_r,
+                                    fill=vine_color, outline="#2c1810", width=1, tags="vine")
+            # Horizontal branch to message
+            vine_canvas.create_line(cx + node_r, 14, vine_w, 14,
+                                    fill=vine_color, width=1, tags="vine")
 
         if is_user:
-            av_img = _avatar_monogram(24, av_fill, av_fg, av_char, "user")
+            av_img = _avatar_monogram(36, av_fill, av_fg, av_char, "user")
         else:
-            av_img = _get_bot_avatar(24, av_fill, av_fg)
+            av_img = _get_bot_avatar(36, av_fill, av_fg)
         atkimg = ImageTk.PhotoImage(av_img)
         self._image_refs.append(atkimg)
         av = tk.Label(row, image=atkimg, bg=bg_bubble, bd=0)
@@ -652,50 +874,18 @@ class ChatView(tk.Frame):
         else:
             av.pack(side="left", padx=(0, 8), anchor="nw")
 
-        # Measure text.
-        max_text_width = max(140, self._width - 110)
-        sizer = tk.Label(self, text=text, font=FONT_BODY, wraplength=max_text_width,
-                         justify="left", bg=bg_bubble, fg=text_color,
-                         padx=pad_x, pady=pad_y)
-        sizer.update_idletasks()
-        tw = sizer.winfo_reqwidth()
-        th = sizer.winfo_reqheight()
-        sizer.destroy()
-
-        bubble_w = min(max_text_width + pad_x * 2, max(tw, 80))
-        bubble_h = th + 4
-
-        bubble_img = _bubble_asymmetric(bubble_w, bubble_h, fill,
-                                        divider if not is_user else None,
-                                        "user" if is_user else "bot")
-        btkimg = ImageTk.PhotoImage(bubble_img)
-        self._image_refs.append(btkimg)
-
-        stack = tk.Frame(row, bg=bg_bubble)
-        stack.pack(side="right" if is_user else "left", anchor="e" if is_user else "w")
-
-        canvas = tk.Canvas(stack, width=bubble_img.width, height=bubble_img.height,
-                           bg=bg_bubble, highlightthickness=0, bd=0)
-        img_id = canvas.create_image(0, 0, anchor="nw", image=btkimg)
-        canvas.create_text(
-            pad_x, pad_y - 2, anchor="nw",
-            text=text, fill=text_color, font=FONT_BODY,
-            width=bubble_w - pad_x * 2,
-        )
-        canvas.pack()
-
+        # Timestamp formatting
         ts_text = self._format_ts(ts)
-        ts_lbl = tk.Label(stack, text=ts_text, bg=bg_bubble, fg=text_secondary,
-                          font=FONT_TS)
-        ts_lbl.pack(anchor="e" if is_user else "w", padx=2, pady=(2, 0))
-
-        # Copy to clipboard double-click and right-click functionality
+        if is_user:
+            ts_text = ts_text + "  \u2713" # checkmark
+        
+        # Shared copy helper
         def _copy_message(event=None):
             try:
                 self.clipboard_clear()
                 self.clipboard_append(text)
                 orig_fg = ts_lbl.cget("fg")
-                ts_lbl.configure(text="¡Copiado! ✓", fg=accent)
+                ts_lbl.configure(text="¡Copiado! \u2713", fg=accent)
                 def _restore():
                     try:
                         ts_lbl.configure(text=ts_text, fg=orig_fg)
@@ -705,10 +895,7 @@ class ChatView(tk.Frame):
             except Exception:
                 pass
 
-        canvas.configure(cursor="hand2")
-        canvas.bind("<Double-Button-1>", _copy_message)
-
-        # Right-click context menu
+        # Shared right click menu helper
         menu = tk.Menu(self, tearoff=0, bg=bg_bubble, fg=text_primary,
                        activebackground=accent, activeforeground="#0f0e14", bd=0)
         menu.add_command(label="Copiar mensaje", command=_copy_message)
@@ -719,14 +906,139 @@ class ChatView(tk.Frame):
             except Exception:
                 pass
 
-        canvas.bind("<Button-3>", _show_menu)
+        if is_user:
+            # Measure text.
+            max_text_width = max(150, self._width - 112)
+            sizer = tk.Label(self, text=text, font=FONT_BODY, wraplength=max_text_width,
+                             justify="left", bg=bg_bubble, fg=text_color,
+                             padx=pad_x, pady=pad_y)
+            sizer.update_idletasks()
+            tw = sizer.winfo_reqwidth()
+            th = sizer.winfo_reqheight()
+            sizer.destroy()
+
+            bubble_w = min(max_text_width, max(tw, 150))
+            bubble_h = th + 8
+
+            bubble_img = _bubble_asymmetric(bubble_w, bubble_h, fill,
+                                            None, "user", self.theme.get("style", "glass"))
+            btkimg = ImageTk.PhotoImage(bubble_img)
+            self._image_refs.append(btkimg)
+
+            stack = tk.Frame(row, bg=bg_bubble)
+            stack.pack(side="right", anchor="e")
+
+            canvas = tk.Canvas(stack, width=bubble_img.width, height=bubble_img.height,
+                               bg=bg_bubble, highlightthickness=0, bd=0)
+            img_id = canvas.create_image(0, 0, anchor="nw", image=btkimg)
+            canvas.create_text(
+                pad_x, pad_y - 2, anchor="nw",
+                text=text, fill=text_color, font=FONT_BODY,
+                width=bubble_w - pad_x * 2,
+            )
+            canvas.pack()
+
+            ts_lbl = tk.Label(stack, text=ts_text, bg=bg_bubble, fg=text_secondary,
+                              font=FONT_TS)
+            ts_lbl.pack(anchor="e", padx=2, pady=(2, 0))
+
+            canvas.configure(cursor="hand2")
+            canvas.bind("<Double-Button-1>", _copy_message)
+            canvas.bind("<Button-3>", _show_menu)
+
+            if animate:
+                self._animate_in(stack, canvas, img_id, bubble_img)
+        else:
+            # Bot response (Glass Markdown Bubble)
+            max_text_width = max(150, self._width - 112)
+            pad_x, pad_y = 16, 12
+
+            # Sizer label to estimate width
+            sizer = tk.Label(self, text=text, font=FONT_BODY, wraplength=max_text_width - pad_x * 2,
+                             justify="left", bg=bg_bubble, fg=text_color,
+                             padx=0, pady=0)
+            sizer.update_idletasks()
+            tw = sizer.winfo_reqwidth()
+            th = sizer.winfo_reqheight()
+            sizer.destroy()
+
+            bubble_w = min(max_text_width, max(tw + pad_x * 2, 160))
+
+            stack = tk.Frame(row, bg=bg_bubble)
+            stack.pack(side="left", anchor="w")
+
+            canvas = tk.Canvas(stack, width=bubble_w, height=100,
+                               bg=bg_bubble, highlightthickness=0, bd=0)
+            canvas.pack()
+
+            text_widget = tk.Text(
+                canvas,
+                bg=fill,
+                fg=text_color,
+                font=FONT_BODY,
+                wrap="word",
+                bd=0,
+                highlightthickness=0,
+                padx=0,
+                pady=0,
+                selectbackground=accent,
+                selectforeground="#0f0e14",
+            )
+
+            # Insert markdown formatting
+            _insert_markdown(text_widget, text, self.theme)
+
+            # Create canvas window for the text widget
+            text_window_id = canvas.create_window(
+                pad_x, pad_y, anchor="nw",
+                width=bubble_w - pad_x * 2,
+                window=text_widget
+            )
+
+            # Redirect mouse wheel to parent canvas
+            text_widget.bind("<MouseWheel>", lambda e: self.canvas.event_generate("<MouseWheel>", delta=e.delta))
+
+            # Bind copy commands
+            text_widget.configure(cursor="hand2")
+            text_widget.bind("<Double-Button-1>", _copy_message)
+            text_widget.bind("<Button-3>", _show_menu)
+
+            # Force Tkinter to update so it knows the wrapping and display lines
+            self.update_idletasks()
+            try:
+                display_lines = int(text_widget.tk.call(text_widget._w, "count", "-update", "-displaylines", "1.0", "end"))
+            except Exception:
+                display_lines = max(1, text.count("\n") + 1)
+            text_widget.configure(height=max(1, display_lines))
+
+            # Now compute the exact pixel height needed for the bubble
+            text_widget.update_idletasks()
+            th_real = text_widget.winfo_reqheight()
+            bubble_h = th_real + pad_y * 2
+
+            # Resize the canvas and draw the bubble background image
+            canvas.configure(height=bubble_h)
+            canvas.itemconfigure(text_window_id, height=th_real)
+
+            bubble_img = _bubble_asymmetric(bubble_w, bubble_h, fill, divider, "bot", self.theme.get("style", "glass"))
+            btkimg = ImageTk.PhotoImage(bubble_img)
+            self._image_refs.append(btkimg)
+            img_id = canvas.create_image(0, 0, anchor="nw", image=btkimg)
+
+            # Raise the text widget above the background image
+            canvas.tag_raise(text_window_id, img_id)
+
+            # Timestamp
+            ts_lbl = tk.Label(stack, text=ts_text, bg=bg_bubble, fg=text_secondary,
+                              font=FONT_TS)
+            ts_lbl.pack(anchor="w", padx=2, pady=(2, 0))
+
+            if animate:
+                self._animate_in(stack, canvas, img_id, bubble_img)
 
         self._row_widgets.append(row)
         self._last_role = role
         self.after(20, self._scroll_to_bottom)
-
-        if animate:
-            self._animate_in(stack, canvas, img_id, bubble_img)
 
     def _animate_in(
         self,

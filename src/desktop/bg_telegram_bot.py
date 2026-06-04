@@ -12,13 +12,51 @@ CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".claudy", "config.json")
 
 def load_config():
     with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    # Los secretos (incl. botToken) se guardan encriptados con secure_store.
+    # Hay que desencriptarlos aquí o Telegram rechaza el token "enc:v1:...".
+    try:
+        import secure_store
+        cfg = secure_store.decrypt_config_secrets(cfg)
+    except Exception as e:
+        print(f"[TelegramBot] No pude desencriptar config: {e}")
+    return cfg
 
 cfg = load_config()
 TOKEN = cfg.get("telegram", {}).get("botToken", "")
 ALLOWED = [str(u) for u in cfg.get("telegram", {}).get("allowedUsers", [])]
-TTS_REPLY = bool(cfg.get("telegram", {}).get("ttsReply", False))
 GATEWAY_URL = "http://127.0.0.1:8720/api"
+
+# Estado de respuesta por voz, mutable en runtime (/voz on|off o lenguaje natural).
+STATE = {"tts": bool(cfg.get("telegram", {}).get("ttsReply", False))}
+
+
+def _persist_tts(enabled):
+    """Guarda telegram.ttsReply en config.json SIN tocar los secretos encriptados
+    (lee el archivo crudo, así el botToken sigue como 'enc:v1:...')."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            raw = json.load(f)
+        raw.setdefault("telegram", {})["ttsReply"] = bool(enabled)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[TelegramBot] No pude guardar ttsReply: {e}")
+
+
+def _detect_voice_intent(text):
+    """Detecta si el mensaje pide cambiar a/desde respuestas por voz.
+    Devuelve 'on', 'off' o None. Conservador: solo si menciona audio/voz."""
+    t = (text or "").lower()
+    if not any(k in t for k in ("audio", "voz", "nota de voz")):
+        return None
+    if any(k in t for k in ("texto", "escrito", "deja de", "ya no", "sin audio",
+                            "sin voz", "no me mandes", "no mas audio", "no más audio")):
+        return "off"
+    if any(k in t for k in ("respond", "contest", "habla", "háblame", "manda", "mánda",
+                            "envia", "envía", "quiero", "prefiero", "dame", "mejor", "puedes")):
+        return "on"
+    return None
 
 if not TOKEN:
     print("[TelegramBot] No token configured. Exiting.")
@@ -218,7 +256,7 @@ async def _reply(update, result):
     if sent_any and not cleaned:
         return
     result = cleaned if sent_any else result
-    if TTS_REPLY:
+    if STATE["tts"]:
         # Try to send voice; fallback to text on error
         try:
             import edge_tts as _et
@@ -246,9 +284,46 @@ async def handle_text(update, context):
     msg = (update.message.text or "").strip()
     if not msg:
         return
+    # ¿El usuario pidió cambiar a/desde respuestas por voz? (lenguaje natural)
+    intent = _detect_voice_intent(msg)
+    if intent == "on":
+        STATE["tts"] = True
+        _persist_tts(True)
+        await update.message.reply_text(
+            "🔊 Listo, desde ahora te respondo con audios. "
+            "Escribe \"respóndeme con texto\" o /voz off para volver a texto."
+        )
+        return
+    if intent == "off":
+        STATE["tts"] = False
+        _persist_tts(False)
+        await update.message.reply_text("📝 Ok, vuelvo a responder con texto. (/voz on para audios)")
+        return
     await update.message.chat.send_action("typing")
     result = await _ask_with_progress(update, msg)
     await _reply(update, result)
+
+
+async def cmd_voz(update, context):
+    """/voz on|off — alterna respuestas por audio. Sin argumento muestra el estado."""
+    uid = str(update.effective_user.id)
+    if ALLOWED and uid not in ALLOWED:
+        await update.message.reply_text(f"No autorizado. Tu ID: {uid}")
+        return
+    arg = (context.args[0].lower() if context.args else "")
+    if arg in ("on", "si", "sí", "1", "activar", "activa", "audio", "audios"):
+        STATE["tts"] = True
+        _persist_tts(True)
+        await update.message.reply_text("🔊 Respuestas por audio ACTIVADAS. (/voz off para volver a texto)")
+    elif arg in ("off", "no", "0", "desactivar", "desactiva", "texto"):
+        STATE["tts"] = False
+        _persist_tts(False)
+        await update.message.reply_text("📝 Respuestas por audio DESACTIVADAS. (/voz on para activarlas)")
+    else:
+        estado = "audios 🔊" if STATE["tts"] else "texto 📝"
+        await update.message.reply_text(
+            f"Ahora respondo con {estado}.\nUsa /voz on o /voz off para cambiar."
+        )
 
 
 async def handle_voice(update, context):
@@ -291,10 +366,62 @@ async def handle_voice(update, context):
             pass
 
 
+async def handle_document(update, context):
+    """Recibe un documento o imagen, lo descarga, y pide a Claudy que lo analice."""
+    uid = str(update.effective_user.id)
+    if ALLOWED and uid not in ALLOWED:
+        await update.message.reply_text(f"No autorizado. Tu ID: {uid}")
+        return
+
+    # Resolver el archivo (documento o foto en su mayor resolución)
+    file_obj = None
+    suggested_name = None
+    if update.message.document:
+        file_obj = update.message.document
+        suggested_name = file_obj.file_name or f"doc_{file_obj.file_id}"
+    elif update.message.photo:
+        file_obj = update.message.photo[-1]  # mayor resolución
+        suggested_name = f"foto_{file_obj.file_id}.jpg"
+    if not file_obj:
+        return
+
+    await update.message.chat.send_action("typing")
+
+    # Carpeta dedicada para que Felipe pueda revisar después si quiere
+    target_dir = os.path.join(os.path.expanduser("~"), ".claudy", "telegram_inbox")
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except Exception:
+        target_dir = tempfile.gettempdir()
+    # Evitar colisiones de nombre
+    base, ext = os.path.splitext(suggested_name)
+    safe_base = "".join(c for c in base if c.isalnum() or c in " ._-")[:80] or "archivo"
+    target = os.path.join(target_dir, f"{safe_base}{ext}")
+    i = 1
+    while os.path.exists(target):
+        target = os.path.join(target_dir, f"{safe_base}_{i}{ext}")
+        i += 1
+
+    try:
+        tf = await file_obj.get_file()
+        await tf.download_to_drive(target)
+    except Exception as e:
+        await update.message.reply_text(f"No pude descargar el archivo: {e}")
+        return
+
+    # Mandar a Claudy el marcador directo de análisis
+    marker = f"[CLAUDY_ANALYZE_FILE:{target}]"
+    result = await _ask_with_progress(update, marker)
+    await _reply(update, result)
+
+
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("voz", cmd_voz))
+    app.add_handler(CommandHandler("audio", cmd_voz))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     print(f"[TelegramBot] Iniciado. FFmpeg: {FFMPEG or 'NO DISPONIBLE'}")
     await app.initialize()

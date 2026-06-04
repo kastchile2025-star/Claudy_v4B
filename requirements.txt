@@ -50,6 +50,11 @@ numpy>=1.24
 # Security
 cryptography>=41.0
 
+# Google Calendar (panel Calendario + /agendar)
+google-api-python-client>=2.100
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.2
+
 # Optional: webcam
 # opencv-python>=4.8
 

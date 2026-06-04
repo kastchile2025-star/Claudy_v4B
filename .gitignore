@@ -4,3 +4,10 @@ config_backup_safe.json
 .claudy/
 *.log
 subir_a_github.bat
+
+# Claude Code settings y SECRETOS (no subir)
+.claude/
+client_secret_*.json
+*google_client_secret*.json
+*.apps.googleusercontent.com.json
+.secret.key
