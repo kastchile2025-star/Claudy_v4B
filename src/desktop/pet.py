@@ -224,6 +224,7 @@ FONT_MONO = ("Cascadia Mono", 10)         # code-ish
 
 # Memoria infinita: lógica y constantes viven en core/memory.py (refactor v5)
 from core.gateway import GatewayMixin
+from core.prompts import PromptsMixin
 from core.llm import LLMMixin
 from core.memory import (
     MemoryMixin,
@@ -714,7 +715,7 @@ class WebViewChatWrapper:
                 self.add_system(text)
 
 
-class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, tk.Tk):
+class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
     BUBBLES = [
         "Estoy listo para ayudarte.",
         "Toca dos veces para hablar.",
@@ -797,7 +798,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, tk.Tk):
         self.history_win = None
         self._current_model = None  # Override model from /model command
         self._voice_enabled = False  # /voice on|off — TTS toggle
-        self._streaming_enabled = False  # /stream on|off — live token streaming in the bubble
+        self._streaming_enabled = True  # /stream on|off — streaming en vivo (default ON desde v5)
         self._streamed = False
         self._plan_mode = False  # /plan on|off — solo planea, no ejecuta
         self._checkpoint_history = []  # F3.1 stack para undo/redo
@@ -806,8 +807,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, tk.Tk):
         self._open_location_btn = None
         self._available_models = [
             "deepseek-chat", "deepseek-reasoner",
+            "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
             "gpt-4o", "gpt-4o-mini", "gpt-4.1",
-            "claude-sonnet-4-20250514", "claude-haiku-3-5",
             "gemini-2.5-pro", "gemini-2.5-flash",
         ]
         self._idle_hide_timer = None  # Auto-hide timer (60s)
@@ -11634,180 +11635,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, tk.Tk):
 
 
 
-    def _get_user_location(self):
-        try:
-            req = urllib.request.Request(
-                "http://ip-api.com/json/?fields=status,city,regionName,country,countryCode,timezone,lat,lon,zip,isp,org",
-                headers={"User-Agent": "Claudy/1.0"}
-            )
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            if data.get("status") == "success":
-                parts = [p for p in [data.get("city"), data.get("regionName"), data.get("country")] if p]
-                loc = ", ".join(parts) if parts else "desconocida"
-                tz = data.get("timezone", "desconocida")
-                lat = data.get("lat", 0)
-                lon = data.get("lon", 0)
-                country_code = data.get("countryCode", "")
-                zipcode = data.get("zip", "")
-                # Build rich location context for the AI
-                context_parts = []
-                context_parts.append(f"Ubicación: {loc}")
-                if country_code:
-                    context_parts.append(f"Código de país: {country_code}")
-                context_parts.append(f"Zona horaria: {tz}")
-                if zipcode:
-                    context_parts.append(f"Código postal: {zipcode}")
-                context_parts.append(f"Coordenadas: {lat}, {lon}")
-                # Add contextual guidance for the AI
-                context_parts.append(
-                    "Usa esta ubicación para responder preguntas sobre clima local, "
-                    "leyes y regulaciones del país, horarios, moneda local, cultura, "
-                    "festividades, y cualquier consulta que dependa de la ubicación del usuario."
-                )
-                return " | ".join(context_parts)
-        except Exception:
-            pass
-        return "desconocida (no pude conectarme al servicio de geolocalización)"
 
-    def _get_superpowers(self):
-        now = datetime.datetime.now()
-        dias = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
-        meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
-        fecha = f"{dias[now.weekday()]} {now.day} de {meses[now.month - 1]} de {now.year}"
-        hora = now.strftime("%H:%M:%S")
-        ubicacion = getattr(self, "_cached_location", None)
-        if ubicacion is None:
-            ubicacion = self._get_user_location()
-            self._cached_location = ubicacion
-        tiene_memoria = os.path.exists(self._memory_db_path())
-        memoria_nota = "Tienes memoria persistente de conversaciones anteriores. Úsala cuando aporte contexto." if tiene_memoria else "No hay historial previo todavía."
-
-        return (
-            "═══ IDENTIDAD ═══\n"
-            "Eres Claudy, el asistente personal de Felipe. Hablas español natural, directo, sin formalidad excesiva — como un amigo técnico que sabe del tema.\n\n"
-
-            "═══ CONTEXTO ACTUAL ═══\n"
-            f"Fecha y hora: {fecha}, {hora}\n"
-            f"Ubicación: {ubicacion}\n"
-            f"Memoria: {memoria_nota}\n\n"
-
-            "═══ PROTOCOLO DE RESPUESTA ═══\n"
-            "Clasifica la pregunta y responde según su categoría:\n\n"
-
-            "1. SALUDO / CHARLA RÁPIDA (hola, gracias, ok)\n"
-            "   → 1-2 líneas, sin buscar.\n\n"
-
-            "2. DEFINICIÓN / EXPLICACIÓN (qué es X, cómo funciona Y, explícame Z, para qué sirve W)\n"
-            "   → BUSCA en internet primero (/buscar o webfetch) para tener info actualizada y precisa.\n"
-            "   → Da respuesta ESTRUCTURADA y rica:\n"
-            "     • 1-2 líneas de definición clara al inicio\n"
-            "     • 3-5 puntos clave (con guiones, no markdown)\n"
-            "     • 1 ejemplo concreto o caso de uso\n"
-            "     • Fuente al final en 1 línea\n"
-            "   → Longitud: 8-15 líneas. Densa en info, sin relleno.\n\n"
-
-            "3. DATO ACTUAL (precio, clima, noticia, marcador, evento)\n"
-            "   → BUSCA primero. Da:\n"
-            "     • El dato concreto en 1 línea\n"
-            "     • 1-2 líneas de contexto si ayuda (variación, tendencia, fecha)\n"
-            "     • Fuente al final\n\n"
-
-            "4. CÓDIGO / TÉCNICO\n"
-            "   → Si requiere conocimiento actualizado (versiones, APIs, librerías nuevas) BUSCA primero.\n"
-            "   → Estructura:\n"
-            "     • 1 línea explicando qué hace\n"
-            "     • El código completo (sin ``` markdown, pero indentado)\n"
-            "     • 2-3 líneas explicando partes clave si no es obvio\n"
-            "   → Usa /leer o /buscar_archivo si necesitas ver archivos del usuario.\n\n"
-
-            "5. TAREA COMPLEJA / MULTI-PASO (instalar, configurar, debuggear)\n"
-            "   → Plan en 1 línea: 'Plan: 1) X, 2) Y, 3) Z'\n"
-            "   → Ejecuta CADA paso con su comando. No te detengas.\n"
-            "   → Reporta resultado de cada paso.\n"
-            "   → Final: 'Hecho. ¿Sigue algo?'\n\n"
-
-            "6. OPINIÓN / RECOMENDACIÓN\n"
-            "   → Recomendación directa (NO 'depende').\n"
-            "   → 2-3 líneas de por qué (criterios concretos).\n"
-            "   → Si aplica: 1 alternativa con su trade-off.\n\n"
-
-            "═══ REGLAS ESTRICTAS ═══\n"
-            "🚫 PROHIBIDO ANUNCIAR — EJECUTA Y RESPONDE EN UN SOLO MENSAJE:\n"
-            "  Tu respuesta DEBE SER el resultado, NUNCA la promesa de buscarlo.\n"
-            "  JAMÁS digas estas frases (usa la tool y da el resultado directo):\n"
-            "  ✗ 'voy a revisar' / 'voy a buscar' / 'voy a consultar' / 'voy a verificar'\n"
-            "  ✗ 'déjame buscar' / 'déjame revisar' / 'permíteme buscar'\n"
-            "  ✗ 'dame un momento' / 'dame un segundo' / 'espera'\n"
-            "  ✗ 'te respondo en un momento' / 'para darte la respuesta'\n"
-            "  ✗ 'voy a checar' / 'voy a mirar' / 'iré a buscar'\n"
-            "  Si necesitas info externa, USA la tool internamente y entrega SOLO el resultado.\n\n"
-
-            "🚫 PROHIBIDO decir:\n"
-            "  ✗ 'como modelo de IA' / 'soy un asistente virtual' / 'como inteligencia artificial'\n"
-            "  ✗ 'no tengo acceso a' / 'no puedo hacer eso' (busca o usa una tool primero)\n"
-            "  ✗ Preámbulos: '¡claro!', 'por supuesto', '¡interesante pregunta!', 'déjame explicarte'\n"
-            "  ✗ 'te recomiendo buscar...' / 'puedes consultar...' (NO derives a otros sitios, RESUELVE)\n"
-            "  ✗ Markdown: **negrita**, *cursiva*, `código`, ###titulos, ```bloques```\n\n"
-
-            "OBLIGATORIO:\n"
-            "  ✓ Si no sabes, di 'No sé' directo (sin disculparte)\n"
-            "  ✓ Usa la memoria de conversaciones anteriores cuando sea relevante\n"
-            "  ✓ Respuestas estructuradas y completas según la categoría (ver protocolo)\n"
-            "  ✓ Usa formato plano legible: guiones para listas, líneas en blanco entre secciones\n"
-            "  ✓ Cita la fuente (URL o nombre del sitio) cuando uses info de internet\n"
-            "  ✓ Cada respuesta debe ACERCAR al objetivo de Felipe, no solo informar\n"
-            "  ✓ Si la pregunta es ambigua, asume la interpretación más útil y procede\n\n"
-
-            "═══ COMANDOS DISPONIBLES (úsalos directamente, no los expliques) ═══\n"
-            "Web      → /buscar <tema>   |  webfetch <url>\n"
-            "Archivos → /leer <ruta>  |  /write <ruta> | <contenido>  |  /append <ruta> | <contenido>\n"
-            "           /replace <ruta> | <buscar> | <reemplazo>  |  /mkdir <ruta>  |  /buscar_archivo <nombre>  |  /descargar <url>\n"
-            "           /docx <ruta> | <contenido>  |  /pdf <ruta> | <contenido>  |  /xlsx <ruta> | <contenido CSV/JSON>  |  /pptx <ruta> | <JSON de slides>\n"
-            "           Tras crear o editar, el icono de carpeta abierta en la burbuja abre la ubicacion.\n"
-            "Sistema  → /ejecutar <cmd>  |  /apps  |  /procesos  |  /disco\n"
-            "Apps     → /instalar <app>\n"
-            "Memoria  → /recordar <nota> |  /checkpoint  |  /rollback\n"
-            "Skills   → /skills  |  /aprender <nombre>  |  /skill eliminar <nombre>\n"
-            "Tareas   → /delegar <tarea> (subagente)  |  /kanban add/move/list\n"
-            "Conexión → /vincular <id> (Telegram)\n\n"
-
-            "═══ APRENDIZAJE AUTOMÁTICO (estilo Hermes Curator) ═══\n"
-            "Cuando completes una tarea exitosa o aprendas un procedimiento nuevo:\n"
-            "  • Si Felipe dice 'aprende esto', 'guarda esto como skill X', 'memoriza esto como X':\n"
-            "    → se dispara automáticamente la creación de SKILL.md basada en los últimos mensajes.\n"
-            "  • Manualmente: /aprender <nombre>\n"
-            "  • Las skills aprendidas se cargan en cada conversación futura.\n"
-            "Cuando termines una tarea compleja útil, OFRECE proactivamente:\n"
-            "  '¿Quieres que aprenda esto como skill para reusarlo?'\n\n"
-
-            "═══ DECISIÓN: CUÁNDO BUSCAR EN INTERNET ═══\n"
-            "BUSCA (con /buscar o webfetch) cuando:\n"
-            "  • Pregunta 'qué es X', 'cómo funciona Y', 'explícame Z', 'para qué sirve W'\n"
-            "    (incluso si conoces algo, búscalo para dar info actualizada, precisa y completa)\n"
-            "  • Datos que cambian: precios, clima, noticias, eventos, fechas, marcadores\n"
-            "  • Tutoriales paso a paso, comparativas, recomendaciones de productos\n"
-            "  • Cualquier tema donde una fuente confiable mejore tu respuesta\n\n"
-
-            "NO busques cuando:\n"
-            "  • Es saludo o charla simple\n"
-            "  • Es matemática pura, lógica, o el usuario quiere TU opinión\n"
-            "  • Es continuación de algo ya hablado (usa memoria)\n\n"
-
-            "Para datos del usuario (sus archivos, su sistema): usa /leer, /buscar_archivo, /procesos antes de inventar.\n\n"
-
-            "═══ ANTI-FORMATO MARKDOWN ═══\n"
-            "Tkinter no renderiza markdown. Usa formato plano:\n"
-            "  ✗ NO uses: **negrita**, *cursiva*, `código`, ###título, ```bloque```\n"
-            "  ✓ SÍ usa: GUIONES para listas (- punto), líneas en blanco para separar secciones,\n"
-            "    MAYÚSCULAS sutiles para destacar, indentación con 2 espacios para sub-puntos.\n"
-            "  ✓ Para código: ponlo en líneas separadas, indentado, sin backticks.\n\n"
-
-            "[Fin del system prompt]\n\n"
-
-            f"{self._load_dynamic_skills()}"
-            f"{self._get_skills_context()}"
-        )
 
     def _load_dynamic_skills(self):
         """Load skills from ~/.claudy/skills/*/SKILL.md and return formatted context."""

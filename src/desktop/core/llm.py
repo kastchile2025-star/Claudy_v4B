@@ -28,6 +28,34 @@ except Exception:
     def _route_model(_prompt, _config, fallback):
         return fallback
 
+from core.prompts import BASE_IDENTITY
+
+
+def extract_text(response):
+    """Extrae el texto de una respuesta en cualquier formato conocido:
+    OpenCode (parts), OpenAI (choices), Anthropic (content[]) o directo.
+    Antes esta lógica estaba copiada 3 veces en send_quick_message."""
+    if not isinstance(response, dict):
+        return str(response or "").strip()
+    parts = response.get("parts")
+    if parts:
+        text = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+        if text:
+            return text
+    choices = response.get("choices")
+    if choices and isinstance(choices, list):
+        text = (choices[0].get("message", {}) or {}).get("content", "")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    content = response.get("content", "")
+    if isinstance(content, list):
+        text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text").strip()
+        if text:
+            return text
+    elif isinstance(content, str) and content.strip():
+        return content.strip()
+    return (response.get("text", "") or "").strip()
+
 
 class LLMMixin:
     def build_auth_headers(self, config):
@@ -144,29 +172,9 @@ class LLMMixin:
         is_local = any(h in base_url for h in ("127.0.0.1", "localhost", "0.0.0.0"))
         context = self._build_memory_context(prompt)
         superpowers = self._get_superpowers()
-        base_sys = config["agent"].get(
-            "systemPrompt",
-            "Eres Claudy, asistente personal de Felipe Castro (jorge.castro@qcorespa.com), "
-            "CTO de QCORE SPA (QCORE Group Technologies SPA). "
-            "SIEMPRE llama al usuario 'Felipe' — nunca 'usuario', 'tú' genérico ni lo ignores. "
-            "Español natural, directo, sin formalidad excesiva. "
-            "QCORE SPA tiene estos productos propios: "
-            "SmartStudent (plataforma educativa SaaS, Next.js+Firebase+Gemini AI, 21 módulos, puerto 9002, cliente COMBAS), "
-            "Roadix (SaaS para talleres automotrices, React+Supabase, 21 módulos, roadix.cl, puerto 5173), "
-            "Mission Control (hub operativo central, React+Vite, 17 módulos, puerto 5200), "
-            "UnitCore (Clinical Research Management, dashboard clínico, 195 contactos oncológicos), "
-            "Campaign Studio (gestión Reels/Carruseles para Meta, React+Remotion), "
-            "Point (POS + inventario FEFO para comercios, Python/Flask, cliente Tentación a Granel), "
-            "Mi Portafolio (web personal/CV de Jorge Castro, jorgecastros.xyz, fuente en Documents/CV_JorgeCastro_v3.5), "
-            "Luxium (monorepo/engine base compartido). "
-            "Cuando Felipe pregunte por estos productos, SIEMPRE responde con info de los productos de QCORE SPA, "
-            "NUNCA confundas con productos de otras empresas con nombres similares. "
-            "Clasifica la pregunta: saludo/definición → 1-3 líneas sin buscar. "
-            "Dato actual → busca + da dato. Código → código exacto. "
-            "Tarea multi-paso → anuncia plan, ejecuta cada paso. "
-            "PROHIBIDO: 'como modelo de IA', preámbulos, markdown innecesario, derivar a otros sitios. "
-            "Si no sabes, di 'No sé, Felipe'. Resuelve, no informes."
-        )
+        # Prompt único: la identidad base vive en core/prompts.py (antes había
+        # una copia divergente hardcodeada aquí).
+        base_sys = config["agent"].get("systemPrompt") or BASE_IDENTITY
         local_skills = self._load_installed_skills()
         try:
             from qcore_products import build_company_context
@@ -248,53 +256,23 @@ class LLMMixin:
             # Multi-provider remote path
             response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, on_delta=on_delta, timeout=timeout)
 
-        # Robust text extraction: OpenCode native format, OpenAI format, or direct text.
-        text = ""
-        parts = response.get("parts")
-        if parts:
-            text = "\n".join(part.get("text", "") for part in parts if part.get("type") == "text").strip()
-        if not text:
-            choices = response.get("choices")
-            if choices and isinstance(choices, list):
-                msg = choices[0].get("message", {}) if choices else {}
-                text = msg.get("content", "").strip()
-        if not text:
-            # Anthropic format
-            content_list = response.get("content", [])
-            if isinstance(content_list, list):
-                text = "\n".join(b.get("text", "") for b in content_list if b.get("type") == "text").strip()
-        if not text:
-            text = response.get("text", "").strip()
-        if not text:
-            text = response.get("content", "").strip()
+        text = extract_text(response)
 
         # Dynamic fallback: If local server returned empty response, call remote provider
         if not text and is_local:
             self._debug_log("LOCAL OPENCODE RETURNED EMPTY TEXT, FALLING BACK TO REMOTE")
             try:
                 response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, timeout=timeout)
-                parts = response.get("parts")
-                if parts:
-                    text = "\n".join(part.get("text", "") for part in parts if part.get("type") == "text").strip()
-                if not text:
-                    choices = response.get("choices")
-                    if choices and isinstance(choices, list):
-                        msg = choices[0].get("message", {}) if choices else {}
-                        text = msg.get("content", "").strip()
-                if not text:
-                    content_list = response.get("content", [])
-                    if isinstance(content_list, list):
-                        text = "\n".join(b.get("text", "") for b in content_list if b.get("type") == "text").strip()
-                if not text:
-                    text = response.get("text", "").strip()
-                if not text:
-                    text = response.get("content", "").strip()
+                text = extract_text(response)
             except Exception as remote_err:
                 text = ""
                 self._debug_log("REMOTE FALLBACK ALSO FAILED", str(remote_err))
 
-        # Ultimate fallback: Pollinations API (free, no API key needed)
-        if not text or text.startswith("Error "):
+        # Último fallback: Pollinations (API gratuita de TERCEROS — manda el
+        # prompt fuera de tus proveedores). Por privacidad es OPT-IN:
+        # config.providers.allowFreeFallback = true para activarlo.
+        allow_free = bool(config.get("providers", {}).get("allowFreeFallback", False))
+        if (not text or text.startswith("Error ")) and allow_free:
             try:
                 poll_payload = {
                     "model": "openai",
