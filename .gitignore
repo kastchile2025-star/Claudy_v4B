@@ -11,3 +11,7 @@ client_secret_*.json
 *google_client_secret*.json
 *.apps.googleusercontent.com.json
 .secret.key
+
+# Build/deps de Node (legacy, no versionar)
+node_modules/
+dist/
