@@ -22,6 +22,14 @@ DATOS LEGALES OFICIALES (verificados en estatuto/SII; NO inventar — si no est�
   (C.I. 17.023.135-K), correo jorge.castro@qcorespa.com. (Es la misma persona que "Felipe", el dueño/CTO.)
 - Para datos legales siempre verificar en G:\\Mi unidad\\QCORE-ECOSYSTEM\\01-CORPORATE (estatutos, facturas, contratos).
 
+DATOS DE TRANSFERENCIA BANCARIA OFICIALES (usar EXACTOS en correos de cobro/facturación; NUNCA inventar ni usar placeholders como '123456789' o 'Banco Estado'):
+- Nombre / Titular: QCORE GROUP TECHNOLOGIES SPA
+- RUT: 78.354.502-0
+- Banco: BCI
+- Tipo de cuenta: Cuenta Corriente
+- N° de cuenta: 77176032
+- Correo: jorge.castro@qcorespa.com
+
 Qué es: empresa de software que construye, opera y escala un portafolio de SaaS verticales
 para rubros con baja digitalización en Chile y Latinoamérica. No es solo dev: es un ecosistema
 con productos verticales, agentes con jerarquía, gobernanza y contexto acumulado.

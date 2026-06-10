@@ -489,6 +489,14 @@ class WebViewApi:
     def minimize_window(self):
         self._pet.after(0, self._pet.hide_bubble)
 
+    def cancel_processing(self):
+        """Botón de pánico (doble ESC): interrumpe lo que Claudy esté haciendo
+        (informe a medias, etc.) sin reiniciar la app."""
+        try:
+            self._pet._request_cancel()
+        except Exception:
+            pass
+
     def show_settings(self):
         """Open the history/settings window (alarms, themes, skins, API keys)."""
         self._pet.after(0, self._pet.show_history_window)
@@ -627,6 +635,12 @@ class WebViewStatusWrapper:
     def configure(self, text=None, fg=None, **kwargs):
         if text is not None:
             self.pet._eval_in_web(f"updateStatusText({json.dumps(text)})")
+            # Show speech bubble when chat is hidden and a background task is running
+            if not getattr(self.pet, '_webview_visible', False) and text.strip():
+                try:
+                    self.pet.show_pet_speech_bubble(text, duration=5000)
+                except Exception:
+                    pass
 
 
 class WebViewEntryWrapper:
@@ -1201,6 +1215,15 @@ class ClawdPet(tk.Tk):
         # para que el prompt completo llegue intacto al dispatch (no se trunque).
         if prompt:
             prompt = " ".join(prompt.split())
+        # Deep Research switch: el front prefija "[DEEP_RESEARCH] ...". Lo interiorizamos
+        # aquí — guardamos la intención en una bandera y limpiamos el texto para que la
+        # burbuja del usuario NO muestre el prefijo y el ruteo lo trate como informe.
+        self._deep_research_pending = False
+        if prompt:
+            m = re.match(r"^\s*\[DEEP_RESEARCH\]\s*(.*)$", prompt, re.IGNORECASE | re.DOTALL)
+            if m:
+                self._deep_research_pending = True
+                prompt = m.group(1).strip()
         self.after(0, lambda: self._trigger_submit_with_text(prompt))
 
     def _handle_web_new_conversation(self):
@@ -2694,6 +2717,13 @@ class ClawdPet(tk.Tk):
                 self.webview_win.move(-9999, -9999)
             except Exception:
                 pass
+        # Also close the Tkinter history window if it is open
+        if self.history_win is not None:
+            try:
+                self.history_win.destroy()
+            except Exception:
+                pass
+            self.history_win = None
         self._webview_visible = False
         self._bubble_hidden_at = time.time()
         self._bubble_canvas = None
@@ -3883,14 +3913,40 @@ class ClawdPet(tk.Tk):
                 self._handle_guided_email_step(prompt, status, entry)
                 return
 
-            # Check if this is a new request to generate a report
             plow = prompt.lower().strip()
+
+            # ── Mission Control: crear borrador de correo en el Inbox ─────
+            # Va ANTES que el flujo de informe (y manda incluso con el switch
+            # Deep Research activo): un "borrador de correo para X" es inequívoco
+            # y no debe terminar como informe. Si toma el pedido, limpiamos la
+            # bandera de Deep Research para que no contamine el siguiente paso.
+            if self._try_seed_mc_draft(prompt, plow, status, entry):
+                self._deep_research_pending = False
+                return
+
+            # Check if this is a new request to generate a report
             is_report_req = False
             topic = ""
-            if plow.startswith("/informe") or plow.startswith("/reporte"):
+
+            # Deep Research switch activo: forzamos el flujo guiado de informe
+            # sin depender de las palabras gatillo. El tema es el prompt limpio
+            # quitando muletillas tipo "crea un docx/informe sobre ...".
+            if getattr(self, "_deep_research_pending", False):
+                self._deep_research_pending = False
+                is_report_req = True
+                topic = re.sub(
+                    r"^\s*(?:crea(?:me)?|cre[aá]|hazme|haz|genera(?:me)?|necesito|quiero|hac[eé]r?)\s+"
+                    r"(?:un|una|el|la)?\s*"
+                    r"(?:informe|reporte|documento|docx|doc|word|pdf|archivo|texto)?\s*"
+                    r"(?:extenso|completo|detallado|profesional)?\s*"
+                    r"(?:sobre|de|acerca de|del|sobre el|sobre la)?\s*",
+                    "", prompt, flags=re.IGNORECASE,
+                ).strip() or prompt.strip()
+
+            if (not is_report_req) and (plow.startswith("/informe") or plow.startswith("/reporte")):
                 is_report_req = True
                 topic = prompt.split(None, 1)[1].strip() if len(prompt.split(None, 1)) > 1 else ""
-            else:
+            elif not is_report_req:
                 triggers = [
                     "informe sobre", "informe de", "reporte sobre", "reporte de",
                     "crea un informe", "crear un informe", "hazme un informe", "quiero un informe",
@@ -3915,9 +3971,7 @@ class ClawdPet(tk.Tk):
                 self._start_guided_report_flow(topic, status, entry)
                 return
 
-            # ── Mission Control: crear borrador de correo en el Inbox ─────
-            if self._try_seed_mc_draft(prompt, plow, status, entry):
-                return
+            # (El borrador de correo MC ya se evaluó arriba, antes del informe.)
 
             # ── Mi Portafolio: editar archivos locales del proyecto ───────
             if self._try_edit_portfolio(prompt, plow, status, entry):
@@ -5805,6 +5859,12 @@ class ClawdPet(tk.Tk):
             def _web_status_configure(text=None, fg=None, **kwargs):
                 if text is not None:
                     self._eval_in_web(f"updateStatusText({json.dumps(text)})")
+                    # Show speech bubble when chat is hidden and a background task is running
+                    if not getattr(self, '_webview_visible', False) and text.strip():
+                        try:
+                            self.show_pet_speech_bubble(text, duration=5000)
+                        except Exception:
+                            pass
                 try:
                     status.original_configure(text=text, **{k:v for k,v in kwargs.items() if k != 'fg'})
                 except Exception:
@@ -5973,6 +6033,11 @@ class ClawdPet(tk.Tk):
                     )
                 except Exception:
                     os.startfile(parent)
+            # Ocultar el chat de Claudy para que se vea la carpeta del Explorador.
+            try:
+                self.after(120, self.hide_bubble)
+            except Exception:
+                pass
             return True, f"Ubicacion abierta: {normalized}"
         except Exception as e:
             return False, f"No pude abrir la ubicacion: {e}"
@@ -6093,8 +6158,12 @@ class ClawdPet(tk.Tk):
         except tk.TclError:
             pass
 
-    def show_pet_speech_bubble(self, text, duration=5000):
-        """Show a premium floating speech bubble directly above the pet's head."""
+    def show_pet_speech_bubble(self, text, duration=5000, on_click=None):
+        """Show a premium floating speech bubble directly above the pet's head.
+
+        If on_click is given, clicking the bubble runs it (e.g. reopen the chat
+        to show the finished work).
+        """
         if hasattr(self, "_pet_speech_win") and self._pet_speech_win:
             try:
                 self._pet_speech_win.destroy()
@@ -6178,7 +6247,23 @@ class ClawdPet(tk.Tk):
         
         win.geometry(f"{bw}x{bh}+{bx}+{by}")
         self._pet_speech_win = win
-        
+
+        # Click en la burbuja → ejecuta el callback (p.ej. reabrir el chat).
+        if on_click is not None:
+            def _do_click(_e=None):
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                if getattr(self, "_pet_speech_win", None) == win:
+                    self._pet_speech_win = None
+                try:
+                    on_click()
+                except Exception:
+                    pass
+            canvas.configure(cursor="hand2")
+            canvas.bind("<Button-1>", _do_click)
+
         def fade_in(alpha=0.0, current_y=by+10):
             if not win.winfo_exists():
                 return
@@ -7850,6 +7935,7 @@ class ClawdPet(tk.Tk):
 
             # ── CRITICAL: suppress all chat display during background report build ──
             self._report_generating = True
+            self._reset_cancel()  # limpiar cualquier cancelación previa
 
             # Start background processing thread
             self._start_milestone_progress()
@@ -7867,36 +7953,124 @@ class ClawdPet(tk.Tk):
                     style = rdata.get("style", "Profesional justificado con portada e índice")
                     language = rdata.get("language", "Español")
 
-                    # ── Step 1: Update status bar only (NOT the chat) ──
-                    self.after(0, lambda: status.configure(
-                        text="🔍 Investigando el tema...", fg=THEME["accent"]))
+                    # ── Step 1: REAL web research (search + scrape) ──
+                    if self._is_cancelled():
+                        self._stop_milestone_progress()
+                        return
+                    self._report_progress(10, "Investigando en internet", status)
 
-                    content_prompt = (
-                        f"Redacta un informe completo, estructurado y profesional sobre: '{topic}'.\n"
-                        f"Alcance/Profundidad: {depth}.\n"
-                        f"Referencias y citas: {references}.\n"
-                        f"Estilo: {style}.\n"
-                        f"Idioma: {language}.\n\n"
-                        f"ESTRUCTURA REQUERIDA (usa exactamente estos marcadores Markdown):\n"
-                        f"# [Título principal del informe]\n"
-                        f"## Introducción\n"
-                        f"## [Sección 1]\n"
-                        f"## [Sección 2]\n"
-                        f"... (tantas secciones como requiera el tema)\n"
-                        f"## Conclusiones\n"
-                        f"## Referencias\n\n"
-                        f"REGLAS ESTRICTAS:\n"
-                        f"- Escribe el informe completo en texto plano con marcadores Markdown (#, ##, ###).\n"
-                        f"- NO uses comandos como /buscar, /docx, /webfetch ni ningún slash-command.\n"
-                        f"- NO escribas explicaciones previas ni 'voy a hacer...'. Escribe directamente el informe.\n"
-                        f"- El informe debe ser sustancial: mínimo 800 palabras.\n"
-                        f"- Si se piden referencias, incluye al menos 5 fuentes reales al final.\n"
-                        f"- Responde SOLO con el contenido del informe en Markdown."
+                    web_context = ""
+                    web_sources = []
+                    try:
+                        _seen = {"n": 0}
+                        def _on_src(u):
+                            _seen["n"] += 1
+                            # 10% → 30% repartido entre las páginas leídas (máx ~4).
+                            pct = min(30, 10 + _seen["n"] * 5)
+                            self._report_progress(pct, f"Leyendo fuente {_seen['n']}", status)
+                        web_context, web_sources = self._gather_web_context(
+                            topic, max_pages=4, on_status=_on_src)
+                    except Exception:
+                        web_context, web_sources = "", []
+
+                    # Load professional formatting rules from skill file
+                    _skill_rules = ""
+                    try:
+                        _skill_path = _os.path.join(
+                            _os.path.dirname(_os.path.abspath(__file__)),
+                            "..", "..", "skills", "professional-document-writer", "SKILL.md"
+                        )
+                        if _os.path.isfile(_skill_path):
+                            with open(_skill_path, "r", encoding="utf-8") as _sf:
+                                _skill_rules = _sf.read()
+                    except Exception:
+                        pass
+                    if not _skill_rules:
+                        _skill_rules = (
+                            "FORMATO PROFESIONAL:\n"
+                            "- Título con # TÍTULO. Introducción obligatoria.\n"
+                            "- Secciones con ## y subsecciones con ###. Nunca saltes niveles.\n"
+                            "- Usa **negritas** para conceptos clave, *cursivas* para énfasis secundario.\n"
+                            "- Datos comparativos en TABLAS Markdown (| Col | Col |).\n"
+                            "- Citas importantes con > formato.\n"
+                            "- Termina con ## Conclusiones y ## Referencias.\n"
+                            "- NO uses placeholders como [Insertar aquí]. Escribe contenido real.\n"
+                            "- NO incluyas saludos ni comentarios fuera del documento."
+                        )
+
+                    # Objetivo de extensión según la profundidad elegida. Lo usa
+                    # _write_report_by_sections para repartir palabras por sección.
+                    _dl = (depth or "").lower()
+                    if "extenso" in _dl or "detallado" in _dl or "profundo" in _dl:
+                        min_words = 4000
+                    elif "resumen" in _dl or "ejecutivo" in _dl or "conciso" in _dl:
+                        min_words = 900
+                    else:  # "Actualizado al día" u otros
+                        min_words = 2000
+
+                    # Directiva de citas según lo elegido por el usuario.
+                    _rl = (references or "").lower()
+                    if "apa" in _rl:
+                        citation_directive = (
+                            "FORMATO DE CITAS APA (OBLIGATORIO): inserta citas en el texto con el formato "
+                            "(Autor/Organización, año) cuando uses un dato de una fuente. La sección final "
+                            "'## Referencias' debe listar cada fuente en formato APA 7: "
+                            "Autor/Organización. (Año). *Título del recurso*. Recuperado de URL. "
+                            "Usa las URLs reales del bloque de fuentes; si no conoces el autor, usa el nombre del sitio."
+                        )
+                    elif "ieee" in _rl:
+                        citation_directive = (
+                            "FORMATO DE CITAS IEEE (OBLIGATORIO): numera las referencias entre corchetes [1], [2] "
+                            "en el texto y lista al final en '## Referencias' como: [n] Autor, \"Título,\" Sitio, Año. URL. "
+                            "Usa las URLs reales del bloque de fuentes."
+                        )
+                    elif "final" in _rl:
+                        citation_directive = (
+                            "Incluye una sección '## Referencias' al final con la lista de fuentes y sus URLs reales. "
+                            "No es necesario citar en el cuerpo del texto."
+                        )
+                    else:  # "Sin citas"
+                        citation_directive = "No incluyas sección de referencias ni citas."
+
+                    # Build a web-evidence block from the scraped sources so the
+                    # LLM redacts from REAL current data, not only its memory.
+                    if web_context:
+                        _src_list = "\n".join(
+                            f"[{i+1}] {s['title']} — {s['url']}"
+                            for i, s in enumerate(web_sources)
+                        )
+                        web_block = (
+                            f"INFORMACION REAL Y ACTUAL RECOPILADA DE INTERNET (úsala como base factual; "
+                            f"prioriza estos datos sobre tu memoria interna y cita las fuentes por su número [n]):\n\n"
+                            f"{web_context}\n\n"
+                            f"FUENTES DISPONIBLES PARA REFERENCIAS:\n{_src_list}\n\n"
+                        )
+                    else:
+                        web_block = (
+                            "NOTA: No se pudo recopilar información de internet; redacta con tu conocimiento "
+                            "pero evita inventar cifras o fechas concretas que no puedas respaldar.\n\n"
+                        )
+
+                    # ── Redacción POR SECCIONES (varias llamadas cortas) ──
+                    # Pedir 8000 tokens de un tirón ahogaba/colgaba a DeepSeek. En su
+                    # lugar: 1 llamada para el índice + 1 llamada por sección. Cada
+                    # llamada es corta (<150s) y el % avanza de verdad.
+                    common_ctx = (
+                        f"{web_block}"
+                        f"{citation_directive}\n\n"
+                        f"DIRECTRICES DE FORMATO PROFESIONAL:\n{_skill_rules}\n"
+                    )
+                    raw_content = self._write_report_by_sections(
+                        topic=topic, depth=depth, style=style, language=language,
+                        common_ctx=common_ctx, web_sources=web_sources,
+                        references=references, min_words=min_words, status=status,
                     )
 
-                    self.after(0, lambda: status.configure(
-                        text="📝 Redactando el informe...", fg=THEME["accent"]))
-                    raw_content = self.send_quick_message(content_prompt, _skip_skill_action=True)
+                    # Si el usuario interrumpió (doble ESC), abortar sin guardar.
+                    if self._is_cancelled():
+                        print("[report] cancelado por el usuario — no se guarda archivo")
+                        self._stop_milestone_progress()
+                        return
 
                     # Strip any accidental slash commands from the LLM response
                     raw_content = _re.sub(r'^/\S+.*$', '', raw_content, flags=_re.MULTILINE).strip()
@@ -7912,30 +8086,121 @@ class ClawdPet(tk.Tk):
                         )
 
                     # ── Step 2: Optionally download images ──
+                    # Queremos imágenes salvo que el usuario haya elegido "Sin imágenes".
                     image_paths = []
-                    wants_images = images_pref and any(
-                        w in images_pref.lower() for w in ["sí", "si", "pocas", "muchas", "varias"])
+                    _ip = (images_pref or "").lower()
+                    wants_images = bool(_ip) and not ("sin imágenes" in _ip or "sin imagenes" in _ip or _ip.strip() == "no")
                     if wants_images:
-                        self.after(0, lambda: status.configure(
-                            text="🖼️ Buscando imágenes...", fg=THEME["accent"]))
+                        max_imgs = 5 if "muchas" in _ip else 3
+                        self._report_progress(75, "Buscando imágenes", status)
                         try:
-                            image_paths = self._download_report_images(topic, max_images=3)
+                            image_paths = self._download_report_images(topic, max_images=max_imgs)
                         except Exception:
                             image_paths = []
 
                     # ── Step 3: Build the docx locally (guaranteed) ──
-                    self.after(0, lambda: status.configure(
-                        text="📄 Creando el archivo Word...", fg=THEME["accent"]))
+                    self._report_progress(90, "Creando el archivo Word", status)
                     import claudy_powers as cp
-                    safe_topic = _re.sub(r'[\\/*?:"<>|]', '_', topic)[:60]
-                    docx_dir = _os.path.join(_os.path.expanduser("~"), "Documents", "Claudy", "Informes")
+
+                    # Nombre de archivo CORTO y limpio. En vez del prompt crudo
+                    # ("infrome en docx sobre toda la historia...") usamos el título
+                    # H1 que el propio informe ya generó, y si no, limpiamos el tema
+                    # quitando muletillas. Capitalizado y recortado a palabras enteras.
+                    def _clean_doc_name(raw):
+                        s = (raw or "").strip()
+                        # Quitar muletillas iniciales encadenadas tipo
+                        # "crea un docx extenso sobre toda la historia ..." aplicando
+                        # los patrones repetidamente hasta que no quede nada que pelar.
+                        _patterns = [
+                            r"^(?:crea(?:me)?|cre[aá]|hazme|haz|genera(?:me)?|necesito|quiero|dame|hac[eé]r?)\b",
+                            r"^(?:un|una|el|la|los|las)\b",
+                            r"^(?:informe|infrome|reporte|documento|docx|doc|word|pdf|archivo|texto)\b",
+                            r"^en\s+\w+\b",
+                            r"^(?:completo|extenso|detallado|profesional|breve|corto)\b",
+                            r"^(?:sobre|de|acerca\s+de|del|toda|todo)\b",
+                        ]
+                        changed = True
+                        while changed:
+                            changed = False
+                            for pat in _patterns:
+                                new = _re.sub(pat, "", s, flags=_re.IGNORECASE).strip()
+                                if new != s:
+                                    s = new
+                                    changed = True
+                        s = _re.sub(r'[\\/*?:"<>|]', "", s)        # chars inválidos
+                        s = _re.sub(r"\s+", " ", s).strip(" .-")
+                        # recortar a ~50 chars sin cortar palabras
+                        if len(s) > 50:
+                            s = s[:50].rsplit(" ", 1)[0]
+                        return (s[:1].upper() + s[1:]) if s else "Informe"
+
+                    # Preferir el título H1 del contenido (idioma correcto, ya limpio).
+                    _m_title = _re.search(r"^#\s+(.+)$", raw_content, _re.MULTILINE)
+                    _title_src = _m_title.group(1) if _m_title else topic
+                    safe_topic = _clean_doc_name(_title_src)
+                    # Guardar en la carpeta de Claudy en Google Drive. Si Drive no
+                    # está montado, caer a la carpeta local de Documentos.
+                    drive_dir = r"G:\Mi unidad\claudy_files"
+                    if _os.path.isdir(r"G:\Mi unidad"):
+                        docx_dir = drive_dir
+                    else:
+                        docx_dir = _os.path.join(_os.path.expanduser("~"), "Documents", "Claudy", "Informes")
                     _os.makedirs(docx_dir, exist_ok=True)
+
+                    def _is_locked(p):
+                        if not _os.path.exists(p):
+                            return False
+                        lock = _os.path.join(_os.path.dirname(p), "~$" + _os.path.basename(p))
+                        if _os.path.exists(lock):
+                            return True
+                        try:  # intentar abrir en modo append exclusivo
+                            with open(p, "a"):
+                                return False
+                        except Exception:
+                            return True
+
+                    # Versionado: si ya existe un informe con ese nombre (o está
+                    # abierto en Word), añadir (2), (3)... para distinguir versiones
+                    # sin pisar el anterior ni fallar por archivo bloqueado.
                     docx_path = _os.path.join(docx_dir, f"{safe_topic}.docx")
+                    _v = 2
+                    while _os.path.exists(docx_path) or _is_locked(docx_path):
+                        docx_path = _os.path.join(docx_dir, f"{safe_topic} ({_v}).docx")
+                        _v += 1
+                        if _v > 50:  # tope de seguridad
+                            stamp = time.strftime("%Y%m%d_%H%M%S")
+                            docx_path = _os.path.join(docx_dir, f"{safe_topic} {stamp}.docx")
+                            break
+
                     result = cp.create_docx_with_images(docx_path, raw_content, image_paths)
+                    print(f"[report] create_docx -> {str(result)[:200]}")
+                    print(f"[report] raw_content len={len(raw_content)} chars, imgs={len(image_paths)}")
+                    try:
+                        self._debug_log("REPORT DOCX",
+                            f"len={len(raw_content)} imgs={len(image_paths)} -> {str(result)[:160]}")
+                    except Exception:
+                        pass
+
+                    # Avisar honestamente si se pidieron imágenes y no se encontró ninguna.
+                    if wants_images and not image_paths:
+                        result += (
+                            "\n\n⚠️ No encontré imágenes reales en Wikimedia para este tema, "
+                            "así que el informe quedó sin ilustraciones."
+                        )
+                    elif image_paths:
+                        result += f"\n\n🖼️ Incrusté {len(image_paths)} imagen(es) de Wikimedia."
 
                 except Exception as pipeline_err:
+                    import traceback as _tb
+                    tb = _tb.format_exc()
+                    print(f"[report] PIPELINE ERROR: {pipeline_err}\n{tb}")
+                    try:
+                        self._debug_log("REPORT PIPELINE ERROR", tb)
+                    except Exception:
+                        pass
                     result = f"Error en el pipeline del informe: {pipeline_err}"
 
+                self._report_progress(100, "Informe terminado", status)
                 self._stop_milestone_progress()
                 self.after(0, lambda: self._deliver_report_result(result, status, entry))
 
@@ -8311,6 +8576,76 @@ class ClawdPet(tk.Tk):
                 pass
         self._milestone_after_ids = []
 
+    def _request_cancel(self):
+        """Activa la bandera de cancelación. Los procesos largos (informe) la
+        revisan en sus puntos de control y se detienen limpiamente. No mata
+        threads a la fuerza (Python no lo permite), pero corta entre pasos."""
+        self._cancel_requested = True
+        # Detener animaciones/progreso visibles y avisar.
+        try:
+            self._stop_milestone_progress()
+        except Exception:
+            pass
+        try:
+            self._report_generating = False
+        except Exception:
+            pass
+        def _notify():
+            try:
+                chat = getattr(self, "_chat_view", None)
+                if chat:
+                    chat.hide_typing()
+                    chat.add_system("⛔ Proceso interrumpido por ti (doble ESC). Claudy sigue activa.")
+            except Exception:
+                pass
+            try:
+                if getattr(self, "bubble_minimized", False) or not getattr(self, "_webview_visible", True):
+                    self.show_pet_speech_bubble("⛔ Interrumpido.\nClaudy sigue lista.", duration=4000)
+            except Exception:
+                pass
+            try:
+                self._stop_typing_progress(getattr(self, "_chat_entry_widget", None))
+            except Exception:
+                pass
+        try:
+            self.after(0, _notify)
+        except Exception:
+            pass
+
+    def _is_cancelled(self):
+        """True si el usuario pidió interrumpir. Limpia nada — el que arranca un
+        proceso nuevo debe resetear la bandera con _reset_cancel()."""
+        return bool(getattr(self, "_cancel_requested", False))
+
+    def _reset_cancel(self):
+        self._cancel_requested = False
+
+    def _report_progress(self, pct, label, status=None):
+        """Actualiza el avance del informe. Muestra el % en la barra de estado y,
+        si el chat está oculto/minimizado, en una burbuja en cursiva sobre Claudy.
+        Llamable desde el worker (usa self.after para tocar la UI de forma segura)."""
+        pct = max(0, min(100, int(pct)))
+        text = f"⏳ {label} ({pct}%)"
+
+        def _ui():
+            try:
+                if status is not None:
+                    status.configure(text=text, fg=THEME["accent"])
+            except Exception:
+                pass
+            # Si el chat no está visible, ir mostrando el avance en burbuja.
+            chat_hidden = getattr(self, "bubble_minimized", False) or not getattr(self, "_webview_visible", True)
+            if chat_hidden:
+                try:
+                    self.show_pet_speech_bubble(f"Trabajando… {label}\n{pct}% completado", duration=None)
+                except Exception:
+                    pass
+
+        try:
+            self.after(0, _ui)
+        except Exception:
+            pass
+
     def _deliver_report_result(self, result, status, entry):
         """Final delivery of the report: show only the file card, never the content."""
         import os as _os
@@ -8328,11 +8663,13 @@ class ClawdPet(tk.Tk):
                 self._remember_file_artifact(artifact_path)
                 fname = _os.path.basename(artifact_path)
 
-                # Show completion bubble when minimized
-                if getattr(self, "bubble_minimized", False):
+                # Show completion bubble when chat is hidden or minimized.
+                # Al hacer click reabre el chat para ver el resultado.
+                if getattr(self, "bubble_minimized", False) or not getattr(self, "_webview_visible", True):
                     self.show_pet_speech_bubble(
-                        f"\u2728 \u00a1Listo, Felipe!\nHe creado:\n{fname}",
-                        duration=10000
+                        f"\u2728 Termin\u00e9 de trabajar.\nToca para ver:\n{fname}",
+                        duration=None,
+                        on_click=lambda: self.show_chat_bubble(),
                     )
 
                 # Append file card to existing chat (preserves history and scrollbar)
@@ -8356,7 +8693,7 @@ class ClawdPet(tk.Tk):
                     chat.hide_typing()
                     chat.add_bot(f"\u26a0\ufe0f {first_line}")
                 done_msg = "Algo sali\u00f3 mal. Intenta de nuevo."
-                if getattr(self, "bubble_minimized", False):
+                if getattr(self, "bubble_minimized", False) or not getattr(self, "_webview_visible", True):
                     self.show_pet_speech_bubble(f"\u26a0\ufe0f {first_line[:80]}", duration=7000)
 
 
@@ -8368,6 +8705,223 @@ class ClawdPet(tk.Tk):
                 status.configure(text="Error al mostrar resultado.", fg=THEME.get("accent", "#f55"))
             except Exception:
                 pass
+
+    def _gather_web_context(self, topic, max_pages=4, on_status=None):
+        """Search the web for the topic and scrape the best pages.
+
+        Returns (context_text, sources) where context_text is the concatenated
+        scraped content (truncated) ready to inject into an LLM prompt, and
+        sources is a list of {url, title} dicts for the References section.
+        This is what makes the report use REAL, current web data instead of
+        only the model's own memory.
+        """
+        from deep_research import scrape_url
+
+        # Formulate a few complementary queries so we don't rely on a single one.
+        queries = [
+            topic,
+            f"{topic} 2025 2026 datos estadisticas",
+            f"{topic} analisis tendencias actuales",
+        ]
+
+        sources = []
+        context_parts = []
+        visited = set()
+
+        for query in queries:
+            if len([s for s in sources]) >= max_pages:
+                break
+            try:
+                items = self._search_files_online(query, max_results=4)
+            except Exception:
+                items = []
+            for item in items:
+                url = (item or {}).get("url", "")
+                if not url or url in visited:
+                    continue
+                if "duckduckgo.com" in url or "brave.com" in url:
+                    continue
+                visited.add(url)
+                if on_status:
+                    try:
+                        on_status(url)
+                    except Exception:
+                        pass
+                text = ""
+                try:
+                    text = scrape_url(url)
+                except Exception:
+                    text = ""
+                if not text or text.startswith("Error al extraer"):
+                    continue
+                context_parts.append(
+                    f"FUENTE: {url}\nTITULO: {item.get('title','')}\nCONTENIDO:\n{text[:5000]}\n---\n"
+                )
+                sources.append({"url": url, "title": item.get("title", "") or url})
+                if len(sources) >= max_pages:
+                    break
+
+        context_text = "\n".join(context_parts)[:24000]
+        return context_text, sources
+
+    def _write_report_by_sections(self, topic, depth, style, language, common_ctx,
+                                   web_sources, references, min_words, status):
+        """Redacta el informe en varias llamadas cortas (índice + 1 por sección).
+        Evita el cuelgue de pedir miles de tokens en una sola llamada a DeepSeek.
+        Cada llamada usa timeout=150 y devuelve el Markdown ensamblado."""
+        import re as _re
+
+        # Número de secciones de desarrollo según profundidad. MENOS secciones
+        # pero más grandes = menos llamadas = más rápido y robusto (antes 7
+        # secciones = ~10 llamadas de 22s c/u y se atascaba antes de terminar).
+        _dl = (depth or "").lower()
+        if "extenso" in _dl or "detallado" in _dl or "profundo" in _dl:
+            n_sections = 4
+        elif "resumen" in _dl or "ejecutivo" in _dl or "conciso" in _dl:
+            n_sections = 2
+        else:
+            n_sections = 3
+        words_per_section = max(400, int(min_words / (n_sections + 1)))
+
+        # Etiquetas localizadas: si el informe es en inglés, los encabezados fijos
+        # (título, Introducción, Conclusiones, Referencias) y las instrucciones
+        # también deben ir en inglés. Antes estaban hardcodeados en español.
+        is_en = "ingl" in (language or "").lower() or "english" in (language or "").lower()
+        if is_en:
+            L = {
+                "title": f"# Report on {topic}",
+                "intro_h": "## Introduction", "intro_name": "Introduction",
+                "concl_h": "## Conclusions", "concl_name": "Conclusions",
+                "refs_h": "## References", "retrieved": "Retrieved from",
+                "outline_instr": (
+                    f"You are a report planner. Topic: '{topic}'.\n{common_ctx}\n"
+                    f"Propose exactly {n_sections} development-section titles (NOT counting "
+                    f"Introduction, Conclusions or References) for a professional report, "
+                    f"logically ordered and specific to the topic.\n"
+                    f"Reply ONLY with the {n_sections} titles, one per line, no numbering, bullets or markdown."
+                ),
+                "intro_instr": "State the objective, the current relevance of the topic and what the report will cover.",
+                "concl_instr": "Synthesize the key findings and close with future perspectives.",
+                "fallback_sec": [f"Aspect {i+1} of {topic}" for i in range(n_sections)],
+            }
+        else:
+            L = {
+                "title": f"# Informe sobre {topic}",
+                "intro_h": "## Introducción", "intro_name": "Introducción",
+                "concl_h": "## Conclusiones", "concl_name": "Conclusiones",
+                "refs_h": "## Referencias", "retrieved": "Recuperado de",
+                "outline_instr": (
+                    f"Eres un planificador de informes. Tema: '{topic}'.\n{common_ctx}\n"
+                    f"Propón exactamente {n_sections} títulos de secciones de desarrollo (sin contar "
+                    f"Introducción, Conclusiones ni Referencias) para un informe profesional sobre el tema, "
+                    f"ordenados lógicamente y específicos al tema.\n"
+                    f"Responde SOLO con los {n_sections} títulos, uno por línea, sin numeración ni viñetas ni markdown."
+                ),
+                "intro_instr": "Plantea el objetivo, la relevancia actual del tema y qué cubrirá el informe.",
+                "concl_instr": "Sintetiza los hallazgos clave y cierra con perspectivas futuras.",
+                "fallback_sec": [f"Aspecto {i+1} de {topic}" for i in range(n_sections)],
+            }
+
+        # ── Paso 1: pedir el índice (rápido) ──
+        self._report_progress(38, "Diseñando el índice", status)
+        outline_prompt = L["outline_instr"]
+        outline_resp = self.send_quick_message(
+            outline_prompt, _skip_skill_action=True, timeout=150, max_tokens=600)
+        section_titles = [
+            _re.sub(r'^[\s\-\*\d\.\)]+', '', ln).strip()
+            for ln in (outline_resp or "").splitlines() if ln.strip()
+        ]
+        section_titles = [t for t in section_titles if t][:n_sections]
+        if not section_titles:
+            section_titles = L["fallback_sec"]
+
+        # Título principal del documento (en el idioma elegido).
+        parts = [L["title"] + "\n"]
+        written = []  # resúmenes para mantener coherencia entre secciones
+
+        # Refuerzo de idioma en CADA llamada — el modelo derivaba a español.
+        lang_rule = (
+            f"WRITE THE ENTIRE SECTION IN ENGLISH. Do not use any Spanish."
+            if is_en else
+            f"ESCRIBE TODA LA SECCIÓN EN ESPAÑOL."
+        )
+
+        def _gen(section_heading, instructions, target_words):
+            if self._is_cancelled():
+                return ""
+            prev = " | ".join(written[-4:]) if written else "—"
+            p = (
+                f"You are writing a professional REPORT about '{topic}' (style: {style}).\n"
+                f"{lang_rule}\n"
+                f"{common_ctx}\n"
+                f"Sections already written: {prev}.\n"
+                f"Now write ONLY this section. Start with the markdown heading: '{section_heading}'.\n"
+                f"{instructions}\n"
+                f"RULES: ~{target_words} words. Real, developed content (no placeholders). "
+                f"Use **bold** for key concepts. If you add a table, ALL rows glued together "
+                f"(header, |---| and data) with no blank lines and the same number of columns. "
+                f"No comments outside the report. Do NOT repeat what other sections already said. "
+                f"{lang_rule}"
+            )
+            import time as _t
+            _t0 = _t.time()
+            # Timeout por sección moderado: si DeepSeek se atasca en una, fallamos
+            # rápido y seguimos con la siguiente en vez de colgar varios minutos.
+            txt = self.send_quick_message(p, _skip_skill_action=True, timeout=100, max_tokens=2500)
+            txt = _re.sub(r'^/\S+.*$', '', txt or '', flags=_re.MULTILINE).strip()
+            msg = f"sección '{section_heading[:30]}' -> {len(txt)} chars en {round(_t.time()-_t0,1)}s"
+            print(f"[report] {msg}")
+            try:
+                self._debug_log("REPORT SECTION", msg)  # persistir en debug.log
+            except Exception:
+                pass
+            return txt
+
+        # ── Paso 2: Introducción ──
+        self._report_progress(42, "Redactando la introducción", status)
+        intro = _gen(L["intro_h"], L["intro_instr"], words_per_section)
+        if intro:
+            parts.append(intro)
+            written.append(L["intro_name"])
+
+        # ── Paso 3: secciones de desarrollo ──
+        for idx, st in enumerate(section_titles):
+            if self._is_cancelled():
+                break  # el usuario interrumpió: dejamos lo escrito hasta aquí
+            pct = 45 + int((idx / max(1, len(section_titles))) * 25)  # 45→70%
+            self._report_progress(pct, f"Sección {idx+1}/{len(section_titles)}", status)
+            body = _gen(
+                f"## {st}",
+                ("Develop in depth with several paragraphs. Include a markdown table if it adds comparable data."
+                 if is_en else
+                 "Desarrolla a fondo con varios párrafos. Incluye una tabla markdown si aporta datos comparables."),
+                words_per_section)
+            if body:
+                parts.append(body)
+                written.append(st)
+
+        # ── Paso 4: Conclusiones ──
+        self._report_progress(71, "Redactando conclusiones", status)
+        concl = _gen(L["concl_h"], L["concl_instr"], max(250, int(words_per_section * 0.7)))
+        if concl:
+            parts.append(concl)
+
+        # ── Paso 5: Referencias (ensambladas localmente con URLs reales) ──
+        _rl = (references or "").lower()
+        if web_sources and ("apa" in _rl or "ieee" in _rl or "final" in _rl):
+            self._report_progress(73, "Armando referencias", status)
+            year = time.strftime("%Y")
+            ref_lines = [L["refs_h"] + "\n"]
+            for i, s in enumerate(web_sources):
+                title = s.get("title") or s.get("url")
+                url = s.get("url", "")
+                if "ieee" in _rl:
+                    ref_lines.append(f"[{i+1}] {title}. {L['retrieved']} {url}")
+                else:  # APA o lista al final
+                    ref_lines.append(f"- {title}. ({year}). {L['retrieved']} {url}")
+            parts.append("\n".join(ref_lines))
+
+        return "\n\n".join(parts)
 
     def _download_report_images(self, topic, max_images=3):
         """Download Wikimedia CC images for the report topic. Returns list of local file paths."""
@@ -8381,27 +8935,63 @@ class ClawdPet(tk.Tk):
         os.makedirs(img_dir, exist_ok=True)
         downloaded = []
 
+        # Build progressively simpler search terms. El tema puede venir con
+        # artículos/muletillas ("la historia de los mundiales hasta hoy") que no
+        # matchean ningún título de Wikipedia; probamos variantes más simples y
+        # en ambos idiomas (es y en) antes de rendirnos.
+        base = (topic or "").strip()
+        no_articles = _re.sub(
+            r"\b(la|el|los|las|un|una|de|del|sobre|hasta|hoy|dia|día|the|of|history)\b",
+            " ", base, flags=_re.IGNORECASE,
+        )
+        no_articles = _re.sub(r"\s+", " ", no_articles).strip()
+        first_words = " ".join(base.split()[:3])
+        candidates = []
+        for q in (base, no_articles, first_words):
+            q = q.strip()
+            if q and q not in candidates:
+                candidates.append(q)
+
+        print(f"[imgs] candidatos de búsqueda: {candidates}")
+
+        def _find_page(lang, query):
+            """Return (lang, page_title) for the best Wikipedia match, or (None, None)."""
+            try:
+                search_url = (
+                    f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search"
+                    f"&srsearch={urllib.parse.quote(query)}&format=json&srlimit=1"
+                )
+                req = urllib.request.Request(
+                    search_url, headers={"User-Agent": "Claudy/4.0 (educational)"}
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    sdata = json.loads(resp.read())
+                results = sdata.get("query", {}).get("search", [])
+                if results:
+                    return lang, results[0]["title"]
+            except Exception as e:
+                print(f"[imgs] _find_page({lang}, {query!r}) error: {e}")
+            return None, None
+
         try:
-            # Step A: Search Wikipedia for the topic to get the exact page title
-            search_url = (
-                "https://en.wikipedia.org/w/api.php?action=query&list=search"
-                f"&srsearch={urllib.parse.quote(topic)}&format=json&srlimit=1"
-            )
-            req = urllib.request.Request(
-                search_url, headers={"User-Agent": "Claudy/4.0 (educational)"}
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                sdata = json.loads(resp.read())
+            # Step A: probar (idioma, consulta) hasta encontrar una página real.
+            wiki_lang, page_title = None, None
+            for query in candidates:
+                for lang in ("es", "en"):
+                    wiki_lang, page_title = _find_page(lang, query)
+                    if page_title:
+                        break
+                if page_title:
+                    break
 
-            search_results = sdata.get("query", {}).get("search", [])
-            if not search_results:
+            if not page_title:
+                print("[imgs] ninguna página de Wikipedia encontrada para los candidatos")
                 return []
-
-            page_title = search_results[0]["title"]
+            print(f"[imgs] página encontrada: {wiki_lang}:{page_title}")
 
             # Step B: Get ALL images listed on that page
             images_url = (
-                "https://en.wikipedia.org/w/api.php?action=query"
+                f"https://{wiki_lang}.wikipedia.org/w/api.php?action=query"
                 f"&titles={urllib.parse.quote(page_title)}"
                 f"&prop=images&format=json&imlimit=20"
             )
@@ -8422,6 +9012,7 @@ class ClawdPet(tk.Tk):
                         if not any(skip in low for skip in ("flag", "icon", "logo", "symbol", "coat", "blank", "map")):
                             img_titles.append(name)
             
+            print(f"[imgs] imágenes candidatas tras filtro: {len(img_titles)}")
             if not img_titles:
                 return []
 
@@ -8432,7 +9023,7 @@ class ClawdPet(tk.Tk):
                     break
                 try:
                     info_url = (
-                        "https://en.wikipedia.org/w/api.php?action=query"
+                        f"https://{wiki_lang}.wikipedia.org/w/api.php?action=query"
                         f"&titles={urllib.parse.quote(img_title)}"
                         "&prop=imageinfo&iiprop=url&iiurlwidth=800&format=json"
                     )
@@ -8447,6 +9038,9 @@ class ClawdPet(tk.Tk):
                         thumb_url = ii.get("thumburl") or ii.get("url", "")
                         if not thumb_url:
                             continue
+                        # Fix protocol-relative URLs from Wikipedia (e.g. //upload.wikimedia.org/...)
+                        if thumb_url.startswith("//"):
+                            thumb_url = "https:" + thumb_url
 
                         ext = ".jpg" if ".jpg" in thumb_url.lower() else ".png"
                         local_path = os.path.join(img_dir, f"{safe_base}_{len(downloaded)+1}{ext}")
@@ -8464,11 +9058,13 @@ class ClawdPet(tk.Tk):
                         else:
                             os.remove(local_path)
                         break  # one image per img_title iteration
-                except Exception:
+                except Exception as e:
+                    print(f"[imgs] descarga de {img_title!r} falló: {e}")
                     continue
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[imgs] error general descargando imágenes: {e}")
 
+        print(f"[imgs] descargadas finalmente: {len(downloaded)}")
         return downloaded
 
 
@@ -13281,18 +13877,66 @@ class ClawdPet(tk.Tk):
             pass
         web_ctx = self._web_context_for_topic(topic_clean, max_results=8)
 
+        # Load professional formatting rules from skill file
+        _skill_rules = ""
+        try:
+            _skill_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..", "..", "skills", "professional-document-writer", "SKILL.md"
+            )
+            if os.path.isfile(_skill_path):
+                with open(_skill_path, "r", encoding="utf-8") as _sf:
+                    _skill_rules = _sf.read()
+        except Exception:
+            pass
+        if not _skill_rules:
+            _skill_rules = (
+                "FORMATO PROFESIONAL:\n"
+                "- Título con # TÍTULO. Introducción obligatoria.\n"
+                "- Secciones con ## y subsecciones con ###. Nunca saltes niveles.\n"
+                "- Usa **negritas** para conceptos clave, *cursivas* para énfasis secundario.\n"
+                "- Datos comparativos en TABLAS Markdown (| Col | Col |).\n"
+                "- Citas importantes con > formato.\n"
+                "- Termina con ## Conclusiones y ## Referencias.\n"
+                "- NO uses placeholders como [Insertar aquí]. Escribe contenido real.\n"
+                "- NO incluyas saludos ni comentarios fuera del documento."
+            )
+
+        # Check if user wants images in natural language document creation
+        _wants_images_nl = False
+        _img_keywords = ("imagen", "imágenes", "imagenes", "foto", "fotos",
+                         "ilustra", "ilustracion", "ilustraciones", "visual",
+                         "gráfico", "grafico", "con imagen", "con fotos")
+        if any(k in prompt.lower() for k in _img_keywords):
+            _wants_images_nl = True
+
         # Format-specific LLM prompts
         if fmt in ("docx", "pdf"):
             llm_prompt = (
                 (web_ctx + "\n\n" if web_ctx else "") +
-                f"Escribe un documento en espanol sobre: {topic_clean}.\n"
+                f"Escribe un documento profesional en espanol sobre: {topic_clean}.\n"
                 + ("USA la informacion de internet de arriba como base factual. Cita fuentes al final cuando uses datos especificos. " if web_ctx else "") +
-                "Estructura con titulo principal (# Titulo), subtitulos (## Subtitulo) y parrafos.\n"
-                "Extension: 500-900 palabras. Solo el contenido del documento, sin preambulo ni cierre."
+                f"\nDIRECTRICES DE FORMATO PROFESIONAL (sigue TODAS estas reglas):\n{_skill_rules}\n\n"
+                "REGLAS ADICIONALES:\n"
+                "- Escribe contenido COMPLETO y REAL. NO uses placeholders como [Introducción], [Sección], [Insertar aquí], etc.\n"
+                "- Cada sección debe tener párrafos sustanciales (mínimo 2-3 párrafos).\n"
+                "- Incluye al menos UNA tabla Markdown con datos relevantes.\n"
+                "- Extensión: 500-900 palabras. Solo el contenido del documento, sin preambulo ni cierre."
             )
             content = self._llm_structured(llm_prompt, timeout=180)
             if not content:
                 return True, f"No pude generar contenido para '{topic_clean}'."
+
+            # Download and attach images if requested
+            if _wants_images_nl and fmt == "docx":
+                try:
+                    self.after(0, lambda: self._set_response_text(f"Descargando imágenes para: {topic_clean}..."))
+                    image_paths = self._download_report_images(topic_clean, max_images=3)
+                except Exception:
+                    image_paths = []
+                if image_paths:
+                    return True, cp.create_docx_with_images(full_path, content, image_paths)
+
             if fmt == "docx":
                 return True, cp.create_docx(full_path, content)
             return True, cp.create_pdf(full_path, content)
@@ -17459,7 +18103,7 @@ Tambien puedes hablar naturalmente:
         import threading
         threading.Thread(target=run_pipeline, daemon=True).start()
 
-    def send_quick_message(self, prompt, _skip_skill_action=False, timeout=90, on_delta=None):
+    def send_quick_message(self, prompt, _skip_skill_action=False, timeout=90, on_delta=None, max_tokens=None):
         # Check for local skill commands first
         if not _skip_skill_action:
             handled, result = self._try_handle_skill_action(prompt)
@@ -17478,6 +18122,15 @@ Tambien puedes hablar naturalmente:
         self._save_memory("Usuario", prompt)
         self._fire_hook("on_message", user=prompt)
         config = self.load_claudy_config()
+        # Permitir subir el límite de tokens para respuestas largas (p.ej. informes
+        # extensos de 4000+ palabras que con el default de 4096 se cortaban a la mitad).
+        if max_tokens:
+            try:
+                config = dict(config)
+                config["agent"] = dict(config.get("agent", {}))
+                config["agent"]["maxTokens"] = int(max_tokens)
+            except Exception:
+                pass
         opencode = config["opencode"]
         base_url = opencode.get("baseUrl", "http://127.0.0.1:4096").rstrip("/")
         model = self._current_model or opencode.get("defaultModel", "deepseek-chat")
@@ -17586,10 +18239,10 @@ Tambien puedes hablar naturalmente:
             except Exception as local_err:
                 self._debug_log("LOCAL OPENCODE FAILED, FALLING BACK TO REMOTE", str(local_err))
                 # Auto-fallback to remote credentials if local server times out/fails
-                response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, on_delta=on_delta)
+                response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, on_delta=on_delta, timeout=timeout)
         else:
             # Multi-provider remote path
-            response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, on_delta=on_delta)
+            response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, on_delta=on_delta, timeout=timeout)
 
         # Robust text extraction: OpenCode native format, OpenAI format, or direct text.
         text = ""
@@ -17615,7 +18268,7 @@ Tambien puedes hablar naturalmente:
         if not text and is_local:
             self._debug_log("LOCAL OPENCODE RETURNED EMPTY TEXT, FALLING BACK TO REMOTE")
             try:
-                response = self._call_remote_provider(model, enhanced_sys, context, prompt, config)
+                response = self._call_remote_provider(model, enhanced_sys, context, prompt, config, timeout=timeout)
                 parts = response.get("parts")
                 if parts:
                     text = "\n".join(part.get("text", "") for part in parts if part.get("type") == "text").strip()
@@ -17728,7 +18381,7 @@ Tambien puedes hablar naturalmente:
                 keys = [env_key]
         return keys
 
-    def _call_remote_provider(self, model, system_prompt, context, user_prompt, config, on_delta=None):
+    def _call_remote_provider(self, model, system_prompt, context, user_prompt, config, on_delta=None, max_tokens_override=None, timeout=90):
         """Call remote AI provider with credential pooling, retry, and inter-provider fallback."""
         last_error = None
 
@@ -17751,21 +18404,21 @@ Tambien puedes hablar naturalmente:
             actual_model = fb_model.partition("/")[2] if "/" in fb_model else fb_model
             for key in keys:
                 try:
-                    return self._call_provider_api(provider, api_url, is_anthropic, is_openai_compat, actual_model, system_prompt, context, user_prompt, key, config, on_delta=on_delta)
+                    return self._call_provider_api(provider, api_url, is_anthropic, is_openai_compat, actual_model, system_prompt, context, user_prompt, key, config, on_delta=on_delta, timeout=timeout)
                 except Exception as e:
                     last_error = e
                     continue
 
         raise RuntimeError(f"All providers/keys exhausted. Last error: {last_error}")
 
-    def _call_provider_api(self, provider, api_url, is_anthropic, is_openai_compat, model, system_prompt, context, user_prompt, key, config, on_delta=None):
+    def _call_provider_api(self, provider, api_url, is_anthropic, is_openai_compat, model, system_prompt, context, user_prompt, key, config, on_delta=None, timeout=90):
         """Make a single API call to a provider."""
         if is_anthropic:
-            return self._call_anthropic(api_url, model, system_prompt, context, user_prompt, key, config)
+            return self._call_anthropic(api_url, model, system_prompt, context, user_prompt, key, config, timeout=timeout)
         elif is_openai_compat:
-            return self._call_openai_compat(api_url, model, system_prompt, context, user_prompt, key, config, on_delta=on_delta)
+            return self._call_openai_compat(api_url, model, system_prompt, context, user_prompt, key, config, on_delta=on_delta, timeout=timeout)
         else:
-            return self._call_generic(api_url, model, system_prompt, context, user_prompt, key, provider)
+            return self._call_generic(api_url, model, system_prompt, context, user_prompt, key, provider, timeout=timeout)
 
     def _anthropic_tool_schemas(self):
         """Convert OpenAI-style registry to Anthropic tool format."""
@@ -17861,7 +18514,7 @@ Tambien puedes hablar naturalmente:
             raise RuntimeError("empty stream")
         return {"choices": [{"message": {"role": "assistant", "content": text}}]}
 
-    def _call_openai_compat(self, api_url, model, system_prompt, context, user_prompt, key, config=None, on_delta=None):
+    def _call_openai_compat(self, api_url, model, system_prompt, context, user_prompt, key, config=None, on_delta=None, timeout=90):
         """Call OpenAI-compatible API."""
         endpoint = api_url
         messages = [{"role": "system", "content": system_prompt}]
@@ -17892,7 +18545,7 @@ Tambien puedes hablar naturalmente:
                 pass  # fall back to a normal blocking request on any streaming error
         import urllib.request as r
         req = r.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
-        with r.urlopen(req, timeout=90) as resp:
+        with r.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
         if tools_enabled:
             choices = data.get("choices") or []
@@ -17903,7 +18556,7 @@ Tambien puedes hablar naturalmente:
                     return self._execute_tool_calls_and_followup(tcs, payload, headers, endpoint, is_anthropic=False)
         return data
 
-    def _call_anthropic(self, api_url, model, system_prompt, context, user_prompt, key, config=None):
+    def _call_anthropic(self, api_url, model, system_prompt, context, user_prompt, key, config=None, timeout=90):
         """Call Anthropic Messages API with prompt caching."""
         cache_control = {"type": "ephemeral"}
         max_tokens = (config or {}).get("agent", {}).get("maxTokens", 4096)
@@ -17928,7 +18581,7 @@ Tambien puedes hablar naturalmente:
         }
         import urllib.request as r
         req = r.Request(api_url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-        with r.urlopen(req, timeout=90) as resp:
+        with r.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
         if tools_enabled and data.get("stop_reason") == "tool_use":
             tool_uses = [b for b in data.get("content", []) if b.get("type") == "tool_use"]
@@ -17936,7 +18589,7 @@ Tambien puedes hablar naturalmente:
                 return self._execute_tool_calls_and_followup(tool_uses, payload, headers, api_url, is_anthropic=True)
         return data
 
-    def _call_generic(self, api_url, model, system_prompt, context, user_prompt, key, provider):
+    def _call_generic(self, api_url, model, system_prompt, context, user_prompt, key, provider, timeout=90):
         """Generic API call for providers like Google."""
         raise RuntimeError(f"Provider {provider} not fully implemented yet. Use OpenAI-compatible providers like DeepSeek or Anthropic.")
 

@@ -234,7 +234,10 @@ def create_doc(title, content=""):
                 documentId=doc_id,
                 body={"requests": requests}
             ).execute()
-        
+        # Mover a la carpeta Claudy automáticamente
+        drive_svc, _ = _service("drive", "v3")
+        if drive_svc:
+            _move_to_claudy_folder(drive_svc, doc_id)
         return {
             "ok": True,
             "id": doc_id,
@@ -357,6 +360,10 @@ def create_sheet(title, data=None, headers=None):
                     body=body
                 ).execute()
         
+        # Mover a la carpeta Claudy automáticamente
+        drive_svc, _ = _service("drive", "v3")
+        if drive_svc:
+            _move_to_claudy_folder(drive_svc, spreadsheet_id)
         return {
             "ok": True,
             "id": spreadsheet_id,
@@ -423,7 +430,7 @@ def append_to_sheet(spreadsheet_id, range_name, values):
             insertDataOption="INSERT_ROWS",
             body=body
         ).execute()
-        
+
         return {
             "ok": True,
             "updatedCells": result.get("updates", {}).get("updatedCells"),
@@ -431,3 +438,172 @@ def append_to_sheet(spreadsheet_id, range_name, values):
         }
     except Exception as e:
         return {"ok": False, "reason": f"Error agregando a hoja: {e}"}
+
+
+# ── Carpeta raíz de Claudy en Drive ──────────────────────────────────────
+CLAUDY_DRIVE_FOLDER_NAME = "claudy_files"
+
+
+def get_or_create_claudy_folder():
+    """Devuelve (folder_id, created) de la carpeta raíz 'Claudy' en Drive.
+    La crea si no existe. Todos los archivos nuevos de Claudy van aquí."""
+    service, err = _service("drive", "v3")
+    if err:
+        return None, False
+    try:
+        res = service.files().list(
+            q=f"name='{CLAUDY_DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields="files(id, name)",
+            pageSize=1,
+        ).execute()
+        files = res.get("files", [])
+        if files:
+            return files[0]["id"], False
+        folder = service.files().create(
+            body={"name": CLAUDY_DRIVE_FOLDER_NAME, "mimeType": "application/vnd.google-apps.folder"},
+            fields="id",
+        ).execute()
+        return folder["id"], True
+    except Exception:
+        return None, False
+
+
+def create_folder(name, parent_id=None):
+    """Crea una carpeta en Drive.
+    Si parent_id=None usa la carpeta raíz 'Claudy' automáticamente.
+    Devuelve {"ok": bool, "id": ..., "name": ..., "link": ..., "reason": ...}"""
+    service, err = _service("drive", "v3")
+    if err:
+        return {"ok": False, "reason": err}
+    try:
+        if not parent_id:
+            parent_id, _ = get_or_create_claudy_folder()
+        body = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+        if parent_id:
+            body["parents"] = [parent_id]
+        folder = service.files().create(body=body, fields="id, name, webViewLink").execute()
+        return {
+            "ok": True,
+            "id": folder.get("id"),
+            "name": folder.get("name"),
+            "link": folder.get("webViewLink", f"https://drive.google.com/drive/folders/{folder.get('id')}"),
+        }
+    except Exception as e:
+        return {"ok": False, "reason": f"Error creando carpeta: {e}"}
+
+
+def search_in_drive(query, folder_id=None, doc_type="all", max_results=20):
+    """Busca archivos en Drive (opcionalmente dentro de una carpeta específica).
+    Si folder_id=None busca en todo Drive; si folder_id='claudy' usa la carpeta raíz de Claudy.
+    doc_type: 'document' | 'spreadsheet' | 'folder' | 'all'
+    Devuelve {"connected": bool, "items": [...], "reason": ...}"""
+    service, err = _service("drive", "v3")
+    if err:
+        return {"connected": False, "reason": err, "items": []}
+    try:
+        if folder_id == "claudy":
+            folder_id, _ = get_or_create_claudy_folder()
+        parts = ["trashed=false"]
+        if query:
+            parts.append(f"name contains '{query}'")
+        if folder_id:
+            parts.append(f"'{folder_id}' in parents")
+        if doc_type == "document":
+            parts.append("mimeType='application/vnd.google-apps.document'")
+        elif doc_type == "spreadsheet":
+            parts.append("mimeType='application/vnd.google-apps.spreadsheet'")
+        elif doc_type == "folder":
+            parts.append("mimeType='application/vnd.google-apps.folder'")
+        elif doc_type == "all":
+            parts.append("(mimeType='application/vnd.google-apps.document' or "
+                         "mimeType='application/vnd.google-apps.spreadsheet' or "
+                         "mimeType='application/vnd.google-apps.folder')")
+        q = " and ".join(parts)
+        res = service.files().list(
+            q=q, pageSize=max_results,
+            fields="files(id, name, mimeType, modifiedTime, webViewLink, parents)",
+            orderBy="modifiedTime desc",
+        ).execute()
+        items = []
+        for f in res.get("files", []):
+            mt = f.get("mimeType", "")
+            kind = ("folder" if "folder" in mt
+                    else "document" if "document" in mt
+                    else "spreadsheet" if "spreadsheet" in mt else "file")
+            items.append({
+                "id": f.get("id"), "name": f.get("name"), "type": kind,
+                "modifiedTime": f.get("modifiedTime"), "link": f.get("webViewLink"),
+            })
+        return {"connected": True, "items": items}
+    except Exception as e:
+        return {"connected": False, "reason": f"Error buscando: {e}", "items": []}
+
+
+def _move_to_claudy_folder(service, file_id):
+    """Mueve un archivo recién creado a la carpeta Claudy en Drive."""
+    try:
+        folder_id, _ = get_or_create_claudy_folder()
+        if not folder_id:
+            return
+        f = service.files().get(fileId=file_id, fields="parents").execute()
+        prev_parents = ",".join(f.get("parents", []))
+        service.files().update(
+            fileId=file_id,
+            addParents=folder_id,
+            removeParents=prev_parents,
+            fields="id, parents",
+        ).execute()
+    except Exception:
+        pass
+
+
+def get_file_info(file_id):
+    """Devuelve metadatos de un archivo de Drive (nombre, tipo, link).
+    {"ok": bool, "name": ..., "type": ..., "link": ..., "reason": ...}"""
+    service, err = _service("drive", "v3")
+    if err:
+        return {"ok": False, "reason": err}
+    try:
+        f = service.files().get(
+            fileId=file_id, fields="id, name, mimeType, modifiedTime, webViewLink, trashed"
+        ).execute()
+        mt = f.get("mimeType", "")
+        kind = "document" if "document" in mt else ("spreadsheet" if "spreadsheet" in mt else "file")
+        return {
+            "ok": True,
+            "id": f.get("id"),
+            "name": f.get("name"),
+            "type": kind,
+            "link": f.get("webViewLink"),
+            "modifiedTime": f.get("modifiedTime"),
+            "trashed": f.get("trashed", False),
+        }
+    except Exception as e:
+        return {"ok": False, "reason": f"Error obteniendo info: {e}"}
+
+
+def delete_file(file_id, to_trash=True):
+    """Borra un Doc/Sheet (o cualquier archivo de Drive).
+
+    Por defecto lo envia a la PAPELERA (recuperable desde Drive > Papelera).
+    Con to_trash=False lo borra de forma PERMANENTE (irreversible).
+
+    Devuelve: {"ok": bool, "trashed": bool, "name": ..., "reason": ...}
+    """
+    service, err = _service("drive", "v3")
+    if err:
+        return {"ok": False, "reason": err}
+    try:
+        # Capturar el nombre antes de borrar, para confirmar al usuario.
+        name = ""
+        try:
+            name = service.files().get(fileId=file_id, fields="name").execute().get("name", "")
+        except Exception:
+            pass
+        if to_trash:
+            service.files().update(fileId=file_id, body={"trashed": True}).execute()
+            return {"ok": True, "trashed": True, "name": name}
+        service.files().delete(fileId=file_id).execute()
+        return {"ok": True, "trashed": False, "name": name}
+    except Exception as e:
+        return {"ok": False, "reason": f"Error borrando: {e}"}

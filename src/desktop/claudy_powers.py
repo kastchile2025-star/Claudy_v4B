@@ -886,6 +886,171 @@ def create_folder(path):
         return f"Error creando carpeta: {e}"
 
 
+def _set_cell_shading(cell, color):
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    shading = OxmlElement('w:shd')
+    shading.set(qn('w:val'), 'clear')
+    shading.set(qn('w:fill'), color)
+    cell._tc.get_or_add_tcPr().append(shading)
+
+
+def _add_formatted_runs(paragraph, text, font_name="Calibri", color_rgb=None, italic=False, bold=False):
+    import re
+    from docx.shared import RGBColor
+    parts = re.split(r'(\*\*.*?\*\*|\*.*?\*)', text)
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith('**') and part.endswith('**'):
+            run = paragraph.add_run(part[2:-2])
+            run.bold = True
+            if italic:
+                run.italic = True
+        elif part.startswith('*') and part.endswith('*'):
+            run = paragraph.add_run(part[1:-1])
+            run.italic = True
+            if bold:
+                run.bold = True
+        else:
+            run = paragraph.add_run(part)
+            if italic:
+                run.italic = True
+            if bold:
+                run.bold = True
+        
+        if font_name:
+            run.font.name = font_name
+        if color_rgb:
+            run.font.color.rgb = color_rgb
+
+
+def _build_docx_content(doc, content):
+    from docx.shared import Pt, Inches, RGBColor
+    lines = (content or "").split("\n")
+    i = 0
+    n_lines = len(lines)
+    while i < n_lines:
+        line = lines[i]
+        stripped = line.strip()
+        
+        if not stripped:
+            i += 1
+            continue
+            
+        # 1. Parse tables
+        if stripped.startswith("|") and stripped.endswith("|") and i + 1 < n_lines and "|" in lines[i+1]:
+            table_lines = []
+            # Recolectar filas de la tabla. Toleramos UNA línea en blanco suelta
+            # entre la cabecera y el cuerpo (el LLM a veces la mete y antes eso
+            # dejaba las filas huérfanas como texto plano).
+            blanks_skipped = 0
+            while i < n_lines:
+                cur = lines[i].strip()
+                if cur.startswith("|") and cur.endswith("|"):
+                    table_lines.append(cur)
+                    blanks_skipped = 0
+                    i += 1
+                elif cur == "" and blanks_skipped == 0 and table_lines:
+                    # peek: ¿la siguiente línea no vacía vuelve a ser fila de tabla?
+                    j = i + 1
+                    while j < n_lines and lines[j].strip() == "":
+                        j += 1
+                    nxt = lines[j].strip() if j < n_lines else ""
+                    if nxt.startswith("|") and nxt.endswith("|"):
+                        blanks_skipped = 1
+                        i = j
+                    else:
+                        break
+                else:
+                    break
+                
+            if len(table_lines) >= 2:
+                headers = [c.strip() for c in table_lines[0].split("|")[1:-1]]
+                
+                has_separator = False
+                if len(table_lines) > 1:
+                    sep_chars = set(table_lines[1].replace('|', '').replace('-', '').replace(':', '').replace(' ', ''))
+                    if not sep_chars or sep_chars == {''}:
+                        has_separator = True
+                
+                start_row_idx = 2 if has_separator else 1
+                num_cols = max(1, len(headers))
+                table = doc.add_table(rows=1, cols=num_cols)
+                table.style = 'Table Grid'
+                
+                hdr_cells = table.rows[0].cells
+                for c_idx, text in enumerate(headers):
+                    if c_idx < num_cols:
+                        hdr_cells[c_idx].text = ""
+                        p = hdr_cells[c_idx].paragraphs[0]
+                        _add_formatted_runs(p, text, font_name="Georgia", color_rgb=RGBColor(0xFF, 0xFF, 0xFF), bold=True)
+                        _set_cell_shading(hdr_cells[c_idx], "1F4E78")
+                
+                for r_idx in range(start_row_idx, len(table_lines)):
+                    row_cells = table.add_row().cells
+                    cells = [c.strip() for c in table_lines[r_idx].split("|")[1:-1]]
+                    # Rellenar filas cortas para que no se "rompa" la tabla cuando
+                    # el modelo emite menos columnas de las que tiene la cabecera.
+                    while len(cells) < num_cols:
+                        cells.append("")
+                    for c_idx in range(num_cols):
+                        text = cells[c_idx] if c_idx < len(cells) else ""
+                        row_cells[c_idx].text = ""
+                        p = row_cells[c_idx].paragraphs[0]
+                        _add_formatted_runs(p, text, font_name="Calibri")
+                        if (r_idx - start_row_idx) % 2 == 1:
+                            _set_cell_shading(row_cells[c_idx], "F2F2F2")
+                                
+                doc.add_paragraph()
+                continue
+                
+        # 2. Parse Headings
+        if stripped.startswith("# "):
+            h = doc.add_heading(level=1)
+            _add_formatted_runs(h, stripped[2:], font_name="Georgia", color_rgb=RGBColor(0x1F, 0x4E, 0x78))
+            i += 1
+        elif stripped.startswith("## "):
+            h = doc.add_heading(level=2)
+            _add_formatted_runs(h, stripped[3:], font_name="Georgia", color_rgb=RGBColor(0x2E, 0x75, 0xB6))
+            i += 1
+        elif stripped.startswith("### "):
+            h = doc.add_heading(level=3)
+            _add_formatted_runs(h, stripped[4:], font_name="Georgia", color_rgb=RGBColor(0x56, 0x56, 0x56))
+            i += 1
+            
+        # 3. Parse blockquotes
+        elif stripped.startswith("> "):
+            quote_parts = []
+            while i < n_lines and lines[i].strip().startswith("> "):
+                quote_parts.append(lines[i].strip()[2:].strip())
+                i += 1
+            
+            quote_text = " ".join(quote_parts)
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Inches(0.5)
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(8)
+            p.paragraph_format.line_spacing = 1.15
+            _add_formatted_runs(p, quote_text, font_name="Georgia", color_rgb=RGBColor(0x55, 0x55, 0x55), italic=True)
+            
+        # 4. Parse lists
+        elif stripped.startswith("- ") or stripped.startswith("* "):
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            p = doc.add_paragraph(style="List Bullet")
+            p.paragraph_format.space_after = Pt(3)
+            p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            _add_formatted_runs(p, stripped[2:], font_name="Calibri")
+            i += 1
+            
+        # 5. Normal paragraphs
+        else:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(6)
+            _add_formatted_runs(p, line, font_name="Calibri")
+            i += 1
+
+
 def create_docx(path, content=""):
     """Create a .docx file with given content. Appends .docx if missing."""
     target = _clean_user_path(path)
@@ -950,18 +1115,7 @@ def create_docx(path, content=""):
         h3_font.italic = True
         h3_font.color.rgb = RGBColor(0x56, 0x56, 0x56) # Charcoal/grey accent
         
-        for line in (content or "").split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("# "):
-                doc.add_heading(stripped[2:], level=1)
-            elif stripped.startswith("## "):
-                doc.add_heading(stripped[3:], level=2)
-            elif stripped.startswith("### "):
-                doc.add_heading(stripped[4:], level=3)
-            else:
-                p = doc.add_paragraph(line)
-                # Add elegant paragraph spacing
-                p.paragraph_format.space_after = Pt(6)
+        _build_docx_content(doc, content)
                 
         doc.save(target)
         size = os.path.getsize(target)
@@ -1000,11 +1154,16 @@ def create_docx_with_images(path, content="", image_paths=None):
             section.right_margin = Inches(1.25)
 
         # Typography
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
         style = doc.styles["Normal"]
         font = style.font
         font.name = "Calibri"
         font.size = Pt(11)
         font.color.rgb = RGBColor(0x33, 0x33, 0x33)
+        # Texto justificado + interlineado cómodo para un look profesional.
+        style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        style.paragraph_format.line_spacing = 1.15
+        style.paragraph_format.space_after = Pt(6)
 
         h1_style = doc.styles["Heading 1"]
         h1_style.font.name = "Georgia"
@@ -1026,25 +1185,7 @@ def create_docx_with_images(path, content="", image_paths=None):
         h3_style.font.color.rgb = RGBColor(0x56, 0x56, 0x56)
 
         # Parse and write content
-        for line in (content or "").split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("# "):
-                doc.add_heading(stripped[2:], level=1)
-            elif stripped.startswith("## "):
-                doc.add_heading(stripped[3:], level=2)
-            elif stripped.startswith("### "):
-                doc.add_heading(stripped[4:], level=3)
-            elif stripped.startswith("- ") or stripped.startswith("* "):
-                p = doc.add_paragraph(stripped[2:], style="List Bullet")
-                p.paragraph_format.space_after = Pt(3)
-            elif stripped.startswith("**") and stripped.endswith("**"):
-                p = doc.add_paragraph()
-                run = p.add_run(stripped.strip("*"))
-                run.bold = True
-                p.paragraph_format.space_after = Pt(4)
-            else:
-                p = doc.add_paragraph(line)
-                p.paragraph_format.space_after = Pt(6)
+        _build_docx_content(doc, content)
 
         # Embed images if provided
         if image_paths:
@@ -1856,7 +1997,23 @@ def detect_intent(prompt):
         if m:
             arg = m.group(1).strip() if m.groups() else ""
             if intent == "search_app_maybe":
-                if any(k in arg.lower() for k in ("video", "youtube", "google", "noticia", "como", "que es")):
+                al = arg.lower()
+                # NO es búsqueda de app si la frase pide info de internet o es una
+                # pregunta del mundo (quién/cuándo/precio/etc). Esos casos deben ir
+                # a la búsqueda web, no a winget. (Antes "busca en internet quién es
+                # el DT de Brasil" caía en winget → "No package found".)
+                _web_signals = (
+                    "video", "youtube", "google", "noticia", "noticias", "como ",
+                    "cómo ", "que es", "qué es", "internet", "en la web", "en la red",
+                    "online", "quién", "quien ", "cuándo", "cuando ", "dónde", "donde ",
+                    "cuánto", "cuanto ", "cuál", "cual ", "por qué", "porque",
+                    "actual", "hoy", "precio", "resultado", "marcador", "clima",
+                    "dólar", "dolar", "euro", "presidente", "director",
+                )
+                if al.strip().endswith("?") or any(k in al for k in _web_signals):
+                    return None, None
+                # Una búsqueda de app real es corta (1-3 palabras, sin frase larga).
+                if len(arg.split()) > 4:
                     return None, None
                 return "search_app", arg
             # Filter false positives for filesystem intents: require a path-like arg
