@@ -1,306 +1,138 @@
-# Claudy - Asistente de IA Personal
+# Claudy v5 — Asistente IA personal de escritorio
 
-**Claudy** es un fork simplificado de [OpenClaw](https://github.com/openclaw/openclaw), un asistente de IA personal que corre localmente en tu maquina y se conecta a OpenCode.
+**Claudy** es una mascota de escritorio con IA para Windows: un sprite animado
+que vive en tu pantalla, con un panel de chat moderno, memoria infinita y un
+bot de Telegram como canal remoto. Hecho en Python puro.
 
-## Caracteristicas
+> Refactor v5 (junio 2026): el monolito `pet.py` se partió en módulos
+> (`core/`, `channels/`), la memoria ganó búsqueda FTS5 sobre toda la
+> historia, y Telegram pasó a ser el único canal externo, con formato nativo.
+> Detalle completo en [PLAN_REFACTORIZACION_CLAUDY_V5.md](PLAN_REFACTORIZACION_CLAUDY_V5.md).
 
-- Chat web en tiempo real
-- Integracion con **OpenCode** via servidor local
-- Canal opcional de **Telegram Bot** con polling local
-- Transcripcion de audios de Telegram usando la skill local `qwen-asr`
-- Tools locales por comandos slash: `/read`, `/write`, `/exec`, `/browse`
-- Sistema de **skills** en Markdown (`SKILL.md`)
-- Memoria vectorial local en `~/.claudy/memory.json`
-- Voice en navegador: dictado STT y lectura TTS
-- Historial de conversaciones persistente
-- Selector de modelos desde la UI
-- Configuracion editable desde la app
-- Interfaz moderna y responsive
+## Características
 
-## Stack Tecnologico
+- **Mascota animada** (tkinter): drag & drop, snap a bordes, bandeja del
+  sistema, hotkey global `Alt+Space`, animaciones idle.
+- **Chat de escritorio** (pywebview + `chat.html`): sidebar con estado de
+  Google Drive y Telegram, productos QCORE, Deep Research, streaming en vivo.
+- **Memoria infinita** (SQLite): nada se borra jamás — capa caliente +
+  archivo + resúmenes + checkpoints, con índice **FTS5** para recordar
+  cualquier cosa de toda la historia (`/memoria <consulta>`).
+- **Espejo Obsidian**: cada conversación y conocimiento se refleja en el
+  vault QCORE (Google Drive).
+- **Bot de Telegram**: texto, notas de voz (Whisper), fotos y documentos,
+  respuestas con formato nativo (negrita/código), respuestas por audio
+  opcionales (edge-tts), comandos `/memoria`, `/resumen`, `/estado`, `/voz`.
+- **Multi-proveedor LLM**: OpenCode local → Anthropic / DeepSeek / OpenAI /
+  Google con fallback automático y pool de credenciales.
+- **Poderes locales**: abrir/instalar apps, archivos, crear docx/xlsx/pptx/pdf,
+  capturas, descargas, calendario de Google, kanban, cron, skills SKILL.md.
 
-- **Backend**: Node.js/Bun + Express + WebSocket
-- **Frontend**: React + Vite + Tailwind CSS
-- **LLM**: OpenCode server (`opencode serve`)
-- **Canales**: Web UI y Telegram Bot API
-- **Storage**: JSON files en `~/.claudy/`
+## Arquitectura
 
-## Opcion 1: GitHub Codespaces
+```
+src/desktop/
+├── pet.py                  # Ventana, sprite, animación, UI glue (en adelgazamiento)
+├── core/
+│   ├── memory.py           # Memoria infinita SQLite + FTS5 + vault (MemoryMixin)
+│   ├── llm.py              # Cadena de proveedores + tools (LLMMixin)
+│   ├── prompts.py          # System prompt ÚNICO, variantes por canal (PromptsMixin)
+│   ├── gateway.py          # HTTP 127.0.0.1:8720 — contrato app<->canales (GatewayMixin)
+│   └── logging_setup.py    # Logs con rotación en ~/.claudy/logs/
+├── channels/
+│   └── telegram_bot.py     # Bot Telegram (proceso aparte, único canal externo)
+├── chat.html               # UI del chat (NO tocar el diseño)
+├── claudy_powers.py        # Poderes locales (apps, archivos, documentos)
+├── qcore_products.py       # Contexto de productos QCORE
+├── secure_store.py         # Secretos encriptados en config.json
+└── tests/                  # python -m unittest discover tests
+```
 
-La forma mas facil de probar Claudy es en un **GitHub Codespace**. No necesitas instalar nada en tu computadora.
+La clase `ClawdPet` compone los mixins: `MemoryMixin, LLMMixin, GatewayMixin,
+PromptsMixin, tk.Tk`. Cada mixin es un módulo independiente y testeable.
 
-1. Ve al repo: https://github.com/kastchile2025-star/Claudy
-2. Haz clic en el boton verde **Code** y luego **Codespaces**.
-3. Crea un codespace desde `main`.
-4. Espera 1-2 minutos a que se configure.
-5. Abre el puerto `3000` en el navegador.
+### Flujo de un mensaje
 
-> Nota: el backend usa el puerto `3001` y el frontend usa el puerto `3000`.
+```
+Escritorio: chat.html → WebViewApi → ask_claudy → send_quick_message (core/llm)
+Telegram:   bot → POST :8720/api {"message", "channel":"telegram"} (core/gateway)
+                          ↓
+       intents (_try_handle_skill_action) → o LLM con contexto de memoria
+                          ↓
+       memoria SQLite (+FTS) + espejo Obsidian + respuesta al canal
+```
 
-Scripts utiles en Codespaces:
+## Instalación
+
+Requisitos: Windows 10/11, Python 3.12+, ffmpeg (para audio de Telegram).
 
 ```bash
-bash scripts/codespace-install-opencode.sh
-bash scripts/codespace-opencode.sh
-bash scripts/codespace-backend.sh
-bash scripts/codespace-frontend.sh
+git clone https://github.com/kastchile2025-star/Claudy_v4.git
+cd Claudy_v4
+pip install -r requirements.txt        # núcleo
+pip install -r requirements-extras.txt # opcional: micrófono, OCR, playwright...
+iniciar_claudy.bat
 ```
 
-O para levantar todo en segundo plano con logs:
+## Configuración
 
-```bash
-bash scripts/codespace-all.sh
-```
-
-Para detener servicios en segundo plano:
-
-```bash
-bash scripts/codespace-stop.sh
-```
-
-## Opcion 2: Instalacion Local
-
-### Requisitos
-
-- Node.js 20+ o Bun
-- OpenCode CLI disponible en tu maquina
-
-### Pasos
-
-```bash
-# 1. Clonar el repo
-git clone https://github.com/kastchile2025-star/Claudy.git
-cd Claudy
-
-# 2. Instalar backend
-cd backend
-bun install
-
-# 3. Iniciar OpenCode en otra terminal
-opencode serve --port 4096 --hostname 127.0.0.1
-
-# 4. Iniciar backend
-bun run src/server.ts
-
-# 5. Instalar frontend en otra terminal
-cd ../frontend
-bun install
-
-# 6. Iniciar frontend
-bun run dev
-
-# 7. Abrir la app
-# http://localhost:3000
-```
-
-## Uso
-
-1. Abre http://localhost:3000 en tu navegador.
-2. Escribe un mensaje para comenzar.
-3. Selecciona diferentes modelos desde el menu superior.
-4. Ve a Configuracion para cambiar OpenCode, Telegram, tools, skills, memoria o prompt del agente.
-
-## Tools Locales
-
-Claudy incluye tools invocadas manualmente por comandos slash. Por seguridad, `/write` y `/exec` vienen apagados por defecto.
-
-| Comando | Funcion |
-| --- | --- |
-| `/read README.md` | Lee un archivo dentro del directorio permitido. |
-| `/browse https://example.com` | Descarga texto basico de una pagina web. |
-| `/write notas/demo.txt\ncontenido` | Escribe un archivo. Requiere activar escritura. |
-| `/exec bun --version` | Ejecuta un comando. Requiere activar ejecucion. |
-| `/skills` | Lista skills instalados. |
-| `/skill_search telegram` | Busca skills instalados. |
-| `/skill_find pdf` | Busca skills en internet usando skills.sh. |
-| `/skill_install_best pdf` | Instala el mejor `SKILL.md` encontrado y actualiza el README local de skills. |
-| `/skill_install URL` | Instala un `SKILL.md` desde una URL. |
-
-Puedes configurar el directorio permitido desde la UI o con `CLAUDY_TOOLS_ROOT`. Las tools de archivos y ejecucion no pueden salir de ese directorio.
-
-## Skills
-
-Claudy puede cargar habilidades desde archivos `SKILL.md`.
-
-- Los skills del proyecto viven en `skills/<nombre>/SKILL.md`.
-- Los skills instalados por el usuario se guardan en `~/.claudy/skills/<nombre>/SKILL.md`.
-- Cada instalacion copia `SKILL.md` y, si la fuente es GitHub, tambien archivos auxiliares del directorio del skill.
-- Cada instalacion actualiza `~/.claudy/skills/README.md` con nombre, descripcion, fuente y ruta local.
-- Cuando escribes un mensaje, Claudy busca skills relevantes y los agrega como contexto del agente.
-- Desde Configuracion puedes buscar skills instalados o instalar uno pegando una URL a `SKILL.md`.
-- Tambien puedes decir en lenguaje natural: `instala una skill para leer pdf`.
-
-Ejemplo de URL compatible:
-
-```text
-https://github.com/vercel-labs/skills/blob/main/skills/find-skills/SKILL.md
-```
-
-Comandos utiles desde el chat web:
-
-```text
-/skill_find pdf
-/skill_install_best pdf
-```
-
-Comandos equivalentes desde el CLI:
-
-```text
-/find-skill pdf
-/install-skill pdf
-```
-
-Los skills son instrucciones en Markdown. Instala solo skills de fuentes confiables.
-
-## Memoria Vectorial
-
-Claudy guarda recuerdos locales de mensajes utiles y los recupera por similitud para dar contexto en futuras respuestas.
-
-- Archivo local: `~/.claudy/memory.json`
-- No usa un servicio externo de embeddings.
-- Usa un vector hash local liviano para busqueda semantica aproximada.
-- Puedes activar/desactivar memoria y cambiar limites desde Configuracion.
-
-## Voice
-
-La interfaz web incluye voz usando APIs del navegador:
-
-- **STT**: boton de microfono para dictar mensajes.
-- **TTS**: boton de volumen para leer respuestas del asistente.
-
-La disponibilidad depende del navegador y sus permisos de microfono. En Chrome/Edge suele funcionar mejor.
-
-## Telegram
-
-Claudy puede responder mensajes desde un bot de Telegram usando polling local.
-Tambien puede recibir notas de voz, audios o documentos de audio y transcribirlos con la skill local `qwen-asr` si existe en `~/.claudy/skills/qwen-asr/scripts/main.py`.
-
-1. Crea un bot con BotFather y guarda el token de forma privada.
-2. Abre Configuracion en Claudy.
-3. Activa Telegram.
-4. Pega el bot token.
-5. Recomendado: limita los Chat IDs permitidos a tu chat personal.
-6. Guarda la configuracion y escribe al bot desde Telegram.
-
-Tambien puedes configurar variables de entorno:
-
-```bash
-TELEGRAM_BOT_ENABLED=true
-TELEGRAM_BOT_TOKEN=123456:ABC...
-TELEGRAM_ALLOWED_CHAT_IDS=123456789
-CLAUDY_ASR_TIMEOUT_MS=600000
-CLAUDY_FFMPEG=ffmpeg
-CLAUDY_TELEGRAM_AUDIO_MAX_BYTES=26214400
-```
-
-> Importante: no subas el token al repositorio. Claudy lo guarda localmente en `~/.claudy/config.json`.
-
-Para audios de Telegram, Claudy intenta convertir notas de voz `.oga/.opus` a WAV mono 16 kHz con `ffmpeg` antes de llamar la skill `qwen-asr`. Si la transcripcion tarda mucho, aumenta `CLAUDY_ASR_TIMEOUT_MS`.
-
-## Configuracion
-
-Archivo local: `~/.claudy/config.json`
+Archivo: `~/.claudy/config.json` (los tokens se encriptan en reposo
+automáticamente con `secure_store`).
 
 ```json
 {
-  "opencode": {
-    "baseUrl": "http://127.0.0.1:4096",
-    "defaultModel": "opencode-go/qwen3.6-plus"
+  "opencode": { "baseUrl": "http://127.0.0.1:4096", "defaultModel": "deepseek-chat" },
+  "providers": {
+    "anthropic": { "key": "..." },
+    "deepseek":  { "key": "..." },
+    "fallback": ["deepseek-chat"],
+    "allowFreeFallback": false
   },
-  "telegram": {
-    "enabled": false,
-    "botToken": "",
-    "allowedChatIds": []
-  },
-  "skills": {
-    "enabled": true,
-    "maxContextSkills": 3
-  },
-  "memory": {
-    "enabled": true,
-    "maxResults": 5,
-    "maxEntries": 500
-  },
-  "tools": {
-    "enabled": true,
-    "allowRead": true,
-    "allowWrite": false,
-    "allowExec": false,
-    "allowBrowser": true,
-    "allowedRoot": "..",
-    "commandTimeoutMs": 10000,
-    "maxOutputChars": 20000
-  },
-  "agent": {
-    "systemPrompt": "Eres Claudy, un asistente de IA personal...",
-    "maxTokens": 4096,
-    "temperature": 0.7
-  },
-  "server": {
-    "port": 3001,
-    "host": "127.0.0.1"
-  }
+  "telegram": { "botToken": "...", "allowedUsers": ["123456789"], "ttsReply": false },
+  "gateway": { "port": 8720 }
 }
 ```
 
-Variables utiles en `.env`:
+- `providers.allowFreeFallback`: si todos los proveedores fallan, permite el
+  fallback gratuito de Pollinations (terceros). **Apagado por defecto por
+  privacidad.**
+- La memoria vive en `G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\AGENTES-MEMORY\claudy_local\memory.db`
+  si el Drive está montado; si no, en `~/.claudy/memory.db`.
+
+## Telegram
+
+1. Crea un bot con @BotFather y dile a Claudy: `vincula mi telegram <token>`
+   (o pega el token en Configuración).
+2. Autoriza tu usuario: `/vincular <tu_id>` desde el escritorio.
+3. El bot corre como proceso independiente con watchdog: si se cae, la app
+   lo revive sola (máx 5 reinicios/hora).
+
+Comandos del bot: `/memoria <consulta>` (busca en toda la historia),
+`/resumen` (lo de hoy), `/estado` (salud), `/voz on|off` (audio o texto),
+`/atajos`. También acepta notas de voz, fotos y documentos.
+
+## Memoria infinita — contrato
+
+1. `memory` (caliente, últimos ~400-800 mensajes) → contexto inmediato.
+2. `memory_archive` → todo lo antiguo, **nunca se borra**.
+3. `memory_summaries` → resúmenes de rangos comprimidos.
+4. `memory_fts` (FTS5) → índice de búsqueda sobre TODO lo anterior.
+5. Vault Obsidian → espejo legible en markdown.
+
+`/memoria <lo que sea>` responde desde cualquier época de la historia.
+
+## Tests
 
 ```bash
-CLAUDY_SKILLS_ENABLED=true
-CLAUDY_MAX_CONTEXT_SKILLS=3
-CLAUDY_MEMORY_ENABLED=true
-CLAUDY_MEMORY_MAX_RESULTS=5
-CLAUDY_MEMORY_MAX_ENTRIES=500
-CLAUDY_TOOLS_ENABLED=true
-CLAUDY_TOOL_READ=true
-CLAUDY_TOOL_BROWSER=true
-CLAUDY_TOOL_WRITE=false
-CLAUDY_TOOL_EXEC=false
-CLAUDY_TOOLS_ROOT=..
-CLAUDY_TOOL_TIMEOUT_MS=10000
-CLAUDY_TOOL_MAX_OUTPUT_CHARS=20000
+cd src/desktop
+python -m unittest discover tests -v
 ```
 
-## Estructura del Proyecto
+## Logs
 
-```text
-claudy/
-|-- backend/
-|   |-- src/
-|   |   |-- server.ts        # Servidor Express + WebSocket
-|   |   |-- opencode.ts      # Cliente OpenCode server
-|   |   |-- telegram.ts      # Canal Telegram Bot API
-|   |   |-- skills.ts        # Loader y buscador de skills
-|   |   |-- memory.ts        # Memoria vectorial local
-|   |   |-- toolrunner.ts    # Tools slash locales
-|   |   |-- agent.ts         # Loop del agente
-|   |   |-- config.ts        # Gestion de configuracion
-|   |   |-- sessions/        # Almacenamiento de sesiones
-|   |   |-- tools/           # Herramientas legacy
-|-- frontend/
-|   |-- index.html           # Entrada Vite
-|   |-- src/                 # React app (Vite)
-|-- skills/
-|   |-- find-skills/
-|   |   |-- SKILL.md          # Skill base para descubrir habilidades
-```
-
-## Roadmap
-
-- [x] Telegram polling
-- [x] Tools: exec, read, write, browser
-- [x] Sistema de skills basado en Markdown
-- [x] Memoria vectorial local
-- [x] Voice: STT + TTS
-- [ ] Discord u otros canales
-- [ ] Embeddings externos opcionales
-- [ ] Permisos avanzados por tool
-
-## Creditos
-
-- Fork inspirado en [OpenClaw](https://github.com/openclaw/openclaw) por Peter Steinberger y comunidad
-- Powered by [OpenCode](https://opencode.ai/)
+`~/.claudy/logs/claudy.log` (rotación 1 MB × 5). El log del bot de Telegram
+queda en `~/.claudy/telegram_bot.log`.
 
 ## Licencia
 
-MIT
+MIT — proyecto personal de Felipe Castro / QCORE SPA.

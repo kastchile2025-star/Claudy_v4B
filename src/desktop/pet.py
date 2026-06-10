@@ -11606,6 +11606,11 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
 
     def _debug_log(self, label, data):
         try:
+            from core.logging_setup import get_logger
+            get_logger("debug").info("%s | %s", label, str(data)[:2000])
+        except Exception:
+            pass
+        try:
             debug_path = os.path.join(os.path.expanduser("~"), ".claudy", "debug.log")
             with open(debug_path, "a", encoding="utf-8") as f:
                 f.write(f"[{datetime.datetime.now().isoformat()}] {label}\n{data}\n\n")

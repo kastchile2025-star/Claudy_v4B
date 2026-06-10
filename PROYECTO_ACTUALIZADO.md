@@ -1,3 +1,5 @@
+> ⚠️ **DOCUMENTO HISTÓRICO (v4).** Describe la arquitectura anterior (CLI TypeScript + web React) que fue eliminada en el refactor v5. La documentación vigente está en [README.md](README.md) y [PLAN_REFACTORIZACION_CLAUDY_V5.md](PLAN_REFACTORIZACION_CLAUDY_V5.md).
+
 # 🤖 Claudy v4 - Asistente IA Personal Local
 
 **Versión:** 4.0  
