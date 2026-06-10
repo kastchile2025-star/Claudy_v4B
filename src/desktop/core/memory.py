@@ -64,6 +64,61 @@ class MemoryMixin:
         conn.commit()
         conn.close()
         self._migrate_jsonl_to_sqlite()
+        self._init_memory_fts()
+
+    # ------------------------------------------------------------------
+    # FTS5 — búsqueda de texto completo sobre TODA la historia
+    # (memoria caliente + archivo). El índice retiene lo archivado, así el
+    # recall sigue siendo infinito aunque la tabla memory se compacte.
+    # ------------------------------------------------------------------
+    def _init_memory_fts(self):
+        """Crea el índice FTS5 y lo rellena con lo que falte (memoria + archivo)."""
+        db_path = self._memory_db_path()
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                    role, text, created_at, tokenize='unicode61 remove_diacritics 2'
+                )
+            """)
+            n_fts = conn.execute("SELECT COUNT(*) FROM memory_fts").fetchone()[0]
+            n_mem = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
+            n_arc = 0
+            try:
+                n_arc = conn.execute("SELECT COUNT(*) FROM memory_archive").fetchone()[0]
+            except sqlite3.OperationalError:
+                pass
+            if n_fts < n_mem + n_arc:
+                # Backfill completo (idempotente: se reconstruye desde cero)
+                conn.execute("DELETE FROM memory_fts")
+                conn.execute(
+                    "INSERT INTO memory_fts (role, text, created_at) "
+                    "SELECT role, text, created_at FROM memory"
+                )
+                try:
+                    conn.execute(
+                        "INSERT INTO memory_fts (role, text, created_at) "
+                        "SELECT role, text, created_at FROM memory_archive"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            conn.commit()
+            conn.close()
+            self._memory_fts_ok = True
+        except Exception as e:
+            # SQLite sin FTS5: la búsqueda cae al LIKE clásico
+            self._memory_fts_ok = False
+            print(f"[memoria] FTS5 no disponible, uso LIKE: {e}")
+
+    @staticmethod
+    def _fts_query(query):
+        """Convierte texto libre en una consulta FTS5 segura: tokens citados
+        unidos con OR (evita errores de sintaxis con caracteres especiales)."""
+        tokens = re.findall(r"[\wáéíóúñü]+", (query or "").lower())
+        tokens = [t for t in tokens if len(t) >= 2][:12]
+        if not tokens:
+            return ""
+        return " OR ".join(f'"{t}"' for t in tokens)
 
     def _migrate_jsonl_to_sqlite(self):
         """One-time migration from memory.jsonl to SQLite."""
@@ -159,10 +214,26 @@ class MemoryMixin:
             return []
 
     def _search_memory(self, query, limit=10):
-        """Search memory by keyword."""
+        """Busca en TODA la historia (memoria + archivo) con FTS5 rankeado por
+        relevancia (bm25). Fallback a LIKE sobre la memoria caliente."""
         db_path = self._memory_db_path()
         if not os.path.exists(db_path):
             return []
+        fts_q = self._fts_query(query)
+        if fts_q and getattr(self, "_memory_fts_ok", True):
+            try:
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT role, text, created_at as time FROM memory_fts "
+                    "WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts) LIMIT ?",
+                    (fts_q, limit),
+                ).fetchall()
+                conn.close()
+                if rows:
+                    return [dict(r) for r in rows]
+            except Exception:
+                pass
         try:
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
@@ -175,16 +246,34 @@ class MemoryMixin:
         except Exception:
             return []
 
+    def _load_recent_memory(self, n=50):
+        """Últimos n mensajes vía SQL (no carga la tabla completa)."""
+        db_path = self._memory_db_path()
+        if not os.path.exists(db_path):
+            return []
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT role, text, created_at as time FROM "
+                "(SELECT id, role, text, created_at FROM memory ORDER BY id DESC LIMIT ?) "
+                "ORDER BY id ASC",
+                (n,),
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
     def _get_last_chat_preview(self, n=4, max_len=400):
         """Return a formatted string with the last n messages for the chat preview.
 
         Uses [[USER]] / [[CLAUDY]] markers so _set_response_text can render
         each message as a styled bubble with role-specific colors.
         """
-        messages = self._load_memory()
-        if not messages:
+        recent = self._load_recent_memory(n)
+        if not recent:
             return ""
-        recent = messages[-n:]
         lines = []
         for msg in recent:
             role = msg.get("role", "")
@@ -207,6 +296,15 @@ class MemoryMixin:
                 "INSERT INTO memory (role, text) VALUES (?, ?)",
                 (role, text),
             )
+            if getattr(self, "_memory_fts_ok", False):
+                try:
+                    conn.execute(
+                        "INSERT INTO memory_fts (role, text, created_at) "
+                        "VALUES (?, ?, datetime('now','localtime'))",
+                        (role, text),
+                    )
+                except Exception:
+                    pass
             conn.commit()
             conn.close()
         except Exception:
@@ -286,31 +384,47 @@ class MemoryMixin:
     }
 
     def _load_vault_notes(self, max_age=300):
-        """Carga (con caché de 5 min) todas las notas .md del vault QCORE como
-        lista de (ruta_rel, nombre, contenido). Permite búsqueda por relevancia."""
+        """Carga las notas .md del vault QCORE como lista de
+        (ruta_rel, nombre, contenido). Caché incremental por mtime: tras la
+        primera pasada solo se releen del disco las notas que cambiaron
+        (antes se releía el vault completo cada 5 minutos)."""
         import time as _t
         now = _t.time()
         if getattr(self, "_vault_notes_cache", None) is not None and (now - getattr(self, "_vault_cache_time", 0)) < max_age:
             return self._vault_notes_cache
-        notes = []
+        prev = getattr(self, "_vault_notes_mtimes", {}) or {}
+        prev_content = {rel: (name, content) for rel, name, content
+                        in (getattr(self, "_vault_notes_cache", None) or [])}
+        notes, mtimes = [], {}
         try:
             vault = self._get_obsidian_vault()
             if vault and os.path.isdir(vault):
                 for root, dirs, files in os.walk(vault):
                     dirs[:] = [d for d in dirs if d not in (".obsidian", ".git", "Templates")]
                     for f in files:
-                        if f.endswith(".md"):
-                            fp = os.path.join(root, f)
-                            try:
-                                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
-                                    content = fh.read()
-                            except Exception:
-                                continue
-                            rel = os.path.relpath(fp, vault)
-                            notes.append((rel, f, content))
+                        if not f.endswith(".md"):
+                            continue
+                        fp = os.path.join(root, f)
+                        rel = os.path.relpath(fp, vault)
+                        try:
+                            mt = os.path.getmtime(fp)
+                        except Exception:
+                            continue
+                        mtimes[rel] = mt
+                        if rel in prev_content and prev.get(rel) == mt:
+                            name, content = prev_content[rel]
+                            notes.append((rel, name, content))
+                            continue
+                        try:
+                            with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                                content = fh.read()
+                        except Exception:
+                            continue
+                        notes.append((rel, f, content))
         except Exception:
             pass
         self._vault_notes_cache = notes
+        self._vault_notes_mtimes = mtimes
         self._vault_cache_time = now
         return notes
 
@@ -353,7 +467,9 @@ class MemoryMixin:
                 + "".join(parts) + "[/Memoria del ecosistema]\n\n") if parts else ""
 
     def _build_memory_context(self, prompt=None):
-        messages = self._load_memory()
+        # Recientes vía SQL con LIMIT — antes se cargaba la tabla completa en
+        # cada prompt, lo que degradaba con la memoria infinita creciendo.
+        messages = self._load_recent_memory(MEMORY_CONTEXT_MESSAGES * 2)
         # Notas relevantes del vault (campañas, facturas, procesos, agentes...).
         relevant_vault = ""
         if prompt:
@@ -363,16 +479,37 @@ class MemoryMixin:
                 relevant_vault = ""
         if not messages:
             return relevant_vault
-        recent = messages[-MEMORY_CONTEXT_MESSAGES * 2:]
         context_parts = []
         total_chars = 0
-        for msg in reversed(recent):
+        for msg in reversed(messages):
             line = f"{msg['role']}: {msg['text']}\n"
             if total_chars + len(line) > MEMORY_CONTEXT_CHARS:
                 break
             context_parts.insert(0, line)
             total_chars += len(line)
         chat_context = "[Contexto de conversaciones anteriores]\n" + "".join(context_parts) + "\n[Fin del contexto]\n\n" if context_parts else ""
+
+        # Recall de historia antigua relevante al prompt (FTS5 sobre toda la
+        # historia, incluido el archivo). Excluye lo ya presente en recientes.
+        if prompt:
+            try:
+                recent_texts = {m["text"] for m in messages}
+                hits = [h for h in self._search_memory(prompt, limit=8)
+                        if h.get("text") and h["text"] not in recent_texts]
+                if hits:
+                    old_parts, old_chars = [], 0
+                    for h in hits:
+                        snippet = f"[{h.get('time', '')}] {h['role']}: {h['text'][:400]}\n"
+                        if old_chars + len(snippet) > 2500:
+                            break
+                        old_parts.append(snippet)
+                        old_chars += len(snippet)
+                    if old_parts:
+                        chat_context += ("[Recuerdos relevantes de conversaciones antiguas]\n"
+                                         + "".join(old_parts)
+                                         + "[/Recuerdos relevantes]\n\n")
+            except Exception:
+                pass
 
         # Add compressed summaries if available
         try:
@@ -471,7 +608,21 @@ class MemoryMixin:
                     "INSERT INTO memory_summaries (text, range_start, range_end) VALUES (?, ?, ?)",
                     (summary, old[0][0], old[-1][0]),
                 )
+                # Contrato de memoria infinita: archivar SIEMPRE antes de
+                # compactar (antes se borraban los originales y solo quedaba
+                # el resumen).
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_archive (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        role TEXT, text TEXT, created_at TEXT
+                    )
+                """)
                 ids = [row[0] for row in old]
+                conn.executemany(
+                    "INSERT INTO memory_archive (role, text, created_at) "
+                    "SELECT role, text, created_at FROM memory WHERE id = ?",
+                    [(i,) for i in ids],
+                )
                 conn.executemany("DELETE FROM memory WHERE id = ?", [(i,) for i in ids])
                 conn.commit()
             conn.close()
@@ -629,13 +780,15 @@ class MemoryMixin:
             return f"Error: {e}"
 
     def _search_memory_cmd(self, query):
-        results = self._search_memory(query)
+        """Comando /memoria <consulta> — busca en TODA la historia (FTS5)."""
+        results = self._search_memory(query, limit=8)
         if not results:
-            return f"No encontre '{query}' en la memoria."
-        lines = [f"Resultados para '{query}':"]
-        for r in results[:5]:
-            text = r["text"][:200].replace("\n", " ")
-            lines.append(f"  [{r['role']}] ({r['time']}): {text}...")
+            return f"No encontré '{query}' en la memoria (busqué en toda la historia)."
+        lines = [f"Encontré esto sobre '{query}' en mi memoria:"]
+        for r in results:
+            text = (r.get("text") or "")[:220].replace("\n", " ")
+            when = (r.get("time") or "")[:16]
+            lines.append(f"  • [{when}] {r.get('role', '')}: {text}")
         return "\n".join(lines)
 
     def _get_obsidian_vault(self):
