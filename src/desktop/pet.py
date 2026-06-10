@@ -13719,9 +13719,9 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, tk.Tk):
             return True, self._list_checkpoints()
 
         # 16. Memory search
-        if lower.startswith("/recordar ") or lower.startswith("/buscar_memoria "):
+        if lower.startswith("/recordar ") or lower.startswith("/buscar_memoria ") or lower.startswith("/memoria "):
             query = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._search_memory_cmd(query) if query else "Que quieres buscar en la memoria? Ej: /recordar python"
+            return True, self._search_memory_cmd(query) if query else "Que quieres buscar en la memoria? Ej: /memoria python"
 
         # ---- Natural language routing (no / prefix) ----
         # 17. Subagentes
@@ -17157,7 +17157,7 @@ Tambien puedes hablar naturalmente:
 
     def _run_telegram_bot(self, token):
         """Launch standalone Telegram bot as a subprocess via the Gateway API."""
-        script = os.path.join(SCRIPT_DIR, "bg_telegram_bot.py")
+        script = os.path.join(SCRIPT_DIR, "channels", "telegram_bot.py")
         if not os.path.exists(script):
             print("[TelegramBot] Script not found:", script)
             return
@@ -17166,14 +17166,43 @@ Tambien puedes hablar naturalmente:
             with open(bot_log, "a", encoding="utf-8") as log:
                 log.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Starting bot...\n")
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.Popen(
+            self._telegram_bot_proc = subprocess.Popen(
                 [sys.executable, "-u", script],
                 creationflags=flags,
                 stdout=open(bot_log, "a", encoding="utf-8", buffering=1),
                 stderr=open(bot_log, "a", encoding="utf-8", buffering=1),
             )
+            # Watchdog: si el proceso muere, se relanza solo (máx 5 reintentos/hora)
+            if not getattr(self, "_telegram_watchdog_on", False):
+                self._telegram_watchdog_on = True
+                self._telegram_restarts = []
+                self.after(30000, self._telegram_watchdog)
         except Exception as e:
             print(f"[TelegramBot] Error starting: {e}")
+
+    def _telegram_watchdog(self):
+        """Revive el bot de Telegram si su proceso murió. Refleja el estado
+        real en el indicador 'Telegram: Conectado' del sidebar."""
+        try:
+            proc = getattr(self, "_telegram_bot_proc", None)
+            if proc is not None and proc.poll() is not None:
+                now = time.time()
+                self._telegram_restarts = [t for t in getattr(self, "_telegram_restarts", []) if now - t < 3600]
+                if len(self._telegram_restarts) < 5:
+                    self._telegram_restarts.append(now)
+                    print(f"[TelegramBot] Proceso caído (exit {proc.returncode}); relanzando...")
+                    self._telegram_connected = False
+                    token = getattr(self, "_telegram_token", "")
+                    if token:
+                        self._run_telegram_bot(token)
+                        threading.Thread(target=self._verify_telegram_connection, daemon=True).start()
+                else:
+                    print("[TelegramBot] Demasiados reinicios en 1h; watchdog en pausa.")
+        except Exception as e:
+            print(f"[TelegramBot] Watchdog error: {e}")
+        finally:
+            if not getattr(self, "_is_exiting", False):
+                self.after(30000, self._telegram_watchdog)
 
     def _set_telegram_token(self, token):
         """Guarda el botToken en config y lanza el bot al instante. Sin reiniciar Claudy."""

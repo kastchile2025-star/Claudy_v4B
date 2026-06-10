@@ -193,11 +193,21 @@ class GatewayMixin:
                         return
                     # Native Claudy endpoint
                     msg = data.get("message", "")
-                    handled, result = pet._try_handle_skill_action(msg)
-                    if not handled:
-                        result = pet.send_quick_message(msg)
-                    result = pet._process_embedded_commands(result)
-                    result = pet._strip_markdown(result)
+                    channel = data.get("channel", "")
+                    # El canal activo adapta el system prompt (p.ej. Telegram
+                    # permite negritas/código; el escritorio usa texto plano).
+                    pet._current_channel = channel or "gateway"
+                    try:
+                        handled, result = pet._try_handle_skill_action(msg)
+                        if not handled:
+                            result = pet.send_quick_message(msg)
+                        result = pet._process_embedded_commands(result)
+                    finally:
+                        pet._current_channel = ""
+                    if channel != "telegram":
+                        # Telegram renderiza su propio formato (HTML); para el
+                        # resto se mantiene el texto plano de siempre.
+                        result = pet._strip_markdown(result)
                     _self.send_response(200)
                     _self.send_header("Content-Type", "application/json")
                     _self.send_header("Access-Control-Allow-Origin", "*")
