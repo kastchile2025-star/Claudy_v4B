@@ -222,9 +222,13 @@ FONT_INPUT = ("Segoe UI", 11)             # input field — slightly bigger
 FONT_LABEL = ("Segoe UI", 8)              # captions / tiny hints
 FONT_MONO = ("Cascadia Mono", 10)         # code-ish
 
-MEMORY_MAX_MESSAGES = 200
-MEMORY_CONTEXT_MESSAGES = 20
-MEMORY_CONTEXT_CHARS = 6000
+# Memoria infinita: lógica y constantes viven en core/memory.py (refactor v5)
+from core.memory import (
+    MemoryMixin,
+    MEMORY_MAX_MESSAGES,
+    MEMORY_CONTEXT_MESSAGES,
+    MEMORY_CONTEXT_CHARS,
+)
 
 BUBBLE_WIDTH = 880
 BUBBLE_HEIGHT = 630
@@ -773,7 +777,7 @@ class WebViewChatWrapper:
                 self.add_system(text)
 
 
-class ClawdPet(tk.Tk):
+class ClawdPet(MemoryMixin, tk.Tk):
     BUBBLES = [
         "Estoy listo para ayudarte.",
         "Toca dos veces para hablar.",
@@ -5512,7 +5516,7 @@ class ClawdPet(tk.Tk):
                 parts = prompt.split(None, 1)
                 arg = parts[1].strip() if len(parts) > 1 else ""
                 if not arg or arg.lower() == "list":
-                    items = self._list_checkpoints()
+                    items = self._file_checkpoint_list()
                     if not items:
                         self._set_response_text("No hay checkpoints.\nUsa: /checkpoint <ruta_archivo>")
                         status.configure(text="0 checkpoints", fg=THEME["text_secondary"])
@@ -5521,7 +5525,7 @@ class ClawdPet(tk.Tk):
                         self._set_response_text("Checkpoints:\n" + "\n".join(lines))
                         status.configure(text=f"{len(items)} checkpoints", fg=THEME["accent"])
                 else:
-                    ok, msg = self._create_checkpoint(arg)
+                    ok, msg = self._file_checkpoint_create(arg)
                     self._set_response_text(msg)
                     status.configure(text="Checkpoint creado" if ok else "Error", fg=THEME["accent"] if ok else "#ff6b6b")
                 entry.configure(state="normal")
@@ -5532,7 +5536,7 @@ class ClawdPet(tk.Tk):
                 parts = prompt.split(None, 1)
                 arg = parts[1].strip() if len(parts) > 1 else ""
                 if not arg:
-                    items = self._list_checkpoints()
+                    items = self._file_checkpoint_list()
                     if not items:
                         self._set_response_text("No hay checkpoints para restaurar.")
                         status.configure(text="0 checkpoints", fg=THEME["text_secondary"])
@@ -5541,7 +5545,7 @@ class ClawdPet(tk.Tk):
                         self._set_response_text("Usa: /rollback <id>\n\n" + "\n".join(lines))
                         status.configure(text=f"{len(items)} disponibles", fg=THEME["accent"])
                 else:
-                    ok, msg = self._rollback_checkpoint(arg)
+                    ok, msg = self._file_checkpoint_rollback(arg)
                     self._set_response_text(msg)
                     status.configure(text="Restaurado" if ok else "Error", fg=THEME["accent"] if ok else "#ff6b6b")
                 entry.configure(state="normal")
@@ -11468,7 +11472,7 @@ class ClawdPet(tk.Tk):
         os.makedirs(d, exist_ok=True)
         return d
 
-    def _create_checkpoint(self, file_path):
+    def _file_checkpoint_create(self, file_path):
         src = os.path.abspath(os.path.expanduser(file_path))
         if not os.path.exists(src):
             return False, f"No existe: {src}"
@@ -11497,7 +11501,7 @@ class ClawdPet(tk.Tk):
         if not self._checkpoint_history:
             return "Nada que deshacer."
         cid = self._checkpoint_history.pop()
-        ok, msg = self._rollback_checkpoint(cid)
+        ok, msg = self._file_checkpoint_rollback(cid)
         if ok:
             self._checkpoint_undone.append(cid)
         return msg
@@ -11509,7 +11513,7 @@ class ClawdPet(tk.Tk):
         self._checkpoint_history.append(cid)
         return f"Marcado para rehacer: {cid}\n(Aplica los cambios manualmente o crea otro checkpoint)"
 
-    def _list_checkpoints(self):
+    def _file_checkpoint_list(self):
         d = self._checkpoints_dir()
         items = []
         for fn in sorted(os.listdir(d), reverse=True):
@@ -11523,7 +11527,7 @@ class ClawdPet(tk.Tk):
                     pass
         return items
 
-    def _rollback_checkpoint(self, cid):
+    def _file_checkpoint_rollback(self, cid):
         d = self._checkpoints_dir()
         meta_path = os.path.join(d, f"{cid}.json")
         if not os.path.exists(meta_path):
@@ -11728,410 +11732,21 @@ class ClawdPet(tk.Tk):
     # ------------------------------------------------------------------
     # Infinite memory (SQLite)
     # ------------------------------------------------------------------
-    def _memory_db_path(self):
-        drive_dir = r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\AGENTES-MEMORY\claudy_local"
-        if os.path.isdir(drive_dir):
-            return os.path.join(drive_dir, "memory.db")
-        return os.path.join(os.path.expanduser("~"), ".claudy", "memory.db")
 
-    def _memory_jsonl_path(self):
-        drive_dir = r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\AGENTES-MEMORY\claudy_local"
-        if os.path.isdir(drive_dir):
-            return os.path.join(drive_dir, "memory.jsonl")
-        return os.path.join(os.path.expanduser("~"), ".claudy", "memory.jsonl")
 
-    def _init_memory_db(self):
-        """Initialize SQLite database and migrate existing JSONL data."""
-        db_path = self._memory_db_path()
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                role TEXT NOT NULL,
-                text TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                label TEXT NOT NULL,
-                memory_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                FOREIGN KEY (memory_id) REFERENCES memory(id)
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_role ON memory(role)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_created ON memory(created_at)")
-        conn.commit()
-        conn.close()
-        self._migrate_jsonl_to_sqlite()
 
-    def _migrate_jsonl_to_sqlite(self):
-        """One-time migration from memory.jsonl to SQLite."""
-        jl_path = self._memory_jsonl_path()
-        if not os.path.exists(jl_path):
-            return
-        db_path = self._memory_db_path()
-        conn = sqlite3.connect(db_path)
-        count = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
-        if count > 0:
-            conn.close()
-            return  # Already has data, skip migration
-        try:
-            with open(jl_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        msg = json.loads(line)
-                        if isinstance(msg, dict) and "role" in msg and "text" in msg:
-                            conn.execute(
-                                "INSERT INTO memory (role, text, created_at) VALUES (?, ?, ?)",
-                                (msg["role"], msg["text"], msg.get("time", datetime.datetime.now().isoformat())),
-                            )
-                    except json.JSONDecodeError:
-                        continue
-            conn.commit()
-            # Rename old file as backup
-            backup = jl_path + ".bak"
-            os.rename(jl_path, backup)
-        except Exception:
-            pass
-        finally:
-            conn.close()
 
-    def _tidy_history_text(self, role, text):
-        """Texto a mostrar en el panel de Historial.
-        Devuelve None si el mensaje no debe mostrarse (ruido interno de máquina).
-        Compacta volcados largos (análisis, JSON crudo) a una etiqueta legible.
-        No modifica la base de datos: solo cambia la presentación."""
-        t = (text or "").strip()
-        if not t:
-            return None
-        low = t.lower()
 
-        # Análisis de carpeta/archivo: mostrar resumen compacto, no el volcado entero.
-        m = re.match(r"\[an[aá]lisis de (carpeta|archivo):\s*(.+?)\]", t, re.I)
-        if m:
-            kind = m.group(1).lower()
-            target = m.group(2).strip()
-            base = target.replace("\\", "/").rstrip("/").split("/")[-1] or target
-            icon = "📁" if kind == "carpeta" else "📄"
-            return f"{icon} Análisis de {kind}: {base}"
 
-        # Prompts internos de formato / instrucciones de máquina: no mostrar.
-        noise = (
-            "body_html", "solo el json", "sólo el json",
-            "devuelve unicamente un objeto json", "devuelve únicamente un objeto json",
-            "solo como referencia de formato", "el body_html debe usar",
-            "no incluyas comentarios ni explicaciones",
-        )
-        if any(n in low for n in noise):
-            return None
 
-        # JSON crudo (borrador estructurado, etc.): etiqueta compacta.
-        if t[:1] in "{[" and t[-1:] in "}]":
-            try:
-                data = json.loads(t)
-                subj = ""
-                if isinstance(data, dict):
-                    subj = (data.get("subject") or data.get("asunto") or "").strip()
-                return f"📧 Borrador estructurado{(': ' + subj) if subj else ''}"
-            except Exception:
-                pass
 
-        return t
 
-    def _load_memory(self):
-        """Load all messages from SQLite."""
-        db_path = self._memory_db_path()
-        if not os.path.exists(db_path):
-            return []
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT role, text, created_at as time FROM memory ORDER BY id ASC"
-            ).fetchall()
-            conn.close()
-            return [dict(r) for r in rows]
-        except Exception:
-            return []
 
-    def _search_memory(self, query, limit=10):
-        """Search memory by keyword."""
-        db_path = self._memory_db_path()
-        if not os.path.exists(db_path):
-            return []
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT role, text, created_at as time FROM memory WHERE text LIKE ? ORDER BY id DESC LIMIT ?",
-                (f"%{query}%", limit),
-            ).fetchall()
-            conn.close()
-            return [dict(r) for r in rows]
-        except Exception:
-            return []
-
-    def _get_last_chat_preview(self, n=4, max_len=400):
-        """Return a formatted string with the last n messages for the chat preview.
-
-        Uses [[USER]] / [[CLAUDY]] markers so _set_response_text can render
-        each message as a styled bubble with role-specific colors.
-        """
-        messages = self._load_memory()
-        if not messages:
-            return ""
-        recent = messages[-n:]
-        lines = []
-        for msg in recent:
-            role = msg.get("role", "")
-            text = (msg.get("text", "") or "").strip()
-            if not text:
-                continue
-            tag = "[[USER]]" if role == "Usuario" else "[[CLAUDY]]"
-            if len(text) > max_len:
-                text = text[:max_len].rstrip() + "..."
-            lines.append(f"{tag}{text}")
-        return "\n".join(lines)
-
-    def _save_memory_sqlite(self, role, text):
-        """Save a message to SQLite (always runs)."""
-        db_path = self._memory_db_path()
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.execute(
-                "INSERT INTO memory (role, text) VALUES (?, ?)",
-                (role, text),
-            )
-            conn.commit()
-            conn.close()
-        except Exception:
-            pass
-        self._prune_memory()
-        self._save_count = getattr(self, "_save_count", 0) + 1
-        if self._save_count % 50 == 0:
-            self._compress_context()
-
-    def _save_memory(self, role, text):
-        """Save to SQLite + mirror to external provider + Obsidian vault if configured."""
-        self._save_memory_sqlite(role, text)
-        # Track current session messages for clean restart
-        if not hasattr(self, "_current_session_msgs"):
-            self._current_session_msgs = []
-        self._current_session_msgs.append({
-            "role": role, "text": text, "ts": time.time()
-        })
-        # Optional mirror to external provider
-        try:
-            cfg = self.load_claudy_config()
-            if (cfg.get("memory", {}).get("provider") or "sqlite") != "sqlite":
-                if not hasattr(self, "_mem_provider"):
-                    try:
-                        import memory_providers
-                        self._mem_provider = memory_providers.get_provider(cfg, self)
-                    except Exception:
-                        self._mem_provider = None
-                if self._mem_provider and not isinstance(self._mem_provider, type(self)):
-                    try:
-                        self._mem_provider.save(role, text)
-                    except Exception:
-                        pass
-            # Always mirror to Obsidian vault
-            try:
-                vault = self._get_or_create_obsidian_vault()
-                import obsidian_export as ox
-                ox.append_today(vault, role, text)
-            except Exception as e:
-                print(f"[obsidian] error: {e}")
-        except Exception:
-            pass
-
-    def _prune_memory(self):
-        """Keep DB from growing infinitely large."""
-        db_path = self._memory_db_path()
-        if not os.path.exists(db_path):
-            return
-        try:
-            conn = sqlite3.connect(db_path)
-            total = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
-            if total > MEMORY_MAX_MESSAGES * 4:
-                # Archive old rows to memory_archive table
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS memory_archive (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        role TEXT, text TEXT, created_at TEXT
-                    )
-                """)
-                excess = total - MEMORY_MAX_MESSAGES * 2
-                conn.execute("""
-                    INSERT INTO memory_archive (role, text, created_at)
-                    SELECT role, text, created_at FROM memory ORDER BY id ASC LIMIT ?
-                """, (excess,))
-                conn.execute("DELETE FROM memory WHERE id IN (SELECT id FROM memory ORDER BY id ASC LIMIT ?)", (excess,))
-                conn.commit()
-            conn.close()
-        except Exception:
-            pass
 
     # Stopwords para la búsqueda por relevancia en el vault.
-    _VAULT_STOPWORDS = {
-        "para", "como", "esta", "este", "esto", "esos", "esas", "pero", "porque", "con",
-        "los", "las", "del", "una", "uno", "unos", "unas", "que", "qué", "cual", "cuál",
-        "donde", "dónde", "cuando", "cuándo", "sobre", "entre", "hacia", "desde", "hasta",
-        "claudy", "felipe", "tengo", "quiero", "puedes", "dame", "the", "and", "for", "with",
-        "qcore", "memoria", "memorias", "contexto", "nota", "notas",
-    }
 
-    def _load_vault_notes(self, max_age=300):
-        """Carga (con caché de 5 min) todas las notas .md del vault QCORE como
-        lista de (ruta_rel, nombre, contenido). Permite búsqueda por relevancia."""
-        import time as _t
-        now = _t.time()
-        if getattr(self, "_vault_notes_cache", None) is not None and (now - getattr(self, "_vault_cache_time", 0)) < max_age:
-            return self._vault_notes_cache
-        notes = []
-        try:
-            vault = self._get_obsidian_vault()
-            if vault and os.path.isdir(vault):
-                for root, dirs, files in os.walk(vault):
-                    dirs[:] = [d for d in dirs if d not in (".obsidian", ".git", "Templates")]
-                    for f in files:
-                        if f.endswith(".md"):
-                            fp = os.path.join(root, f)
-                            try:
-                                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
-                                    content = fh.read()
-                            except Exception:
-                                continue
-                            rel = os.path.relpath(fp, vault)
-                            notes.append((rel, f, content))
-        except Exception:
-            pass
-        self._vault_notes_cache = notes
-        self._vault_cache_time = now
-        return notes
 
-    def _search_vault_relevant(self, query, max_notes=4, max_chars=5000):
-        """Devuelve las notas del vault más relevantes al query (campañas, facturas,
-        procesos, agentes, etc.). Scoring por coincidencia de palabras clave."""
-        import re as _re
-        notes = self._load_vault_notes()
-        if not notes:
-            return ""
-        words = [w for w in _re.findall(r"[a-záéíóúñ0-9]{4,}", (query or "").lower())
-                 if w not in self._VAULT_STOPWORDS]
-        if not words:
-            return ""
-        scored = []
-        for rel, name, content in notes:
-            low = content.lower()
-            namelow = (rel + " " + name).lower()
-            score = 0
-            for w in set(words):
-                score += low.count(w)
-                if w in namelow:
-                    score += 8  # coincidencia en nombre/carpeta pesa más
-            if score > 0:
-                scored.append((score, rel, content))
-        if not scored:
-            return ""
-        scored.sort(key=lambda x: -x[0])
-        parts = []
-        total = 0
-        for score, rel, content in scored[:max_notes]:
-            snippet = f"--- {rel} ---\n{content.strip()}\n"
-            if total + len(snippet) > max_chars:
-                snippet = snippet[:max(0, max_chars - total)] + "...\n"
-            parts.append(snippet)
-            total += len(snippet)
-            if total >= max_chars:
-                break
-        return ("[Memoria del ecosistema QCORE — notas relevantes del vault]\n"
-                + "".join(parts) + "[/Memoria del ecosistema]\n\n") if parts else ""
 
-    def _build_memory_context(self, prompt=None):
-        messages = self._load_memory()
-        # Notas relevantes del vault (campañas, facturas, procesos, agentes...).
-        relevant_vault = ""
-        if prompt:
-            try:
-                relevant_vault = self._search_vault_relevant(prompt)
-            except Exception:
-                relevant_vault = ""
-        if not messages:
-            return relevant_vault
-        recent = messages[-MEMORY_CONTEXT_MESSAGES * 2:]
-        context_parts = []
-        total_chars = 0
-        for msg in reversed(recent):
-            line = f"{msg['role']}: {msg['text']}\n"
-            if total_chars + len(line) > MEMORY_CONTEXT_CHARS:
-                break
-            context_parts.insert(0, line)
-            total_chars += len(line)
-        chat_context = "[Contexto de conversaciones anteriores]\n" + "".join(context_parts) + "\n[Fin del contexto]\n\n" if context_parts else ""
-
-        # Add compressed summaries if available
-        try:
-            db_path = self._memory_db_path()
-            if os.path.exists(db_path):
-                conn = sqlite3.connect(db_path)
-                summaries = conn.execute(
-                    "SELECT text FROM memory_summaries ORDER BY id DESC LIMIT 3"
-                ).fetchall()
-                conn.close()
-                if summaries:
-                    sum_text = "\n".join(s[0] for s in summaries)
-                    chat_context += f"[Historial resumido]\n{sum_text}\n[/Historial resumido]\n\n"
-        except Exception:
-            pass
-
-        # Add recent Obsidian context to memory
-        obs_context = ""
-        try:
-            vault = self._get_obsidian_vault()
-            if vault:
-                md_files = []
-                for root, dirs, files in os.walk(vault):
-                    if '.obsidian' in dirs:
-                        dirs.remove('.obsidian')
-                    for f in files:
-                        if f.endswith('.md'):
-                            fpath = os.path.join(root, f)
-                            md_files.append((fpath, os.path.getmtime(fpath)))
-                
-                if md_files:
-                    md_files.sort(key=lambda x: x[1], reverse=True)
-                    obs_parts = []
-                    obs_chars = 0
-                    for fpath, _ in md_files[:3]:
-                        try:
-                            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                                content = f.read()
-                            note_name = os.path.basename(fpath)
-                            snippet = f"--- Nota: {note_name} ---\n{content}\n"
-                            if obs_chars + len(snippet) > 4000:
-                                snippet = snippet[:4000 - obs_chars] + "...\n"
-                            obs_parts.append(snippet)
-                            obs_chars += len(snippet)
-                            if obs_chars >= 4000:
-                                break
-                        except Exception:
-                            continue
-                    
-                    if obs_parts:
-                        obs_context = "[Contexto de notas recientes en Obsidian]\n" + "".join(obs_parts) + "\n[Fin de notas de Obsidian]\n\n"
-        except Exception as e:
-            print(f"Error reading Obsidian context: {e}")
-
-        return relevant_vault + chat_context + obs_context
 
     def _get_user_location(self):
         try:
@@ -12338,217 +11953,16 @@ class ClawdPet(tk.Tk):
     # ------------------------------------------------------------------
     # Context compression
     # ------------------------------------------------------------------
-    def _compress_context(self):
-        """Summarize old messages to save token budget."""
-        db_path = self._memory_db_path()
-        if not os.path.exists(db_path):
-            return
-        try:
-            conn = sqlite3.connect(db_path)
-            total = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
-            if total < MEMORY_MAX_MESSAGES * 3:
-                conn.close()
-                return
-            # Find the oldest checkpoint to protect its range
-            oldest_cp = conn.execute(
-                "SELECT MIN(memory_id) FROM checkpoints"
-            ).fetchone()[0]
-            # Keep last 200 messages, but protect checkpointed messages
-            keep = MEMORY_MAX_MESSAGES * 2
-            if oldest_cp:
-                # Don't delete messages that are part of any checkpoint
-                conn.close()
-                return  # Skip compression if checkpoints exist (simpler approach)
-            old = conn.execute(
-                "SELECT id, role, text FROM memory ORDER BY id ASC LIMIT ?",
-                (total - keep,),
-            ).fetchall()
-            if not old:
-                conn.close()
-                return
-            summary = self._summarize_messages(old)
-            if summary:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS memory_summaries (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        text TEXT NOT NULL,
-                        range_start INTEGER, range_end INTEGER,
-                        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-                    )
-                """)
-                conn.execute(
-                    "INSERT INTO memory_summaries (text, range_start, range_end) VALUES (?, ?, ?)",
-                    (summary, old[0][0], old[-1][0]),
-                )
-                ids = [row[0] for row in old]
-                conn.executemany("DELETE FROM memory WHERE id = ?", [(i,) for i in ids])
-                conn.commit()
-            conn.close()
-        except Exception:
-            pass
 
-    def _summarize_messages(self, messages):
-        """Create a brief summary of messages."""
-        if not messages:
-            return ""
-        parts = []
-        for mid, role, text in messages:
-            short = text[:200].replace("\n", " ") if text else ""
-            parts.append(f"[{role}]: {short}")
-        if len(parts) > 50:
-            parts = parts[:50]
-        return "Resumen de conversacion anterior: " + "; ".join(parts)
 
-    def _compress_and_save_to_obsidian(self):
-        """Compress current session messages and save summary to Obsidian."""
-        session_msgs = getattr(self, "_current_session_msgs", [])
-        if not session_msgs or len(session_msgs) < 2:
-            return
-        # Build summary text
-        parts = []
-        for m in session_msgs:
-            role = m.get("role", "")
-            text = (m.get("text", "") or "")[:300]
-            parts.append(f"[{role}]: {text}")
-        summary = "Resumen de sesion: " + "; ".join(parts[:30])
-        # Save to SQLite summaries
-        try:
-            db_path = self._memory_db_path()
-            if os.path.exists(db_path):
-                conn = sqlite3.connect(db_path)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS memory_summaries (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        text TEXT NOT NULL,
-                        range_start INTEGER, range_end INTEGER,
-                        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-                    )
-                """)
-                conn.execute(
-                    "INSERT INTO memory_summaries (text, range_start, range_end) VALUES (?, ?, ?)",
-                    (summary, 0, len(session_msgs)),
-                )
-                conn.commit()
-                conn.close()
-        except Exception as e:
-            print(f"[compress] db error: {e}")
-        # Save to Obsidian
-        try:
-            vault = self._get_or_create_obsidian_vault()
-            root = os.path.join(vault, "Claudy", "Summaries")
-            os.makedirs(root, exist_ok=True)
-            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            product = getattr(self, "_active_product", "General")
-            path = os.path.join(root, f"sesion_{product}_{ts}.md")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(f"---\ntags: [claudy, summary, {product.lower().replace(' ','-')}]\ndate: {ts[:10]}\nproduct: {product}\n---\n\n")
-                f.write(f"# Sesion {product} — {ts[:10]}\n\n")
-                for m in session_msgs:
-                    role = "**Felipe**" if m.get("role") in ("user", "Usuario") else "**Claudy**"
-                    text = (m.get("text", "") or "")[:500]
-                    f.write(f"{role}: {text}\n\n")
-        except Exception as e:
-            print(f"[obsidian summary] error: {e}")
 
-    def _get_or_create_obsidian_vault(self):
-        """Auto-detect or create Obsidian vault for Claudy memory.
-        Priority: 1) config, 2) QCORE Drive vault, 3) local fallback.
-        """
-        try:
-            cfg = self.load_claudy_config()
-            vault = (cfg.get("obsidian", {}) or {}).get("vault", "")
-            if vault and os.path.isdir(vault):
-                return vault
-        except Exception:
-            pass
-        # Primary: QCORE ecosystem vault on Google Drive
-        drive_vault = r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\VAULT"
-        if os.path.isdir(drive_vault):
-            return drive_vault
-        # Fallback: local
-        default = os.path.join(os.path.expanduser("~"), "Documents", "Claudy", "Obsidian")
-        os.makedirs(default, exist_ok=True)
-        return default
 
     # ------------------------------------------------------------------
     # Checkpoints / Rollback
     # ------------------------------------------------------------------
-    def _create_checkpoint(self, label="manual"):
-        db_path = self._memory_db_path()
-        if not os.path.exists(db_path):
-            return "No hay memoria activa para guardar un checkpoint."
-        try:
-            conn = sqlite3.connect(db_path)
-            last_id = conn.execute("SELECT MAX(id) FROM memory").fetchone()[0]
-            if last_id is None:
-                conn.close()
-                return "No hay mensajes en la memoria."
-            conn.execute(
-                "INSERT INTO checkpoints (label, memory_id) VALUES (?, ?)",
-                (label, last_id),
-            )
-            conn.commit()
-            conn.close()
-            return f"Checkpoint '{label}' guardado en el mensaje #{last_id}."
-        except Exception as e:
-            return f"Error al guardar checkpoint: {e}"
 
-    def _rollback_checkpoint(self, label=None):
-        db_path = self._memory_db_path()
-        if not os.path.exists(db_path):
-            return "No hay memoria activa para hacer rollback."
-        try:
-            conn = sqlite3.connect(db_path)
-            if label:
-                cp = conn.execute(
-                    "SELECT id, label, memory_id, created_at FROM checkpoints WHERE label = ? ORDER BY id DESC LIMIT 1",
-                    (label,),
-                ).fetchone()
-            else:
-                cp = conn.execute(
-                    "SELECT id, label, memory_id, created_at FROM checkpoints ORDER BY id DESC LIMIT 1",
-                ).fetchone()
-            if not cp:
-                conn.close()
-                return "No hay checkpoints guardados. Usa /checkpoint para crear uno."
-            # Delete all messages after the checkpoint
-            conn.execute("DELETE FROM memory WHERE id > ?", (cp[2],))
-            # Delete this checkpoint and any newer ones
-            conn.execute("DELETE FROM checkpoints WHERE id >= ?", (cp[0],))
-            conn.commit()
-            conn.close()
-            return f"Rollback al checkpoint '{cp[1]}' (mensaje #{cp[2]}, {cp[3]}). Se eliminaron los mensajes posteriores."
-        except Exception as e:
-            return f"Error en rollback: {e}"
 
-    def _list_checkpoints(self):
-        db_path = self._memory_db_path()
-        if not os.path.exists(db_path):
-            return "No hay memoria activa."
-        try:
-            conn = sqlite3.connect(db_path)
-            cps = conn.execute(
-                "SELECT id, label, memory_id, created_at FROM checkpoints ORDER BY id DESC LIMIT 10"
-            ).fetchall()
-            conn.close()
-            if not cps:
-                return "No hay checkpoints guardados."
-            lines = ["Checkpoints:"]
-            for cid, label, mid, cat in cps:
-                lines.append(f"  [{cat}] {label} — mensaje #{mid}")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error: {e}"
 
-    def _search_memory_cmd(self, query):
-        results = self._search_memory(query)
-        if not results:
-            return f"No encontre '{query}' en la memoria."
-        lines = [f"Resultados para '{query}':"]
-        for r in results[:5]:
-            text = r["text"][:200].replace("\n", " ")
-            lines.append(f"  [{r['role']}] ({r['time']}): {text}...")
-        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Tool Registry (auto-discovery pattern)
@@ -15377,32 +14791,6 @@ class ClawdPet(tk.Tk):
             pass
         return (display_text, saved_path)
 
-    def _get_obsidian_vault(self):
-        """Find Obsidian vault path from config or common locations."""
-        config_path = os.path.join(os.path.expanduser("~"), ".claudy", "config.json")
-        try:
-            with open(config_path, "r", encoding="utf-8-sig") as f:
-                cfg = json.load(f)
-            vault = cfg.get("obsidian", {}).get("vaultPath", "")
-            if vault and os.path.isdir(vault):
-                return vault
-        except Exception:
-            pass
-        # Common default locations. El vault QCORE en Drive tiene prioridad.
-        defaults = [
-            r"G:\Mi unidad\QCORE-ECOSYSTEM\MEMORIAS\VAULT",
-            os.path.join(os.path.expanduser("~"), "Obsidian"),
-            os.path.join(os.path.expanduser("~"), "Documents", "Obsidian"),
-            os.path.join(os.path.expanduser("~"), "OneDrive", "Obsidian"),
-        ]
-        for d in defaults:
-            if os.path.isdir(d):
-                return d
-        # Último recurso: el resolver de escritura (config → Drive QCORE → local).
-        try:
-            return self._get_or_create_obsidian_vault()
-        except Exception:
-            return None
 
     def _create_obsidian_note(self, title, content):
         vault = self._get_obsidian_vault()
@@ -15434,112 +14822,8 @@ class ClawdPet(tk.Tk):
     # ------------------------------------------------------------------
     # Frases que ordenan GUARDAR un conocimiento duradero (ordenadas de más
     # larga a más corta para recortar el prefijo correctamente).
-    _MEMORY_UPDATE_TRIGGERS = [
-        "actualiza la memoria de los agentes",
-        "actualiza tu memoria y la de obsidian",
-        "guarda esto en tu memoria y en obsidian",
-        "actualiza tus memorias",
-        "actualiza tu memoria",
-        "actualiza la memoria",
-        "actualiza obsidian",
-        "guarda esto en tu memoria",
-        "guarda esto en obsidian",
-        "guarda en tu memoria",
-        "guarda en la memoria",
-        "guarda en memoria",
-        "guarda en obsidian",
-        "guárdalo en tu memoria",
-        "guardalo en tu memoria",
-        "guárdalo en memoria",
-        "guardalo en memoria",
-        "agrega a tu memoria",
-        "agrégalo a tu memoria",
-        "agregalo a tu memoria",
-        "agrega a la memoria",
-        "memoriza esto",
-        "memoriza que",
-        "memoriza:",
-        "graba en memoria",
-        "ten esto en tu memoria",
-        "recuérdalo en tu memoria",
-        "recuerdalo en tu memoria",
-    ]
 
-    def _extract_memory_fact(self, prompt, lower):
-        """Si el prompt ordena guardar conocimiento en memoria, devuelve
-        (True, fact). `fact` puede venir vacío (=> resumir conversación reciente).
-        Si no es una orden de memoria, devuelve (False, '')."""
-        hit = None
-        for t in self._MEMORY_UPDATE_TRIGGERS:
-            if t in lower:
-                hit = t
-                break
-        if not hit:
-            return False, ""
-        idx = lower.find(hit)
-        fact = prompt[idx + len(hit):].strip()
-        # Quitar conectores iniciales ("con", "que", "lo siguiente:", ":", "esto:")
-        fact = re.sub(r'^(?:\s*[:\-,]\s*)?(?:con|que|de que|lo siguiente|esto|esto que|el dato de que|el hecho de que)\b[:\s]*',
-                      '', fact, flags=re.IGNORECASE).strip(" :,-")
-        # Referencias a la conversación => resumir (fact vacío)
-        if re.match(r'^(lo que|lo último|lo ultimo|lo de|nuestra conversaci|la conversaci|lo que hablamos|lo que te dije|eso|esto)\b',
-                    fact, flags=re.IGNORECASE):
-            fact = ""
-        return True, fact
 
-    def _remember_knowledge(self, fact, summarize_if_empty=True):
-        """Guarda un conocimiento DURADERO en las capas de memoria de Claudy:
-        memory.db (memoria compartida de Claudy + agentes) y el vault de Obsidian.
-        Si `fact` viene vacío, resume la conversación reciente. Devuelve el mensaje
-        de confirmación para mostrar a Felipe."""
-        fact = (fact or "").strip()
-        if not fact and summarize_if_empty:
-            try:
-                recent = self._load_memory()[-10:]
-                convo = "\n".join(f"{m.get('role','')}: {m.get('text','')}" for m in recent if m.get("text"))
-                if convo.strip():
-                    sp = ("Extrae en 1-3 frases concisas el DATO o CONOCIMIENTO duradero que "
-                          "Claudy debe recordar de esta conversación (hechos, decisiones, "
-                          "preferencias de Felipe; NADA de saludos ni relleno). Devuelve solo el "
-                          "dato, sin preámbulo:\n\n" + convo)
-                    fact = (self.send_quick_message(sp, _skip_skill_action=True, timeout=60) or "").strip()
-            except Exception:
-                pass
-        if not fact:
-            return ("¿Qué quieres que recuerde? Dime el dato, o di "
-                    "\"actualiza tu memoria con lo último que hablamos\".")
-
-        saved = []
-        # 1) memory.db — base compartida por Claudy y los agentes (AGENTES-MEMORY)
-        try:
-            self._save_memory_sqlite("Conocimiento", f"[MEMORIA] {fact}")
-            saved.append("memoria de Claudy y agentes (memory.db)")
-        except Exception:
-            pass
-        # 2) Obsidian — nota duradera y recuperable por búsqueda de relevancia
-        try:
-            vault = self._get_obsidian_vault()
-            if vault and os.path.isdir(vault):
-                note_dir = os.path.join(vault, "Claudy")
-                os.makedirs(note_dir, exist_ok=True)
-                note_path = os.path.join(note_dir, "Memoria-Claudy.md")
-                if not os.path.exists(note_path):
-                    with open(note_path, "w", encoding="utf-8") as f:
-                        f.write("---\ntags: [claudy, memoria]\n---\n\n# Memoria de Claudy\n\n"
-                                "Conocimiento duradero que Claudy debe tener presente.\n\n")
-                stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                with open(note_path, "a", encoding="utf-8") as f:
-                    f.write(f"- {stamp} · {fact}\n")
-                saved.append("Obsidian (Claudy/Memoria-Claudy.md)")
-        except Exception:
-            pass
-        # 3) Refrescar la caché del vault para que el dato sea recuperable de inmediato
-        self._vault_notes_cache = None
-
-        if not saved:
-            return "No pude guardar el dato (revisa memory.db y el vault de Obsidian)."
-        return ("Memoria actualizada ✓\nGuardé: \"" + (fact[:200] + ("..." if len(fact) > 200 else "")) +
-                "\"\nEn: " + " · ".join(saved) + ".\nLo tendré presente cuando me preguntes.")
 
     def _search_obsidian_notes(self, query):
         vault = self._get_obsidian_vault()
