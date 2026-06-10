@@ -951,8 +951,6 @@ class ClawdPet(tk.Tk):
         self.after(200, self._create_tray_icon)
         # Start Telegram bot if configured
         self.after(1500, self._start_telegram_if_configured)
-        # Start Discord bot if configured
-        self.after(2500, self._start_discord_if_configured)
         # Start Cron engine
         self.after(3000, self._start_cron_engine)
         # Start Gateway HTTP server — inmediato en hilo daemon
@@ -12271,7 +12269,7 @@ class ClawdPet(tk.Tk):
             "Memoria  → /recordar <nota> |  /checkpoint  |  /rollback\n"
             "Skills   → /skills  |  /aprender <nombre>  |  /skill eliminar <nombre>\n"
             "Tareas   → /delegar <tarea> (subagente)  |  /kanban add/move/list\n"
-            "Conexión → /vincular <id> (Telegram)  |  /vincular_discord <id>\n\n"
+            "Conexión → /vincular <id> (Telegram)\n\n"
 
             "═══ APRENDIZAJE AUTOMÁTICO (estilo Hermes Curator) ═══\n"
             "Cuando completes una tarea exitosa o aprendas un procedimiento nuevo:\n"
@@ -14863,11 +14861,6 @@ class ClawdPet(tk.Tk):
         if lower.startswith("/vincular ") or lower.startswith("vincular "):
             uid = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
             return True, self._vincular_telegram_user(uid) if uid else "Uso: /vincular <ID_de_Telegram>"
-
-        # VINCULAR Discord: "/vincular_discord <uid>"
-        if lower.startswith("/vincular_discord ") or lower.startswith("vincular discord "):
-            uid = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._vincular_discord_user(uid) if uid else "Uso: /vincular_discord <ID_de_Discord>"
 
         # SKILLS: listar / recargar
         if lower.strip() in ("/skills", "/skill list", "skills cargadas", "que skills tienes"):
@@ -18749,61 +18742,6 @@ Tambien puedes hablar naturalmente:
         subprocess.Popen(
             ["cmd", "/c", "start", "Claudy Chat", "cmd", "/k", command], shell=True,
         )
-
-    # ==============================================================
-    # DISCORD BOT
-    # ==============================================================
-
-    def _start_discord_if_configured(self):
-        """Start the Discord bot if a token is configured."""
-        config = self.load_claudy_config()
-        discord_cfg = config.get("discord", {})
-        token = discord_cfg.get("botToken", "")
-        self._discord_allowed_users = set(discord_cfg.get("allowedUsers", []))
-        if not token:
-            return
-        self._run_discord_bot(token)
-
-    def _run_discord_bot(self, token):
-        """Launch standalone Discord bot as a subprocess via the Gateway API."""
-        script = os.path.join(SCRIPT_DIR, "bg_discord_bot.py")
-        if not os.path.exists(script):
-            print("[DiscordBot] Script not found:", script)
-            return
-        try:
-            bot_log = os.path.join(os.path.expanduser("~"), ".claudy", "discord_bot.log")
-            with open(bot_log, "a", encoding="utf-8") as log:
-                log.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Starting Discord bot...\n")
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.Popen(
-                [sys.executable, "-u", script],
-                creationflags=flags,
-                stdout=open(bot_log, "a", encoding="utf-8", buffering=1),
-                stderr=open(bot_log, "a", encoding="utf-8", buffering=1),
-            )
-        except Exception as e:
-            print(f"[DiscordBot] Error starting: {e}")
-
-    def _vincular_discord_user(self, uid):
-        """Add a Discord user ID to the allowed list."""
-        uid = str(uid).strip()
-        config_path = os.path.join(os.path.expanduser("~"), ".claudy", "config.json")
-        if not os.path.exists(config_path):
-            return "No encuentro la config."
-        with open(config_path, "r", encoding="utf-8-sig") as f:
-            config = json.load(f)
-        if "discord" not in config:
-            config["discord"] = {}
-        if "allowedUsers" not in config["discord"]:
-            config["discord"]["allowedUsers"] = []
-        if uid not in config["discord"]["allowedUsers"]:
-            config["discord"]["allowedUsers"].append(uid)
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-            self._discord_allowed_users.add(uid)
-            return f"Usuario Discord {uid} vinculado correctamente."
-        return f"Usuario Discord {uid} ya estaba vinculado."
-
 
     # ==============================================================
     # PHASE 4: SUBAGENTS, KANBAN, WEBHOOKS, WORKTREES
