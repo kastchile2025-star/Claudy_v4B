@@ -64,6 +64,13 @@ class WebViewApi:
             self._pet._handle_web_pick_attachment()
         threading.Thread(target=_run, daemon=True).start()
 
+    def paste_image(self):
+        """Ctrl+V en el chat con una imagen o archivos copiados: Python lee el
+        portapapeles (PIL.ImageGrab) y analiza el contenido con visión."""
+        def _run():
+            self._pet._handle_web_paste_image()
+        threading.Thread(target=_run, daemon=True).start()
+
     def open_last_location(self):
         def _run():
             self._pet._open_last_file_location()

@@ -909,6 +909,25 @@
         }
       };
 
+      // Ctrl+V con una imagen o archivos en el portapapeles: Python los lee
+      // directo del clipboard (PIL.ImageGrab) y los analiza con vision.
+      // El pegado de texto normal sigue su curso por defecto.
+      const handlePaste = (e) => {
+        try {
+          const items = (e.clipboardData && e.clipboardData.items) || [];
+          for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            if (it.kind === 'file' || (it.type && it.type.startsWith('image/'))) {
+              e.preventDefault();
+              if (window.pywebview && window.pywebview.api) {
+                window.pywebview.api.paste_image();
+              }
+              return;
+            }
+          }
+        } catch (err) {}
+      };
+
       const handleNewConversation = () => {
         playSound('chime'); // Play nice chime transition sound
         if (window.pywebview && window.pywebview.api) {
@@ -1440,6 +1459,7 @@
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyDown}
+                    onPaste={handlePaste}
                     placeholder={dictation === 'recording' ? "Grabando... clic en el mic para terminar"
                       : dictation === 'transcribing' ? "Transcribiendo..." : "Escribe tu mensaje..."}
                     class="w-full bg-transparent text-slate-100 text-xs py-2 outline-none resize-none scrollbar-none font-sans"

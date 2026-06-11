@@ -1021,6 +1021,50 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 print(f"[webview attachment picker] error: {e}")
         self.after(0, _dialog)
 
+    def _handle_web_paste_image(self):
+        """Ctrl+V en el chat web: lee el portapapeles con PIL.ImageGrab.
+        Imagen copiada → se guarda y se analiza con visión. Archivos copiados
+        del Explorador → se analizan como adjuntos (máx. 6). El texto que ya
+        estaba tipeado en el input se usa como pregunta sobre la imagen."""
+        status = WebViewStatusWrapper(self)
+        entry = WebViewEntryWrapper(self)
+        self._chat_view = WebViewChatWrapper(self)
+        self._status_label = status
+        self._chat_entry = entry
+        try:
+            from PIL import ImageGrab
+            clip = ImageGrab.grabclipboard()
+        except Exception as e:
+            self._chat_view.add_system(f"No pude leer el portapapeles: {e}")
+            return
+        question = self._entry_attachment_question(entry)
+        if clip is None:
+            self._chat_view.add_system(
+                "No hay imagen ni archivos en el portapapeles. Copia una imagen "
+                "(o archivos en el Explorador) y vuelve a pegar con Ctrl+V.")
+            return
+        if isinstance(clip, list):  # archivos copiados en el Explorador
+            paths = [p for p in clip if os.path.isfile(str(p))]
+            if not paths:
+                self._chat_view.add_system("Lo copiado no contiene archivos analizables.")
+                return
+            for path in paths[:6]:
+                self._analyze_attachment_file(str(path), status, None, question=question)
+            if len(paths) > 6:
+                self._chat_view.add_system("Para no saturar la sesión, analicé solo los primeros 6 archivos.")
+            return
+        # Imagen en el portapapeles (screenshot, copiar imagen del navegador...)
+        folder = os.path.join(os.path.expanduser("~"), ".claudy", "attachments")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(
+            folder, f"pegado_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        try:
+            clip.save(path, "PNG")
+        except Exception as e:
+            self._chat_view.add_system(f"No pude guardar la imagen pegada: {e}")
+            return
+        self._analyze_attachment_file(path, status, None, question=question)
+
     def _trigger_submit_with_text(self, text):
         entry = getattr(self, "_chat_entry_widget", None)
         submit_fn = getattr(self, "_submit_fn", None)
