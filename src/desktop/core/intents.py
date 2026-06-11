@@ -217,6 +217,8 @@ SLASH_COMMANDS = [
     (("/replace ", "/edit-replace "), _cmd_replace),
     (("/cmd ", "/command ", "/ejecutar "),
      lambda s, p, l: s._execute_command(_arg(p)) if _arg(p) else "Qué comando quieres ejecutar?"),
+    (("/permisos", "/guard", "/modo-comandos"),
+     lambda s, p, l: s._guard_cmd(_arg(p))),
     (("/recordar ", "/reminder ", "/alarma "),
      lambda s, p, l: s._set_reminder(_arg(p)) if _arg(p) else "Formato: /recordar 10 minutos comprar leche"),
     (("/noticias", "/news", "/noti"),
@@ -348,6 +350,16 @@ class IntentsMixin:
 
     def _try_handle_skill_action(self, prompt):
         lower = prompt.lower().strip()
+
+        # ===== Confirmación pendiente del guard de comandos («sí» / «no») =====
+        # Va primero: si hay un comando esperando OK, este mensaje puede ser
+        # la respuesta y no debe caer en ningún otro intent.
+        try:
+            g_handled, g_result = self._guard_try_confirm(prompt, lower)
+            if g_handled:
+                return True, g_result
+        except Exception:
+            pass
 
         # Clean politeness wrappers so natural language triggers match perfectly
         cleaned_prompt = prompt

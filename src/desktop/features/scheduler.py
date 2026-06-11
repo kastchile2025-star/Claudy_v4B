@@ -371,6 +371,22 @@ class SchedulerMixin:
         label = job.get("label") or "Tarea programada"
         cwd = job.get("cwd") or None
 
+        # Lista negra del guard (fail-closed): un cron corre desatendido, así
+        # que lo catastrófico se niega siempre. No se pide confirmación aquí
+        # para no romper automatizaciones — el resto del filtrado es al crear.
+        try:
+            from core.command_guard import check_blocked
+            cmd_text = cmd if isinstance(cmd, str) else " ".join(str(a) for a in cmd)
+            blocked = check_blocked(cmd_text)
+        except Exception:
+            blocked = None
+        if blocked:
+            try:
+                self._cron_notify_telegram(f"[CRON cmd] {label}: BLOQUEADO ({blocked})")
+            except Exception:
+                pass
+            return
+
         def _run():
             try:
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
