@@ -9339,34 +9339,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                     break
         return count
 
-    def _load_installed_skills(self, max_skills=20, max_chars_per_skill=400):
-        """Read SKILL.md files from ~/.claudy/skills/* and return formatted context."""
-        skills_dir = os.path.join(os.path.expanduser("~"), ".claudy", "skills")
-        if not os.path.isdir(skills_dir):
-            return ""
-        chunks = []
-        for folder in sorted(os.listdir(skills_dir))[:max_skills]:
-            full = os.path.join(skills_dir, folder)
-            if not os.path.isdir(full):
-                continue
-            for cand in ("SKILL.md", "skill.md", "Skill.md"):
-                p = os.path.join(full, cand)
-                if os.path.exists(p):
-                    try:
-                        with open(p, "r", encoding="utf-8", errors="replace") as f:
-                            body = f.read(max_chars_per_skill * 2)
-                        # Strip YAML frontmatter
-                        if body.startswith("---"):
-                            end = body.find("---", 3)
-                            if end > 0:
-                                body = body[end+3:].strip()
-                        chunks.append(f"### {folder}\n{body[:max_chars_per_skill]}")
-                    except Exception:
-                        pass
-                    break
-        if not chunks:
-            return ""
-        return "[SKILLS INSTALADAS LOCALMENTE]\n" + "\n\n".join(chunks) + "\n[Fin skills locales]\n\n"
+    # _load_installed_skills vive ahora en features/skill_loop.py (search-first
+    # con índice FTS5: catálogo compacto + solo las skills relevantes al prompt).
 
     def _skill_use(self, query):
         """Install a skill and return usage hint. Skill becomes available immediately

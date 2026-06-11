@@ -12,8 +12,8 @@
 
 | # | Funcionalidad | Qué aporta a Claudy | Estado | Prioridad | Esfuerzo |
 |---|---|---|---|---|---|
-| A1 | **Bucle de aprendizaje cerrado** (auto-skills): al terminar una tarea exitosa, evaluar y guardar el patrón como SKILL.md reusable, indexado en FTS5 | Claudy se vuelve más rápido y barato con el uso; el informe reporta grandes ahorros de tokens en tareas repetidas | 📋 (plan 2.4) | ⭐⭐⭐ | 6-8 h |
-| A2 | **"The Curator"**: demonio que audita la biblioteca de skills, consolida redundantes y purga las de bajo uso | Evita que las auto-skills (A1) degeneren en basura acumulada; complemento natural del cron ya existente | 🆕 | ⭐⭐ | 3-4 h |
+| A1 | **Bucle de aprendizaje cerrado** (auto-skills): al terminar una tarea exitosa, evaluar y guardar el patrón como SKILL.md reusable, indexado en FTS5 | Claudy se vuelve más rápido y barato con el uso; el informe reporta grandes ahorros de tokens en tareas repetidas | ✅ (11 jun 2026: índice FTS5 `skills_index.db` + carga search-first en `skill_loop.py`; el loop auto-skill ya estaba cableado) | ⭐⭐⭐ | 6-8 h |
+| A2 | **"The Curator"**: demonio que audita la biblioteca de skills, consolida redundantes y purga las de bajo uso | Evita que las auto-skills (A1) degeneren en basura acumulada; complemento natural del cron ya existente | ✅ (`_curator_run` en `skill_loop.py`, pasada cada 24 h, archiva sin borrar) | ⭐⭐ | 3-4 h |
 | A3 | **Filtro de comandos Manual / Smart / YOLO + fail-closed**: bloqueo permanente de comandos destructivos (`rm -rf /`, fork bombs); modo Smart usa un LLM barato para evaluar riesgo; timeout = denegar | Seguridad seria para los "poderes" de Claudy (hoy ejecuta con confirmaciones ad-hoc); el modo Smart es la joya: autonomía sin riesgo | ✅ (11 jun 2026, `core/command_guard.py`, comando `/permisos`) | ⭐⭐⭐ | 4-6 h |
 | A4 | **Filtro de inyección de prompts y credenciales**: escanear entradas (Telegram, archivos analizados, webs scrapeadas) buscando intentos de reescribir directrices o exfiltrar `.env` | Claudy lee webs y documentos de terceros → vector de ataque real hoy | 🆕 | ⭐⭐⭐ | 2-3 h |
 | A5 | **Memoria search-first formalizada**: buffer inmediato → ventana deslizante → FTS5 profundo, solo escalando si no se encuentra | Reduce ruido contextual y tokens; Claudy ya tiene FTS5 + contexto eficiente (fase 3 v5), falta formalizar el orden de escalada | 🟡 | ⭐⭐ | 2-3 h |
@@ -41,7 +41,7 @@
 | # | Funcionalidad (origen) | Qué aporta a Claudy | Estado | Prioridad | Esfuerzo |
 |---|---|---|---|---|---|
 | C1 | **Notify Me** (Safari 2026): monitorizar una página y avisar ante cambios (precio, stock, texto) | "Claudy, avísame cuando baje el precio de X" → cron existente + scraper existente + aviso por Telegram. Win rápido y muy útil | ✅ (11 jun 2026, `features/watcher.py`, `/vigilar` + NL + indicadores mindicador.cl) | ⭐⭐⭐ | 3-4 h |
-| C2 | **Describe a Shortcut / Describe an Extension** (2026): describir en lenguaje natural una automatización y que el sistema la genere | "Claudy, crea una skill que cada viernes me arme el resumen de facturas" → genera el SKILL.md + cron solo. Combina A1 + cron NL (plan 1.7) | 🆕 | ⭐⭐⭐ | 4-6 h |
+| C2 | **Describe a Shortcut / Describe an Extension** (2026): describir en lenguaje natural una automatización y que el sistema la genere | "Claudy, crea una skill que cada viernes me arme el resumen de facturas" → genera el SKILL.md + cron solo. Combina A1 + cron NL (plan 1.7) | ✅ (`/skill crear <desc>` en `skill_loop.py`, sugiere cron si detecta horario) | ⭐⭐⭐ | 4-6 h |
 | C3 | **On-screen awareness de Siri AI**: el asistente entiende lo que hay en pantalla y actúa sobre ello | Claudy ya saca screenshots y los analiza; el salto es accionar: "agenda lo que está en pantalla", "responde este correo visible" | 🟡 | ⭐⭐⭐ | 4-6 h |
 | C4 | **Inteligencia visual sobre capturas** (2025): reconocer eventos en imágenes y crear citas de calendario automáticamente | Caso concreto del C3: screenshot/foto de un flyer → evento en Google Calendar (integración ya existente) | 🆕 | ⭐⭐ | 3-4 h |
 | C5 | **Passwords agéntico** (2026): agente que navega en background y completa flujos web multi-paso solos | Es el caso de uso estrella del browser automation ya planificado (plan 2.2 Playwright): formularios, descargas de facturas, portales | 📋 (plan 2.2) | ⭐⭐⭐ | 4-6 h |
@@ -61,11 +61,11 @@
 | 1 | ✅ **A3+B5 — Filtro de comandos Manual/Smart/YOLO + lectura libre solo en workspace** (hecho 11 jun 2026) | Seguridad es prerequisito para todo lo agéntico que viene después; el informe muestra cómo OpenClaw pagó caro ignorarla | 4-6 h |
 | 2 | ✅ **C1 — Notify Me (vigilar páginas web)** (hecho 11 jun 2026) | Win rápido con piezas que ya existen (cron + scraper + Telegram); utilidad diaria inmediata | 3-4 h |
 | 3 | ✅ **C6 — Router de modelos por complejidad** (hecho 11 jun 2026) | Ahorro de costes en cada interacción; mejora latencia percibida | 4-6 h |
-| 4 | **A1 — Auto-skills (bucle de aprendizaje cerrado)** | El diferenciador de Hermes; Claudy ya tiene la mitad (skills + FTS5) | 6-8 h |
-| 5 | **C2 — "Describe una skill" en lenguaje natural** | Multiplica el valor de A1: las skills las crea el usuario hablando | 4-6 h |
+| 4 | ✅ **A1 — Auto-skills (bucle de aprendizaje cerrado)** (hecho 11 jun 2026) | El diferenciador de Hermes; Claudy ya tiene la mitad (skills + FTS5) | 6-8 h |
+| 5 | ✅ **C2 — "Describe una skill" en lenguaje natural** (ya existía: `/skill crear`) | Multiplica el valor de A1: las skills las crea el usuario hablando | 4-6 h |
 | 6 | **A4 — Filtro anti-inyección de prompts** | Claudy procesa contenido externo (webs, docs, Telegram) a diario | 2-3 h |
 | 7 | **C3/C4 — Screenshot accionable (pantalla → calendario/correo)** | Efecto "wow" tipo Siri AI con integraciones que ya existen | 4-6 h |
-| 8 | **A2 — The Curator (mantenimiento de skills)** | Necesario una vez que A1/C2 empiecen a generar skills solas | 3-4 h |
+| 8 | ✅ **A2 — The Curator (mantenimiento de skills)** (ya existía en `skill_loop.py`) | Necesario una vez que A1/C2 empiecen a generar skills solas | 3-4 h |
 
 **Total estimado del Top 8: ~30-40 horas.**
 

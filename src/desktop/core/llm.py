@@ -238,7 +238,9 @@ class LLMMixin:
         # Prompt único: la identidad base vive en core/prompts.py (antes había
         # una copia divergente hardcodeada aquí).
         base_sys = config["agent"].get("systemPrompt") or BASE_IDENTITY
-        local_skills = self._load_installed_skills()
+        # Search-first: catálogo de todas las skills + texto completo solo de
+        # las relevantes a ESTE prompt (features/skill_loop.py, índice FTS5).
+        local_skills = self._load_installed_skills(prompt)
         try:
             from qcore_products import build_company_context
             company_ctx = build_company_context() + "\n\n"

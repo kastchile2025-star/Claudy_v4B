@@ -1,7 +1,11 @@
 """Claudy features.skill_loop — Bucle de aprendizaje cerrado + The Curator.
 
-Estilo Hermes Agent (Nous Research). Tres piezas:
+Estilo Hermes Agent (Nous Research). Cuatro piezas:
 
+  0. ÍNDICE FTS5 (_skills_fts_*): las SKILL.md se indexan en SQLite FTS5
+     (~/.claudy/skills_index.db) y el system prompt usa carga search-first:
+     catálogo compacto de TODAS + texto completo solo de las relevantes al
+     mensaje. Es el ahorro de tokens que reporta Hermes en tareas repetidas.
   1. AUTO-SKILLS (_auto_skill_check): al cerrar una conversación, un evaluador
      en background decide si la sesión contiene un procedimiento multi-paso
      reutilizable y lo destila solo en una SKILL.md (~/.claudy/skills/<slug>/),
@@ -24,8 +28,28 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import threading
 import time
+
+
+# Stopwords + muletillas de petición: sin esto, el OR de tokens hace que
+# "de"/"la"/"quiero" matcheen TODAS las skills y el ranking pierda sentido.
+_FTS_STOPWORDS = frozenset(
+    "de del la el los las un una unos unas que con sin para por como este esta "
+    "esto ese esa eso mis tus sus les cuando donde quiero dame hazme haz "
+    "necesito puedes podrias ayuda ayudame sobre entre hasta desde todo toda "
+    "todos todas algo cada vez hoy ahora aqui ahi por favor".split())
+
+
+def fts_query(text):
+    """Texto libre → consulta FTS5 segura: tokens con contenido (sin stopwords)
+    citados y unidos con OR."""
+    tokens = re.findall(r"[\wáéíóúñü]+", (text or "").lower())
+    tokens = [t for t in tokens
+              if len(t) >= 3 and t.translate(str.maketrans("áéíóú", "aeiou"))
+              not in _FTS_STOPWORDS][:12]
+    return " OR ".join(f'"{t}"' for t in tokens)
 
 # Formato canónico de SKILL.md que comparten /aprender, auto-skills y describe.
 SKILL_FORMAT = (
@@ -49,6 +73,150 @@ SKILL_FORMAT = (
 
 
 class SkillLoopMixin:
+
+    # ──────────────────────────────────────────────────────────
+    # 0) ÍNDICE FTS5 + carga search-first de skills
+    # ──────────────────────────────────────────────────────────
+    def _skills_root(self):
+        return os.path.join(os.path.expanduser("~"), ".claudy", "skills")
+
+    def _skills_index_path(self):
+        return os.path.join(os.path.expanduser("~"), ".claudy", "skills_index.db")
+
+    def _skills_scan(self):
+        """[(slug, ruta_SKILL.md, mtime)] de las skills instaladas (sin _archive)."""
+        root = self._skills_root()
+        out = []
+        if not os.path.isdir(root):
+            return out
+        for folder in sorted(os.listdir(root)):
+            if folder.startswith("_"):
+                continue
+            full = os.path.join(root, folder)
+            if not os.path.isdir(full):
+                continue
+            for cand in ("SKILL.md", "skill.md", "Skill.md"):
+                p = os.path.join(full, cand)
+                if os.path.isfile(p):
+                    try:
+                        out.append((folder, p, os.path.getmtime(p)))
+                    except OSError:
+                        pass
+                    break
+        return out
+
+    def _skills_fts_refresh(self):
+        """Reconstruye el índice si algún SKILL.md cambió (firma por mtime).
+        Reconstrucción completa: son decenas de archivos chicos, milisegundos.
+        Devuelve True si el índice quedó disponible."""
+        try:
+            entries = self._skills_scan()
+            sig = {slug: mtime for slug, _, mtime in entries}
+            if (sig == getattr(self, "_skills_fts_sig", None)
+                    and getattr(self, "_skills_fts_ok", False)):
+                return True
+            conn = sqlite3.connect(self._skills_index_path())
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(
+                    slug, content, tokenize='unicode61 remove_diacritics 2'
+                )
+            """)
+            conn.execute("DELETE FROM skills_fts")
+            for slug, path, _ in entries:
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read(8000)
+                    conn.execute("INSERT INTO skills_fts (slug, content) VALUES (?, ?)",
+                                 (slug, content))
+                except Exception:
+                    continue
+            conn.commit()
+            conn.close()
+            self._skills_fts_sig = sig
+            self._skills_fts_ok = True
+            return True
+        except Exception as e:
+            self._skills_fts_ok = False
+            try:
+                self._debug_log("SKILLS FTS", f"índice no disponible: {e}")
+            except Exception:
+                pass
+            return False
+
+    def _skills_fts_search(self, query, limit=3):
+        """Slugs de skills relevantes al texto, rankeadas por bm25.
+        Devuelve None si FTS5 no está disponible (≠ [] que es 'sin matches')."""
+        if not self._skills_fts_refresh():
+            return None
+        q = fts_query(query)
+        if not q:
+            return []
+        try:
+            conn = sqlite3.connect(self._skills_index_path())
+            rows = conn.execute(
+                "SELECT slug FROM skills_fts WHERE skills_fts MATCH ? "
+                "ORDER BY bm25(skills_fts) LIMIT ?", (q, limit)).fetchall()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception:
+            return None
+
+    def _load_installed_skills(self, prompt=None, max_skills=20, max_chars_per_skill=400):
+        """Contexto de skills para el system prompt — search-first (Hermes).
+
+        Con índice FTS5: catálogo compacto (slug + descripción) de TODAS las
+        skills + texto completo SOLO de las ≤3 relevantes al mensaje. Antes se
+        inyectaban hasta 20 skills × 400 chars en cada prompt.
+        Sin FTS5 (o sin prompt): fallback al comportamiento clásico."""
+        entries = self._skills_scan()
+        if not entries:
+            return ""
+        relevant = self._skills_fts_search(prompt, limit=3) if prompt else None
+        if relevant is None:
+            return self._load_skills_legacy(entries, max_skills, max_chars_per_skill)
+
+        catalog = []
+        bodies = {}
+        for slug, path, _ in entries[:max_skills * 3]:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    body = f.read(4000)
+            except Exception:
+                continue
+            m = re.search(r"^description:\s*(.+)$", body[:500], re.M)
+            catalog.append(f"- {slug}: {m.group(1).strip() if m else ''}")
+            if slug in relevant:
+                if body.startswith("---"):
+                    end = body.find("---", 3)
+                    if end > 0:
+                        body = body[end + 3:].strip()
+                bodies[slug] = body[:1600]
+        parts = ["[CATÁLOGO DE SKILLS INSTALADAS]"] + catalog
+        if bodies:
+            parts.append("\n[SKILLS RELEVANTES PARA ESTE MENSAJE — síguelas si aplican]")
+            for slug in relevant:
+                if slug in bodies:
+                    parts.append(f"### {slug}\n{bodies[slug]}")
+        parts.append("[Fin skills locales]\n\n")
+        return "\n".join(parts)
+
+    def _load_skills_legacy(self, entries, max_skills, max_chars_per_skill):
+        """Comportamiento clásico: todas las skills truncadas (sin FTS5)."""
+        chunks = []
+        for slug, path, _ in entries[:max_skills]:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    body = f.read(max_chars_per_skill * 2)
+                if body.startswith("---"):
+                    end = body.find("---", 3)
+                    if end > 0:
+                        body = body[end + 3:].strip()
+                chunks.append(f"### {slug}\n{body[:max_chars_per_skill]}")
+            except Exception:
+                pass
+        if not chunks:
+            return ""
+        return "[SKILLS INSTALADAS LOCALMENTE]\n" + "\n\n".join(chunks) + "\n[Fin skills locales]\n\n"
 
     # ──────────────────────────────────────────────────────────
     # Helpers compartidos
