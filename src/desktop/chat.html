@@ -462,6 +462,22 @@
         setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
       };
 
+      // ── Conversación por voz (botón 🎙️, estilo Claude voice mode) ──
+      // Estados: off | starting | listening | thinking | speaking | error
+      const [voiceChat, setVoiceChat] = useState('off');
+      const [voiceDetail, setVoiceDetail] = useState('');
+      const voiceChatRef = useRef('off');
+      useEffect(() => { voiceChatRef.current = voiceChat; }, [voiceChat]);
+
+      const handleVoiceChat = () => {
+        playSound('click');
+        const a = (window.pywebview && window.pywebview.api) ? window.pywebview.api : null;
+        if (!a || !a.toggle_voice_chat) return;
+        // feedback inmediato; el estado real llega por setVoiceState desde Python
+        setVoiceChat(prev => (prev === 'off' || prev === 'error') ? 'starting' : 'off');
+        a.toggle_voice_chat();
+      };
+
       // Ref so window.addBotMessage (closure) always reads the latest voice setting.
       // El chat habla vía speak_message en cada respuesta; NO tocamos _voice_enabled del
       // backend para evitar doble lectura en rutas que ya hacen TTS (adjuntos, voz/telegram).
@@ -671,10 +687,18 @@
           setTyping(false);
           setMessages(prev => [...prev, { id: Math.random(), role: 'bot', text, ts: ts || Date.now() }]);
           // Si la voz está activada, leer en voz alta cada respuesta de Claudy.
-          if (voiceOnRef.current && text && window.pywebview && window.pywebview.api
+          // En modo conversación 🎙️ habla el backend — no duplicar la lectura.
+          if (voiceOnRef.current && voiceChatRef.current === 'off' && text
+              && window.pywebview && window.pywebview.api
               && typeof window.pywebview.api.speak_message === 'function') {
             window.pywebview.api.speak_message(text);
           }
+        };
+        // Estado del modo conversación por voz (lo empuja Python):
+        // off | listening | thinking | speaking | error
+        window.setVoiceState = (state, detail) => {
+          setVoiceChat(state || 'off');
+          setVoiceDetail(detail || '');
         };
         window.addSystemMessage = (text) => {
           setTyping(false);
@@ -697,7 +721,8 @@
               ? { ...m, id: Math.random(), text: (text != null ? text : m.text), ts: ts || m.ts, streaming: false }
               : m
           )));
-          if (voiceOnRef.current && text && window.pywebview && window.pywebview.api
+          if (voiceOnRef.current && voiceChatRef.current === 'off' && text
+              && window.pywebview && window.pywebview.api
               && typeof window.pywebview.api.speak_message === 'function') {
             window.pywebview.api.speak_message(text);
           }
@@ -1371,6 +1396,32 @@
                   />
                 </div>
 
+                {/* Voice Chat Button (conversación por voz) */}
+                <button
+                  onClick={handleVoiceChat}
+                  title={voiceChat === 'off' || voiceChat === 'error'
+                    ? "Conversación por voz con Claudy (habla y te responde en voz alta)"
+                    : "Detener conversación por voz"}
+                  class={`p-2.5 rounded-xl shadow-md active:scale-95 transition-all border ${
+                    voiceChat === 'listening'
+                      ? 'bg-rose-600/30 border-rose-500/70 text-rose-300 animate-pulse shadow-[0_0_10px_rgba(244,63,94,0.4)]'
+                      : voiceChat === 'thinking'
+                        ? 'bg-amber-600/25 border-amber-500/60 text-amber-300'
+                        : voiceChat === 'speaking'
+                          ? 'bg-emerald-600/25 border-emerald-500/60 text-emerald-300 animate-pulse'
+                          : voiceChat === 'starting'
+                            ? 'bg-violet-600/25 border-violet-500/60 text-violet-300'
+                            : voiceChat === 'error'
+                              ? 'bg-rose-950/40 border-rose-800/60 text-rose-500'
+                              : 'bg-slate-900 border-slate-700/50 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/40'
+                  }`}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15a4 4 0 004-4V6a4 4 0 10-8 0v5a4 4 0 004 4z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m-3 0h6" />
+                  </svg>
+                </button>
+
                 {/* Send Button */}
                 <button
                   onClick={handleSend}
@@ -1405,7 +1456,14 @@
                   </span>
                 </button>
                 <div class="flex items-center gap-2 text-[9px] text-slate-400/80 truncate">
-                  <span class="truncate">{deepResearch ? '🔬 Búsqueda profunda activada' : statusText}</span>
+                  <span class="truncate">{
+                    voiceChat === 'listening' ? '🎙️ Escuchando... habla ahora'
+                    : voiceChat === 'thinking' ? '🎙️ Procesando lo que dijiste...'
+                    : voiceChat === 'speaking' ? '🔊 Claudy está hablando...'
+                    : voiceChat === 'starting' ? '🎙️ Activando micrófono...'
+                    : voiceChat === 'error' ? `⚠️ ${voiceDetail || 'Error de voz'}`
+                    : deepResearch ? '🔬 Búsqueda profunda activada' : statusText
+                  }</span>
                   <span class="text-[8px] text-purple-400/60 font-mono shrink-0">CLAUDY CONSOLE</span>
                 </div>
               </div>

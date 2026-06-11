@@ -72,6 +72,14 @@ class WebViewApi:
     def minimize_window(self):
         self._pet.after(0, self._pet.hide_bubble)
 
+    def toggle_voice_chat(self):
+        """Botón 🎙️ del chat: inicia/detiene la conversación por voz.
+        Devuelve el estado resultante: on | off | error."""
+        try:
+            return self._pet._voice_chat_toggle()
+        except Exception as e:
+            return f"error:{e}"
+
     def cancel_processing(self):
         """Botón de pánico (doble ESC): interrumpe lo que Claudy esté haciendo
         (informe a medias, etc.) sin reiniciar la app."""
@@ -292,6 +300,7 @@ class WebViewChatWrapper:
         self._messages.append({"role": "bot", "text": text, "ts": ts})
         self.pet._current_session_msgs = list(self._messages)
         self.pet._eval_in_web(f"try {{ addBotMessage({json.dumps(text)}, {ts}); }} catch(e) {{}}")
+        self._notify_voice(text)
 
     def begin_stream(self, ts=None):
         ts = ts or time.time()
@@ -305,6 +314,15 @@ class WebViewChatWrapper:
         self._messages.append({"role": "bot", "text": text, "ts": ts})
         self.pet._current_session_msgs = list(self._messages)
         self.pet._eval_in_web(f"try {{ endBotStream({json.dumps(text)}, {ts}); }} catch(e) {{}}")
+        self._notify_voice(text)
+
+    def _notify_voice(self, text):
+        """Modo conversación por voz: entrega la respuesta final al loop de voz
+        (features/voice_chat.py) para que la lea en alta voz."""
+        try:
+            self.pet._voice_capture_answer(text)
+        except Exception:
+            pass
 
     def add_system(self, text):
         self._messages.append({"role": "system", "text": text, "ts": time.time()})

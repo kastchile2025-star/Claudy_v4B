@@ -88,3 +88,31 @@ def speak(text, voice=DEFAULT_VOICE):
                     pass
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def speak_blocking(text, voice=DEFAULT_VOICE, max_chars=900):
+    """Sintetiza y reproduce BLOQUEANDO hasta terminar.
+
+    Para el modo conversación por voz: el loop no debe volver a escuchar
+    mientras Claudy habla (oiría su propio eco)."""
+    if not EDGE_TTS_AVAILABLE:
+        return
+    clean = _strip_for_tts(text)
+    if not clean:
+        return
+    if len(clean) > max_chars:
+        clean = clean[:max_chars].rsplit(" ", 1)[0] + ". El detalle completo está en el chat."
+    with _LOCK:
+        stop_speaking()
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        tmp.close()
+        try:
+            asyncio.run(_synth(clean, voice, tmp.name))
+            _play_windows(tmp.name)
+        except Exception:
+            pass
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
