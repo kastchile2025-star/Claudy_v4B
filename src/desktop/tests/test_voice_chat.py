@@ -80,5 +80,19 @@ class TestVoiceStatus(unittest.TestCase):
         self.assertIn('setVoiceState("error"', pet.js_calls[0])
 
 
+class TestDictation(unittest.TestCase):
+    def test_segundo_clic_detiene_la_grabacion(self):
+        pet = FakePet()
+        pet._dictating = True
+        out = pet._dictation_toggle()
+        self.assertEqual(out, "stopping")
+        self.assertFalse(pet._dictating)
+
+    def test_status_se_empuja_al_chat(self):
+        pet = FakePet()
+        pet._dictation_status("recording")
+        self.assertTrue(any('setDictationState("recording"' in c for c in pet.js_calls))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -478,6 +478,18 @@
         a.toggle_voice_chat();
       };
 
+      // ── Dictado por voz (botón 🎤 dentro del input) ──
+      // Estados: off | recording | transcribing | error
+      const [dictation, setDictation] = useState('off');
+      const [dictationDetail, setDictationDetail] = useState('');
+
+      const handleDictation = () => {
+        playSound('click');
+        const a = (window.pywebview && window.pywebview.api) ? window.pywebview.api : null;
+        if (!a || !a.toggle_dictation) return;
+        a.toggle_dictation();
+      };
+
       // Ref so window.addBotMessage (closure) always reads the latest voice setting.
       // El chat habla vía speak_message en cada respuesta; NO tocamos _voice_enabled del
       // backend para evitar doble lectura en rutas que ya hacen TTS (adjuntos, voz/telegram).
@@ -699,6 +711,17 @@
         window.setVoiceState = (state, detail) => {
           setVoiceChat(state || 'off');
           setVoiceDetail(detail || '');
+        };
+        // Estado del dictado (off | recording | transcribing | error)
+        window.setDictationState = (state, detail) => {
+          setDictation(state || 'off');
+          setDictationDetail(detail || '');
+        };
+        // Texto dictado → se agrega al input (NO se envía; el usuario decide)
+        window.insertDictation = (text) => {
+          if (!text) return;
+          setInputText(prev => prev ? (prev.trimEnd() + ' ' + text) : text);
+          if (inputRef.current) inputRef.current.focus();
         };
         window.addSystemMessage = (text) => {
           setTyping(false);
@@ -1390,18 +1413,39 @@
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="Escribe tu mensaje..."
+                    placeholder={dictation === 'recording' ? "Grabando... clic en el mic para terminar"
+                      : dictation === 'transcribing' ? "Transcribiendo..." : "Escribe tu mensaje..."}
                     class="w-full bg-transparent text-slate-100 text-xs py-2 outline-none resize-none scrollbar-none font-sans"
                     style={{ maxHeight: "80px" }}
                   />
+                  {/* Dictado: clic graba, clic detiene; el texto queda en el input */}
+                  <button
+                    onClick={handleDictation}
+                    title={dictation === 'recording' ? "Detener y transcribir"
+                      : "Dictar por voz (el texto queda aquí para que lo edites)"}
+                    class={`p-1.5 transition-colors ml-1 no-drag rounded-lg ${
+                      dictation === 'recording'
+                        ? 'text-rose-400 bg-rose-600/20 animate-pulse'
+                        : dictation === 'transcribing'
+                          ? 'text-amber-400 bg-amber-600/15'
+                          : dictation === 'error'
+                            ? 'text-rose-500'
+                            : 'text-slate-400 hover:text-cyan-300'
+                    }`}
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15a4 4 0 004-4V6a4 4 0 10-8 0v5a4 4 0 004 4z" />
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m-3 0h6" />
+                    </svg>
+                  </button>
                 </div>
 
-                {/* Voice Chat Button (conversación por voz) */}
+                {/* Voice Mode Button (conversación continua, ícono de onda ıılıı) */}
                 <button
                   onClick={handleVoiceChat}
                   title={voiceChat === 'off' || voiceChat === 'error'
-                    ? "Conversación por voz con Claudy (habla y te responde en voz alta)"
-                    : "Detener conversación por voz"}
+                    ? "Modo voz: conversación continua con Claudy (habla y te responde en voz alta)"
+                    : "Detener modo voz"}
                   class={`p-2.5 rounded-xl shadow-md active:scale-95 transition-all border ${
                     voiceChat === 'listening'
                       ? 'bg-rose-600/30 border-rose-500/70 text-rose-300 animate-pulse shadow-[0_0_10px_rgba(244,63,94,0.4)]'
@@ -1416,9 +1460,12 @@
                               : 'bg-slate-900 border-slate-700/50 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/40'
                   }`}
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15a4 4 0 004-4V6a4 4 0 10-8 0v5a4 4 0 004 4z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m-3 0h6" />
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="3" y="10" width="2" height="4" rx="1" />
+                    <rect x="7" y="7" width="2" height="10" rx="1" />
+                    <rect x="11" y="3" width="2" height="18" rx="1" />
+                    <rect x="15" y="7" width="2" height="10" rx="1" />
+                    <rect x="19" y="10" width="2" height="4" rx="1" />
                   </svg>
                 </button>
 
@@ -1462,6 +1509,9 @@
                     : voiceChat === 'speaking' ? '🔊 Claudy está hablando...'
                     : voiceChat === 'starting' ? '🎙️ Activando micrófono...'
                     : voiceChat === 'error' ? `⚠️ ${voiceDetail || 'Error de voz'}`
+                    : dictation === 'recording' ? '🎤 Dictando... clic en el mic para terminar'
+                    : dictation === 'transcribing' ? '✨ Transcribiendo tu voz...'
+                    : dictation === 'error' ? `⚠️ ${dictationDetail || 'Error de dictado'}`
                     : deepResearch ? '🔬 Búsqueda profunda activada' : statusText
                   }</span>
                   <span class="text-[8px] text-purple-400/60 font-mono shrink-0">CLAUDY CONSOLE</span>

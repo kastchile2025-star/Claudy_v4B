@@ -73,10 +73,18 @@ class WebViewApi:
         self._pet.after(0, self._pet.hide_bubble)
 
     def toggle_voice_chat(self):
-        """Botón 🎙️ del chat: inicia/detiene la conversación por voz.
+        """Botón ıılıı del chat: inicia/detiene la conversación por voz.
         Devuelve el estado resultante: on | off | error."""
         try:
             return self._pet._voice_chat_toggle()
+        except Exception as e:
+            return f"error:{e}"
+
+    def toggle_dictation(self):
+        """Botón 🎤 del chat: dicta al input. Clic graba, clic detiene y
+        transcribe. Devuelve: recording | stopping | error."""
+        try:
+            return self._pet._dictation_toggle()
         except Exception as e:
             return f"error:{e}"
 

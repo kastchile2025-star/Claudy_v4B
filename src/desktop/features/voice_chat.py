@@ -80,6 +80,69 @@ class VoiceChatMixin:
         except Exception:
             pass
 
+    # ──────────────────────────────────────────────────────────
+    # Dictado (botón 🎤): graba → transcribe → deja el texto en el
+    # input del chat para que el usuario lo edite y lo envíe.
+    # Clic para grabar, clic de nuevo para detener (máx. 60 s).
+    # ──────────────────────────────────────────────────────────
+    def _dictation_toggle(self):
+        if getattr(self, "_dictating", False):
+            self._dictating = False   # señal de stop → transcribe lo grabado
+            return "stopping"
+        try:
+            import speech_recognition  # noqa: F401
+        except ImportError:
+            self._dictation_status(
+                "error", "Falta el módulo de voz: pip install SpeechRecognition pyaudio")
+            return "error"
+        self._dictating = True
+        threading.Thread(target=self._dictation_worker, daemon=True,
+                         name="dictation").start()
+        return "recording"
+
+    def _dictation_status(self, state, detail=""):
+        """Empuja el estado del dictado al chat: off|recording|transcribing|error."""
+        try:
+            self._eval_in_web(
+                f"try {{ setDictationState({json.dumps(state)}, {json.dumps(detail)}); }} catch(e) {{}}")
+        except Exception:
+            pass
+
+    def _dictation_worker(self):
+        import speech_recognition as sr
+        frames = []
+        try:
+            r = sr.Recognizer()
+            mic = sr.Microphone()
+            with mic as source:
+                r.adjust_for_ambient_noise(source, duration=0.3)
+                self._dictation_status("recording")
+                start = time.time()
+                while getattr(self, "_dictating", False) and time.time() - start < 60:
+                    try:
+                        frames.append(source.stream.read(source.CHUNK))
+                    except Exception:
+                        time.sleep(0.005)
+                sample_rate, sample_width = source.SAMPLE_RATE, source.SAMPLE_WIDTH
+            if not frames:
+                self._dictation_status("off")
+                return
+            self._dictation_status("transcribing")
+            audio = sr.AudioData(b"".join(frames), sample_rate, sample_width)
+            try:
+                text = (r.recognize_google(audio, language="es-CL") or "").strip()
+            except sr.UnknownValueError:
+                self._dictation_status("error", "No entendí el audio, intenta de nuevo")
+                return
+            if text:
+                self._eval_in_web(
+                    f"try {{ insertDictation({json.dumps(text)}); }} catch(e) {{}}")
+            self._dictation_status("off")
+        except Exception as e:
+            self._dictation_status("error", f"Micrófono: {e}")
+        finally:
+            self._dictating = False
+
     def _voice_chat_loop(self):
         import speech_recognition as sr
         r = sr.Recognizer()
