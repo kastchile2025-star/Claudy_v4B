@@ -40,7 +40,7 @@
 
 | # | Funcionalidad (origen) | Qué aporta a Claudy | Estado | Prioridad | Esfuerzo |
 |---|---|---|---|---|---|
-| C1 | **Notify Me** (Safari 2026): monitorizar una página y avisar ante cambios (precio, stock, texto) | "Claudy, avísame cuando baje el precio de X" → cron existente + scraper existente + aviso por Telegram. Win rápido y muy útil | 🆕 | ⭐⭐⭐ | 3-4 h |
+| C1 | **Notify Me** (Safari 2026): monitorizar una página y avisar ante cambios (precio, stock, texto) | "Claudy, avísame cuando baje el precio de X" → cron existente + scraper existente + aviso por Telegram. Win rápido y muy útil | ✅ (11 jun 2026, `features/watcher.py`, `/vigilar` + NL + indicadores mindicador.cl) | ⭐⭐⭐ | 3-4 h |
 | C2 | **Describe a Shortcut / Describe an Extension** (2026): describir en lenguaje natural una automatización y que el sistema la genere | "Claudy, crea una skill que cada viernes me arme el resumen de facturas" → genera el SKILL.md + cron solo. Combina A1 + cron NL (plan 1.7) | 🆕 | ⭐⭐⭐ | 4-6 h |
 | C3 | **On-screen awareness de Siri AI**: el asistente entiende lo que hay en pantalla y actúa sobre ello | Claudy ya saca screenshots y los analiza; el salto es accionar: "agenda lo que está en pantalla", "responde este correo visible" | 🟡 | ⭐⭐⭐ | 4-6 h |
 | C4 | **Inteligencia visual sobre capturas** (2025): reconocer eventos en imágenes y crear citas de calendario automáticamente | Caso concreto del C3: screenshot/foto de un flyer → evento en Google Calendar (integración ya existente) | 🆕 | ⭐⭐ | 3-4 h |
@@ -59,7 +59,7 @@
 | Orden | Mejora | Por qué primero | Esfuerzo |
 |---|---|---|---|
 | 1 | ✅ **A3+B5 — Filtro de comandos Manual/Smart/YOLO + lectura libre solo en workspace** (hecho 11 jun 2026) | Seguridad es prerequisito para todo lo agéntico que viene después; el informe muestra cómo OpenClaw pagó caro ignorarla | 4-6 h |
-| 2 | **C1 — Notify Me (vigilar páginas web)** | Win rápido con piezas que ya existen (cron + scraper + Telegram); utilidad diaria inmediata | 3-4 h |
+| 2 | ✅ **C1 — Notify Me (vigilar páginas web)** (hecho 11 jun 2026) | Win rápido con piezas que ya existen (cron + scraper + Telegram); utilidad diaria inmediata | 3-4 h |
 | 3 | **C6 — Router de modelos por complejidad** | Ahorro de costes en cada interacción; mejora latencia percibida | 4-6 h |
 | 4 | **A1 — Auto-skills (bucle de aprendizaje cerrado)** | El diferenciador de Hermes; Claudy ya tiene la mitad (skills + FTS5) | 6-8 h |
 | 5 | **C2 — "Describe una skill" en lenguaje natural** | Multiplica el valor de A1: las skills las crea el usuario hablando | 4-6 h |

@@ -233,6 +233,7 @@ from features.calendar import CalendarMixin
 from features.skill_loop import SkillLoopMixin
 from features.cleaner import CleanerMixin
 from features.voice_chat import VoiceChatMixin
+from features.watcher import WatcherMixin
 from core.command_guard import CommandGuardMixin
 from core.llm import LLMMixin
 from core.memory import (
@@ -430,7 +431,7 @@ def _make_app_icon(size=64):
         return _PILImg.new("RGBA", (size, size), (124, 107, 255, 255))
 
 
-class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, BubblesMixin, tk.Tk):
+class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, BubblesMixin, tk.Tk):
     BUBBLES = [
         "Estoy listo para ayudarte.",
         "Toca dos veces para hablar.",

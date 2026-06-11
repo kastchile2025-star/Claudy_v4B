@@ -219,6 +219,14 @@ SLASH_COMMANDS = [
      lambda s, p, l: s._execute_command(_arg(p)) if _arg(p) else "Qué comando quieres ejecutar?"),
     (("/permisos", "/guard", "/modo-comandos"),
      lambda s, p, l: s._guard_cmd(_arg(p))),
+    (("/vigilar quitar ", "/vigilar borrar ", "/vigilar eliminar "),
+     lambda s, p, l: s._watch_remove(p.split()[2] if len(p.split()) > 2 else "")),
+    (("/vigilando", "/vigilancias"),
+     lambda s, p, l: s._watch_list()),
+    (("/vigilar ",),
+     lambda s, p, l: s._watch_add(p)),
+    (("/vigilar",),
+     lambda s, p, l: s._watch_list()),
     (("/recordar ", "/reminder ", "/alarma "),
      lambda s, p, l: s._set_reminder(_arg(p)) if _arg(p) else "Formato: /recordar 10 minutos comprar leche"),
     (("/noticias", "/news", "/noti"),
@@ -358,6 +366,21 @@ class IntentsMixin:
             g_handled, g_result = self._guard_try_confirm(prompt, lower)
             if g_handled:
                 return True, g_result
+        except Exception:
+            pass
+
+        # ===== Notify Me: vigilar páginas/indicadores («avísame cuando baje
+        # el precio de <url>», «avísame si el dólar baja de 900»). Va antes
+        # del resto: si no, caería en recordatorios o en la búsqueda web de
+        # datos actuales. Con hora explícita («en 30 min», «a las 9») es un
+        # recordatorio, no una vigilancia.
+        try:
+            if (not lower.startswith("/")
+                    and not re.search(r"\ben\s+\d+\s*(?:minuto|min|hora|seg)", lower)
+                    and not re.search(r"\ba\s+las?\s+\d", lower)):
+                from features.watcher import parse_watch_request
+                if parse_watch_request(prompt):
+                    return True, self._watch_add(prompt)
         except Exception:
             pass
 

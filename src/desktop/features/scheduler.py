@@ -336,6 +336,10 @@ class SchedulerMixin:
         if job.get("action") == "command":
             self._execute_cron_command(job)
             return
+        # Vigilancias Notify Me: chequear página/indicador y avisar si cambió.
+        if job.get("action") == "watch":
+            self._watch_check(job)
+            return
         msg = job.get("message", "")
         if not msg:
             return
