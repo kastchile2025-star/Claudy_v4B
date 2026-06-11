@@ -183,6 +183,61 @@ class CleanerMixin:
         return "\n".join(lines)
 
     # ──────────────────────────────────────────────────────────
+    # Archivos grandes: "limpia los archivos de más de 1 GB"
+    # ──────────────────────────────────────────────────────────
+    def _cleanup_big_files(self, min_bytes):
+        """Busca archivos personales que pesan >= min_bytes y los propone para
+        enviar a la Papelera (recuperables). No borra nada sin aprobación."""
+        home = os.path.expanduser("~")
+        roots = [os.path.join(home, d) for d in
+                 ("Downloads", "Documents", "Desktop", "Videos", "Music", "Pictures")]
+        skip = {".git", "node_modules", "AppData", "$RECYCLE.BIN", "__pycache__"}
+        found, visited = [], 0
+        for root_dir in roots:
+            if not os.path.isdir(root_dir):
+                continue
+            for root, dirs, files in os.walk(root_dir, onerror=lambda e: None):
+                dirs[:] = [d for d in dirs if d not in skip and not d.startswith((".", "$"))]
+                for f in files:
+                    visited += 1
+                    if visited > 150000:
+                        break
+                    fp = os.path.join(root, f)
+                    try:
+                        sz = os.path.getsize(fp)
+                    except OSError:
+                        continue
+                    if sz >= min_bytes:
+                        found.append((sz, fp))
+                if visited > 150000:
+                    break
+
+        found.sort(reverse=True)
+        found = found[:25]
+        if not found:
+            return (f"Busqué en Descargas, Documentos, Escritorio, Videos, Música e "
+                    f"Imágenes y no encontré archivos de más de {_human(min_bytes)}.")
+
+        proposals = []
+        for i, (sz, fp) in enumerate(found, 1):
+            proposals.append({
+                "id": i, "label": f"{os.path.basename(fp)} ({os.path.dirname(fp)})",
+                "kind": "big_file", "size": sz, "count": 1, "detail": [fp],
+                "explicit": False,
+            })
+        self._cleanup_proposals = proposals
+        total = sum(p["size"] for p in proposals)
+        lines = [f"🧹 **Archivos de más de {_human(min_bytes)}** — encontré "
+                 f"{len(proposals)} (irían a la **Papelera**, recuperables):\n"]
+        for p in proposals:
+            lines.append(f"**{p['id']}.** {os.path.basename(p['detail'][0])} — **{_human(p['size'])}**")
+            lines.append(f"      · {p['detail'][0]}")
+        lines.append(f"\n**Total: ~{_human(total)}**\n")
+        lines.append("Para enviarlos a la Papelera: `/limpiar todo`, `/limpiar 1,3` "
+                     "(elegir), «limpia el 1 y el 3», o `/limpiar cancelar`.")
+        return "\n".join(lines)
+
+    # ──────────────────────────────────────────────────────────
     # Ejecución de lo elegido
     # ──────────────────────────────────────────────────────────
     def _cleanup_execute(self, selection):
@@ -238,7 +293,7 @@ class CleanerMixin:
                         capture_output=True, timeout=60,
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                     freed = p["size"]
-                elif p["kind"] == "old_installers":
+                elif p["kind"] in ("old_installers", "big_file"):
                     for fp in p["detail"]:
                         sz = 0
                         try:

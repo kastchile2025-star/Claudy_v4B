@@ -85,5 +85,62 @@ class TestSlashRegistry(unittest.TestCase):
         self.assertFalse(h)
 
 
+def nl(prompt, **attrs):
+    """Despacha por la capa de lenguaje natural con un Probe configurable."""
+    p = Probe()
+    for k, v in attrs.items():
+        setattr(p, k, v)
+    return p._try_handle_skill_action(prompt)
+
+
+class TestLimpiezaNL(unittest.TestCase):
+    """Limpieza invocada en lenguaje natural (botón 🧹 y frases libres)."""
+
+    def test_archivos_sobre_1gb(self):
+        h, r = nl("limpiar todos los archivos que sea sobre 1GB")
+        self.assertTrue(h)
+        self.assertIn(f"_cleanup_big_files:({1024 ** 3},)", r)
+
+    def test_archivos_mas_de_500mb(self):
+        h, r = nl("busca los archivos de más de 500 mb")
+        self.assertTrue(h)
+        self.assertIn(f"_cleanup_big_files:({500 * 1024 ** 2},)", r)
+
+    def test_alternativas_para_limpiar_el_pc(self):
+        h, r = nl("busca todas las alternativas para limpiar el pc")
+        self.assertTrue(h)
+        self.assertIn("_cleanup_analyze", r)
+
+    def test_seleccion_natural_con_propuesta_vigente(self):
+        h, r = nl("limpia el 1 y el 3", _cleanup_proposals=[{"id": 1}])
+        self.assertTrue(h)
+        self.assertIn("_cleanup_execute:('1,3',)", r)
+
+    def test_seleccion_sin_propuesta_no_ejecuta_limpieza(self):
+        # Sin propuesta vigente la frase es ambigua: no debe ir a _cleanup_execute
+        # (hoy la toma el scheduler de cron, comportamiento pre-existente).
+        _, r = nl("limpia el 1 y el 3", _cleanup_proposals=None)
+        self.assertNotIn("_cleanup_execute", str(r))
+
+
+class TestBusquedaArchivosNL(unittest.TestCase):
+    """Búsqueda de archivos en lenguaje natural (botón 🔎 y frases libres)."""
+
+    def test_busca_el_archivo_simple(self):
+        h, r = nl("busca el archivo factura_mayo.pdf")
+        self.assertTrue(h)
+        self.assertIn("_search_files:('factura_mayo.pdf',)", r)
+
+    def test_comodin_y_ubicacion_delante(self):
+        h, r = nl("encuentra el archivo en el notebook *.iso")
+        self.assertTrue(h)
+        self.assertIn("_search_files:('*.iso',)", r)
+
+    def test_ubicacion_al_final_se_quita(self):
+        h, r = nl("busca el archivo informe.docx en mi pc")
+        self.assertTrue(h)
+        self.assertIn("_search_files:('informe.docx',)", r)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

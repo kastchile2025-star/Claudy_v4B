@@ -11615,6 +11615,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         max_results = 20
         max_depth = 4
         query_lower = query.lower()
+        # Con comodines ("*.iso", "informe?.docx") se respeta el patrón exacto
+        has_wildcard = "*" in query_lower or "?" in query_lower
 
         for search_dir in search_dirs:
             if not os.path.isdir(search_dir):
@@ -11629,7 +11631,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                     # Skip system/hidden dirs
                     dirs[:] = [d for d in dirs if not d.startswith(("$", ".", "AppData", "Windows", "Program Files"))]
                     for fname in files:
-                        if query_lower in fname.lower() or fnmatch.fnmatch(fname.lower(), f"*{query_lower}*"):
+                        fl = fname.lower()
+                        if (fnmatch.fnmatch(fl, query_lower) if has_wildcard else query_lower in fl):
                             fpath = os.path.join(root, fname)
                             try:
                                 size = os.path.getsize(fpath)

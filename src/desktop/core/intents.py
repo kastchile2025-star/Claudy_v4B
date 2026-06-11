@@ -269,6 +269,83 @@ class IntentsMixin:
                     return True, f"Error ejecutando {prefixes[0].strip()}: {e}"
         return False, None
 
+    def _try_cleanup_and_filesearch_nl(self, prompt, lower):
+        """Limpieza del PC y búsqueda de archivos — slash y lenguaje natural.
+
+        Centraliza todo el ruteo de los botones 🧹 y 🔎 del sidebar. Corre antes
+        de claudy_powers.detect_intent para que estas frases no caigan en
+        find_in/search_app con la query sin limpiar.
+        """
+        # «/limpiar» analiza y propone; «/limpiar todo|1,3|cancelar» ejecuta.
+        if lower in ("/limpiar", "/limpieza", "analiza la limpieza",
+                     "analizar limpieza", "limpia mi pc", "limpiar mi pc",
+                     "analiza mi pc para limpiar", "propuestas de limpieza",
+                     "limpia el pc", "limpiar el pc"):
+            return True, self._cleanup_analyze()
+        if lower.startswith("/limpiar ") or lower.startswith("/limpieza "):
+            return True, self._cleanup_execute(prompt.split(None, 1)[1].strip())
+
+        # Por tamaño: "limpia/borra/busca los archivos de más de 1 GB",
+        # "limpiar todos los archivos que sean sobre 500 MB"
+        m_big = re.search(
+            r"archivos?\b.{0,40}?(?:sobre|m[aá]s\s+de|mayor(?:es)?\s+(?:a|de|que)|"
+            r"arriba\s+de|superior(?:es)?\s+a|>)\s*"
+            r"(\d+(?:[.,]\d+)?)\s*(tb|teras?|gb|gigas?|mb|megas?|kb)\b", lower)
+        if m_big and any(k in lower for k in (
+                "limpia", "limpiar", "borra", "borrar", "elimina", "eliminar",
+                "busca", "buscar", "encuentra", "muestra", "mostrar",
+                "lista", "listar", "revisa")):
+            num = float(m_big.group(1).replace(",", "."))
+            mult = {"kb": 1024, "mb": 1024 ** 2, "mega": 1024 ** 2,
+                    "gb": 1024 ** 3, "giga": 1024 ** 3,
+                    "tb": 1024 ** 4, "tera": 1024 ** 4}.get(m_big.group(2)[:4], 1024 ** 3)
+            return True, self._cleanup_big_files(int(num * mult))
+
+        # Difusa: "busca todas las alternativas para limpiar el pc",
+        # "cómo puedo liberar espacio en el disco"
+        if (("limpi" in lower or "liberar espacio" in lower)
+                and any(k in lower for k in ("pc", "computador", "notebook", "equipo",
+                                             "laptop", "disco", "windows", "espacio"))
+                and any(k in lower for k in ("alternativa", "opcion", "opción", "propuesta",
+                                             "analiza", "analizar", "busca", "revisa",
+                                             "como", "cómo", "puedo", "liberar"))):
+            return True, self._cleanup_analyze()
+
+        # Selección natural: "limpia el 1 y el 3", "limpiar 2", "limpia todo" —
+        # solo con una propuesta vigente (si no, podría significar otra cosa).
+        if getattr(self, "_cleanup_proposals", None):
+            m_sel = re.match(
+                r"^limpi(?:a|ar)\s+(?:el\s+|los\s+)?(\d+(?:\s*(?:,|y|e)\s*(?:el\s+)?\d+)*)\s*$",
+                lower)
+            if m_sel:
+                sel = re.sub(r"\s*(?:,|y|e)\s*(?:el\s+)?", ",", m_sel.group(1)).replace(" ", "")
+                return True, self._cleanup_execute(sel)
+            if lower in ("limpia todo", "limpiar todo", "limpia todos", "limpiar todos"):
+                return True, self._cleanup_execute("todo")
+
+        # Búsqueda precisa: "busca/encuentra el archivo <query>", quitando
+        # muletillas de ubicación ("en el notebook *.iso" → "*.iso").
+        m_fs = re.match(
+            r"^(?:busca(?:r|me)?|encuentra|encontrar|localiza(?:r)?|ubica(?:r)?)\s+"
+            r"(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|todos\s+los\s+)?"
+            r"(?:archivos?|ficheros?)\s+(.+)$", lower)
+        if m_fs:
+            q = m_fs.group(1).strip()
+            loc = (r"(?:en|dentro\s+de(?:l)?)\s+(?:el\s+|la\s+|mi\s+|este\s+|esta\s+|todo\s+el\s+)?"
+                   r"(?:notebook|pc|computador(?:a)?|equipo|laptop|m[aá]quina|"
+                   r"windows|sistema|disco\s+duro|disco)\b\s*")
+            q = re.sub(r"^(?:que\s+se\s+llam[ae]\s+|llamad[oa]\s+|de\s+nombre\s+|"
+                       r"con\s+(?:el\s+)?nombre\s+)", "", q)
+            q = re.sub(rf"^{loc}", "", q)
+            q = re.sub(rf"\s+{loc}$", "", q)
+            q = q.strip().strip('"\'').strip(".!?,¿¡")
+            # Si aún queda "X en Y", Y es una carpeta real → que lo tome find_in
+            if q and not re.search(r"\s+en\s+\S", q):
+                self._last_file_query = q
+                return True, self._search_files(q)
+
+        return False, None
+
     def _try_handle_skill_action(self, prompt):
         lower = prompt.lower().strip()
 
@@ -297,6 +374,15 @@ class IntentsMixin:
                 return True, self._remember_knowledge(mem_fact)
         except Exception:
             pass
+
+        # ===== Limpieza del PC y búsqueda precisa de archivos =====
+        # Debe ir ANTES de _try_local_file_action ("busca el archivo X en mi pc"
+        # ahí se ANALIZA en vez de ubicarse) y de claudy_powers.detect_intent
+        # ("busca el archivo X" caía en search_app/find_in con la query sucia).
+        cl_lower = cleaned_prompt.lower().strip()
+        nl_handled, nl_result = self._try_cleanup_and_filesearch_nl(cleaned_prompt, cl_lower)
+        if nl_handled:
+            return True, nl_result
 
         # ===== Buscar + analizar un archivo LOCAL (debe ir ANTES de crear-documento,
         # porque "analiza el archivo X de la carpeta Y" NO es crear un documento) =====
@@ -462,6 +548,21 @@ class IntentsMixin:
                 if kw in lower:
                     query = prompt[lower.index(kw) + len(kw):].strip()
                     break
+            if not query and file_pattern:
+                query = file_pattern.group(0)
+            # Quitar muletillas de ubicación y nombre para quedarnos con la query:
+            #   "en el notebook *.iso"     → "*.iso"
+            #   "factura.pdf en mi pc"     → "factura.pdf"
+            #   "llamado informe.docx"     → "informe.docx"
+            if query:
+                loc = (r"(?:en|dentro\s+de(?:l)?)\s+(?:el|la|mi|este|esta|todo\s+el)?\s*"
+                       r"(?:notebook|pc|computador(?:a)?|equipo|laptop|m[aá]quina|"
+                       r"windows|sistema|disco(?:\s+[a-z]:?)?)")
+                query = re.sub(r"^(?:que\s+se\s+llam[ae]|llamad[oa]|de\s+nombre|"
+                               r"con\s+(?:el\s+)?nombre)\s+", "", query, flags=re.I)
+                query = re.sub(rf"^{loc}\s*", "", query, flags=re.I)
+                query = re.sub(rf"\s+{loc}\s*$", "", query, flags=re.I)
+                query = query.strip().strip('"\'').strip(".!?,")
             if not query and file_pattern:
                 query = file_pattern.group(0)
             if query:
@@ -696,16 +797,6 @@ class IntentsMixin:
         if lower.startswith("/vincular ") or lower.startswith("vincular "):
             uid = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
             return True, self._vincular_telegram_user(uid) if uid else "Uso: /vincular <ID_de_Telegram>"
-
-        # LIMPIEZA DEL PC (botón 🧹 del sidebar y comandos de texto):
-        # «/limpiar» analiza y propone; «/limpiar todo|1,3|cancelar» ejecuta.
-        if lower.strip() in ("/limpiar", "/limpieza", "analiza la limpieza",
-                             "analizar limpieza", "limpia mi pc", "limpiar mi pc",
-                             "analiza mi pc para limpiar", "propuestas de limpieza",
-                             "limpia el pc", "limpiar el pc"):
-            return True, self._cleanup_analyze()
-        if lower.startswith("/limpiar ") or lower.startswith("/limpieza "):
-            return True, self._cleanup_execute(prompt.split(None, 1)[1].strip())
 
         # SKILLS: listar / recargar
         if lower.strip() in ("/skills", "/skill list", "skills cargadas", "que skills tienes"):
