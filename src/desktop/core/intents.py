@@ -475,13 +475,25 @@ class IntentsMixin:
         # "busca en internet" / "busca en la web" — pasan al LLM para síntesis natural
         web_search_kws = ["busca en internet", "buscar en internet", "busca en la web",
                           "buscar en la web", "busca en google", "googleame", "googlea"]
-        if any(kw in lower for kw in web_search_kws):
+        # "corrobora/verifica/confirma/chequea X en internet" también es búsqueda
+        # real: antes caía al LLM directo, que respondía de memoria inventando
+        # fuentes. Tolera typos comunes (correborar) y acentos.
+        _verify_hit = (
+            re.search(r"\b(?:corr?[oe]bor|verif|conf[ií]rm|chequ[eé]|comprueb|comprob)\w*", lower)
+            and any(n in lower for n in ("internet", "la web", "google", "en línea",
+                                         "en linea", "online")))
+        if any(kw in lower for kw in web_search_kws) or _verify_hit:
             query = prompt
             for kw in web_search_kws:
                 if kw in lower:
                     query = prompt[lower.index(kw) + len(kw):].strip()
                     break
-            return True, self._web_search_and_answer(query) if query else "¿Qué quieres que busque?"
+            # "tengo este dato, ¿puedes corroborarlo en internet?" deja la query
+            # vacía o trivial: en ese caso se busca con el MENSAJE completo
+            # (la destilación en _web_search_and_answer lo vuelve palabras clave).
+            if len(query.split()) < 3:
+                query = prompt
+            return True, self._web_search_and_answer(query) if query.strip() else "¿Qué quieres que busque?"
 
         # Play game: "quiero jugar megaman de nes", "jugar super mario snes"
         play_kws = ["quiero jugar ", "jugar a ", "jugar ", "pon el juego ", "abre el juego ", "corre el juego "]

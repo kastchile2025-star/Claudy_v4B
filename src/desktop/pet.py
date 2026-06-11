@@ -11104,32 +11104,67 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         import re as _re
         # Limpiar comillas/extra del query
         clean_query = query.strip().strip('"').strip("'").strip()
+
+        # Las frases conversacionales largas son pésimas queries para DuckDuckGo
+        # ("tengo esta info, puedes corroborarla en internet..." → 0 resultados →
+        # el LLM respondía de memoria fingiendo que buscó). Destilar a palabras
+        # clave con el modelo rápido arregla la calidad de los resultados.
+        search_query = clean_query
+        if len(clean_query.split()) > 8:
+            try:
+                distilled = self.send_quick_message(
+                    "Convierte este mensaje en una consulta corta para un buscador web "
+                    "(3 a 8 palabras clave; conserva nombres propios, fechas, lugares y "
+                    "zonas horarias; sin comillas). Responde SOLO la consulta.\n\n"
+                    f"Mensaje: {clean_query}",
+                    _skip_skill_action=True, tier="fast")
+                distilled = (distilled or "").strip().strip('"').splitlines()[0].strip()
+                if 0 < len(distilled.split()) <= 12:
+                    search_query = distilled
+                    self._debug_log("WEB SEARCH", f"query destilada: {distilled}")
+            except Exception:
+                pass
+
         try:
-            items = self._search_files_online(clean_query, max_results=5)
+            items = self._search_files_online(search_query, max_results=5)
         except Exception:
             items = []
+        if not items and search_query != clean_query:
+            try:
+                items = self._search_files_online(clean_query, max_results=5)
+            except Exception:
+                items = []
+
+        _now = datetime.datetime.now()
+        _dias = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+        hoy = f"{_dias[_now.weekday()]} {_now.strftime('%d-%m-%Y')}"
 
         if items:
-            context = f"RESULTADOS DE INTERNET para \"{clean_query}\":\n"
+            context = f"RESULTADOS DE INTERNET para \"{search_query}\":\n"
             for item in items[:5]:
                 title = item.get("title", "")
                 snippet = item.get("snippet", "")
                 url = item.get("url", "")
                 context += f"- {title}: {snippet}\n  Fuente: {url}\n"
             enhanced_prompt = (
-                f"{context}\n"
+                f"Hoy es {hoy}.\n{context}\n"
                 f"INSTRUCCIONES ESTRICTAS:\n"
-                f"1. RESPONDE DIRECTAMENTE usando los datos de arriba. NO digas 'voy a buscar' ni emitas /buscar.\n"
-                f"2. Si los resultados tienen la respuesta, dala con la fuente al final.\n"
-                f"3. Si los resultados NO tienen suficiente info, di 'No encontré datos suficientes sobre X' y cita lo que sí encontraste.\n"
+                f"1. RESPONDE usando EXCLUSIVAMENTE los datos de los resultados de arriba. NO emitas /buscar.\n"
+                f"2. Cita SOLO las URLs/sitios de esa lista. PROHIBIDO mencionar fuentes que no estén ahí.\n"
+                f"3. Si los resultados NO contienen el dato exacto, dilo: 'No encontré el dato exacto en internet' "
+                f"y muestra lo más cercano que SÍ aparezca. PROHIBIDO completar horarios, fechas o cifras de memoria.\n"
                 f"4. NUNCA emitas comandos /buscar, /webfetch, /leer en esta respuesta. Ya buscaste, ahora responde.\n\n"
                 f"Pregunta original: {clean_query}"
             )
         else:
             enhanced_prompt = (
-                f"NO se encontraron resultados de internet para '{clean_query}'. "
-                f"Responde según tu conocimiento general en 2-3 líneas. "
-                f"NO emitas comandos /buscar."
+                f"Hoy es {hoy}. La búsqueda en internet de '{search_query}' NO devolvió resultados.\n"
+                f"INSTRUCCIONES ESTRICTAS:\n"
+                f"1. Di explícitamente que NO pudiste verificarlo en internet en este momento.\n"
+                f"2. Si agregas algo de memoria, márcalo: 'De memoria (puede estar desactualizado):'.\n"
+                f"3. PROHIBIDO citar fuentes, decir 'según las fuentes consultadas' o inventar URLs.\n"
+                f"4. NO emitas comandos /buscar.\n\n"
+                f"Pregunta original: {clean_query}"
             )
 
         try:
@@ -12067,52 +12102,6 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
     # ------------------------------------------------------------------
     def _search_files_online(self, query, max_results=8):
         """Search DuckDuckGo for download links. Returns list of dicts with url, title, snippet."""
-        from html.parser import HTMLParser
-
-        class DLParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.items = []
-                self._in_title = False
-                self._in_snippet = False
-                self._curr_url = ""
-                self._curr_title = ""
-                self._curr_snippet = ""
-            def handle_starttag(self, tag, attrs):
-                ad = dict(attrs)
-                if tag == "a":
-                    cls = ad.get("class", "")
-                    href = ad.get("href", "")
-                    if "result__snippet" in cls:
-                        self._in_snippet = True
-                    elif "uddg=" in href and "result__url" not in cls:
-                        self._curr_url = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
-                        self._in_title = True
-                    elif "result-link" in cls or ("result__a" in cls):
-                        if "uddg=" in href:
-                            self._curr_url = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
-                            self._in_title = True
-            def handle_data(self, data):
-                if self._in_title:
-                    self._curr_title += data
-                elif self._in_snippet:
-                    self._curr_snippet += data
-            def handle_endtag(self, tag):
-                if tag == "a":
-                    if self._in_title:
-                        self._in_title = False
-                    elif self._in_snippet:
-                        self._in_snippet = False
-                        if self._curr_url and self._curr_title:
-                            self.items.append({
-                                "url": self._curr_url,
-                                "title": self._curr_title.strip(),
-                                "snippet": self._curr_snippet.strip()
-                            })
-                        self._curr_url = ""
-                        self._curr_title = ""
-                        self._curr_snippet = ""
-
         clean = lambda s: re.sub(r'<[^>]+>', '', s).strip()
 
         # Strategy 1: DuckDuckGo HTML (POST to avoid rate-limiting)
@@ -12135,28 +12124,26 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
             res = []
             seen = set()
 
-            # Method A: Old format with uddg= redirect
-            if "uddg=" in html:
-                uddg_urls = re.findall(r'uddg=([^"&]+)', html)
-                for raw in uddg_urls:
-                    url = urllib.parse.unquote(raw)
-                    domain = urllib.parse.urlparse(url).netloc
-                    if domain not in seen and "duckduckgo.com" not in domain:
-                        seen.add(domain)
-                        res.append({"url": url, "title": domain, "snippet": ""})
-
-            # Method B: New format with class="result__url" direct links
-            if not res:
-                result_urls = re.findall(r'class="result__url"[^>]*href="(https?://[^"]+)"', html)
-                result_urls += re.findall(r'class="result__a"[^>]*href="(https?://[^"]+)"', html)
-                for url in result_urls:
-                    # Decode &amp; entities
-                    url = url.replace("&amp;", "&")
-                    domain = urllib.parse.urlparse(url).netloc
-                    if domain not in seen and "duckduckgo.com" not in domain and "y.js" not in url:
-                        seen.add(domain)
-                        # Try to get title from nearby text
-                        res.append({"url": url, "title": domain, "snippet": ""})
+            # Cada resultado viene en un bloque "result results_links": título y
+            # URL en <a class="result__a">, texto en <a class="result__snippet">.
+            # (Antes solo se extraían URLs y el snippet quedaba SIEMPRE vacío →
+            # el LLM no recibía datos y rellenaba de memoria inventando.)
+            blocks = re.split(r'class="result\s+results_links', html)[1:]
+            for blk in blocks:
+                m_a = re.search(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', blk, re.DOTALL)
+                if not m_a:
+                    continue
+                url = m_a.group(1).replace("&amp;", "&")
+                if "uddg=" in url:  # formato viejo con redirect
+                    url = urllib.parse.unquote(url.split("uddg=")[1].split("&")[0])
+                title = clean(m_a.group(2))
+                m_s = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', blk, re.DOTALL)
+                snippet = clean(m_s.group(1)) if m_s else ""
+                domain = urllib.parse.urlparse(url).netloc
+                if not url.startswith("http") or "duckduckgo.com" in domain or domain in seen:
+                    continue
+                seen.add(domain)
+                res.append({"url": url, "title": title or domain, "snippet": snippet})
 
             if res[:max_results]:
                 return res[:max_results]

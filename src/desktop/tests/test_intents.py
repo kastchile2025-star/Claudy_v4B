@@ -123,6 +123,33 @@ class TestLimpiezaNL(unittest.TestCase):
         self.assertNotIn("_cleanup_execute", str(r))
 
 
+class TestCorroborarEnInternet(unittest.TestCase):
+    """'corrobora/verifica X en internet' debe buscar de verdad, no responder
+    de memoria inventando fuentes (bug del horario del mundial 2026)."""
+
+    def test_corroborar_con_typo_dispara_busqueda(self):
+        # Frase real del usuario, typo incluido ("correborarla")
+        h, r = nl("el partido es a las 13:30 horas de Chile. tengo esta informacion "
+                  "puedes correborarla en internet")
+        self.assertTrue(h)
+        self.assertIn("_web_search_and_answer", r)
+
+    def test_verificar_en_internet(self):
+        h, r = nl("verifica en internet la hora del partido inaugural del mundial")
+        self.assertTrue(h)
+        self.assertIn("_web_search_and_answer", r)
+
+    def test_confirmar_online(self):
+        h, r = nl("puedes confirmar online el precio del dólar hoy")
+        self.assertTrue(h)
+        self.assertIn("_web_search_and_answer", r)
+
+    def test_verificar_sin_internet_no_dispara(self):
+        # "verifica" sin mención de internet/web no debe ir a búsqueda web
+        _, r = nl("verifica que el archivo config.json tenga el token")
+        self.assertNotIn("_web_search_and_answer", str(r))
+
+
 class TestBusquedaArchivosNL(unittest.TestCase):
     """Búsqueda de archivos en lenguaje natural (botón 🔎 y frases libres)."""
 
