@@ -14,7 +14,7 @@
 |---|---|---|---|---|---|
 | A1 | **Bucle de aprendizaje cerrado** (auto-skills): al terminar una tarea exitosa, evaluar y guardar el patrón como SKILL.md reusable, indexado en FTS5 | Claudy se vuelve más rápido y barato con el uso; el informe reporta grandes ahorros de tokens en tareas repetidas | 📋 (plan 2.4) | ⭐⭐⭐ | 6-8 h |
 | A2 | **"The Curator"**: demonio que audita la biblioteca de skills, consolida redundantes y purga las de bajo uso | Evita que las auto-skills (A1) degeneren en basura acumulada; complemento natural del cron ya existente | 🆕 | ⭐⭐ | 3-4 h |
-| A3 | **Filtro de comandos Manual / Smart / YOLO + fail-closed**: bloqueo permanente de comandos destructivos (`rm -rf /`, fork bombs); modo Smart usa un LLM barato para evaluar riesgo; timeout = denegar | Seguridad seria para los "poderes" de Claudy (hoy ejecuta con confirmaciones ad-hoc); el modo Smart es la joya: autonomía sin riesgo | 🆕 | ⭐⭐⭐ | 4-6 h |
+| A3 | **Filtro de comandos Manual / Smart / YOLO + fail-closed**: bloqueo permanente de comandos destructivos (`rm -rf /`, fork bombs); modo Smart usa un LLM barato para evaluar riesgo; timeout = denegar | Seguridad seria para los "poderes" de Claudy (hoy ejecuta con confirmaciones ad-hoc); el modo Smart es la joya: autonomía sin riesgo | ✅ (11 jun 2026, `core/command_guard.py`, comando `/permisos`) | ⭐⭐⭐ | 4-6 h |
 | A4 | **Filtro de inyección de prompts y credenciales**: escanear entradas (Telegram, archivos analizados, webs scrapeadas) buscando intentos de reescribir directrices o exfiltrar `.env` | Claudy lee webs y documentos de terceros → vector de ataque real hoy | 🆕 | ⭐⭐⭐ | 2-3 h |
 | A5 | **Memoria search-first formalizada**: buffer inmediato → ventana deslizante → FTS5 profundo, solo escalando si no se encuentra | Reduce ruido contextual y tokens; Claudy ya tiene FTS5 + contexto eficiente (fase 3 v5), falta formalizar el orden de escalada | 🟡 | ⭐⭐ | 2-3 h |
 | A6 | **Sub-agentes efímeros jerárquicos** (`/delegate`): el principal instancia workers aislados sin comunicación horizontal | Tareas paralelas (investigar + redactar + descargar) sin contaminar el contexto principal | 📋 (plan 2.1) | ⭐⭐ | 4-6 h |
@@ -33,7 +33,7 @@
 | B2 | **Precedencia de skills workspace > global**: skills por carpeta de proyecto que pisan a las globales | Claudy trabaja sobre proyectos QCORE distintos; permitiría comportamiento por producto (SmartStudent vs Roadix) | 🆕 | ⭐⭐ | 2-3 h |
 | B3 | **Catálogo de recetas (estilo ClawHub)**: biblioteca local de automatizaciones preconfiguradas listas para instalar | Ya existe `/skill buscar` + find-skills; falta curar un catálogo propio QCORE (facturación, informes, scraping) | 🟡 | ⭐ | continuo |
 | B4 | **Trazabilidad de linaje de sub-agentes**: metadatos de jerarquía para visualizar la ramificación de tareas | Si se hace A6/`/delegate`, mostrar el árbol de subtareas en el chat | 🆕 | ⭐ | 2-3 h |
-| B5 | **Permisos auto-aprobados solo lectura + solo en CWD**: lo no destructivo dentro del workspace pasa solo; escrituras piden confirmación | Regla simple y sólida para los poderes de archivos de Claudy; combina con A3 | 🆕 | ⭐⭐⭐ | incluido en A3 |
+| B5 | **Permisos auto-aprobados solo lectura + solo en CWD**: lo no destructivo dentro del workspace pasa solo; escrituras piden confirmación | Regla simple y sólida para los poderes de archivos de Claudy; combina con A3 | ✅ (11 jun 2026, READONLY_PATTERNS en `command_guard.py`) | ⭐⭐⭐ | incluido en A3 |
 | B6 | **Lección negativa**: el modelo de permisos laxos de OpenClaw terminó en CVEs, plugins maliciosos y bloqueos institucionales | Validar/sandboxear skills de terceros antes de instalarlas (hoy `/skill install` confía a ciegas) | 🆕 | ⭐⭐ | 2-3 h |
 
 ## C. Ideas extraídas de APPLE WWDC 2025/2026
@@ -58,7 +58,7 @@
 
 | Orden | Mejora | Por qué primero | Esfuerzo |
 |---|---|---|---|
-| 1 | **A3+B5 — Filtro de comandos Manual/Smart/YOLO + lectura libre solo en workspace** | Seguridad es prerequisito para todo lo agéntico que viene después; el informe muestra cómo OpenClaw pagó caro ignorarla | 4-6 h |
+| 1 | ✅ **A3+B5 — Filtro de comandos Manual/Smart/YOLO + lectura libre solo en workspace** (hecho 11 jun 2026) | Seguridad es prerequisito para todo lo agéntico que viene después; el informe muestra cómo OpenClaw pagó caro ignorarla | 4-6 h |
 | 2 | **C1 — Notify Me (vigilar páginas web)** | Win rápido con piezas que ya existen (cron + scraper + Telegram); utilidad diaria inmediata | 3-4 h |
 | 3 | **C6 — Router de modelos por complejidad** | Ahorro de costes en cada interacción; mejora latencia percibida | 4-6 h |
 | 4 | **A1 — Auto-skills (bucle de aprendizaje cerrado)** | El diferenciador de Hermes; Claudy ya tiene la mitad (skills + FTS5) | 6-8 h |
