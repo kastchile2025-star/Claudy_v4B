@@ -227,6 +227,8 @@ SLASH_COMMANDS = [
      lambda s, p, l: s._watch_add(p)),
     (("/vigilar",),
      lambda s, p, l: s._watch_list()),
+    (("/router",),
+     lambda s, p, l: s._router_cmd(_arg(p))),
     (("/recordar ", "/reminder ", "/alarma "),
      lambda s, p, l: s._set_reminder(_arg(p)) if _arg(p) else "Formato: /recordar 10 minutos comprar leche"),
     (("/noticias", "/news", "/noti"),

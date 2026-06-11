@@ -118,6 +118,54 @@ class LLMMixin:
             or shutil.which("opencode")
         )
 
+    # ── Router de modelos (/router): ver, encender/apagar, asignar modelos ──
+    def _router_cmd(self, arg):
+        from model_router import classify, CATEGORIES
+        arg = (arg or "").strip()
+        config_path = os.path.join(os.path.expanduser("~"), ".claudy", "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        router = data.setdefault("router", {})
+
+        def _save():
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+        low = arg.lower()
+        if not arg:
+            estado = "ON" if router.get("enabled") else "OFF"
+            default = data.get("opencode", {}).get("defaultModel", "?")
+            lines = [f"🔀 Router de modelos: {estado}", ""]
+            for cat in ("simple", "code", "complex"):
+                lines.append(f"  {cat:<8} → {router.get(cat) or f'(default: {default})'}")
+            lines.append(f"  default  → {default}")
+            lines += ["", "Comandos:",
+                      "  /router on | off",
+                      "  /router simple|code|complex <modelo>",
+                      "  /router probar <frase>"]
+            return "\n".join(lines)
+        if low in ("on", "off"):
+            router["enabled"] = (low == "on")
+            _save()
+            return f"🔀 Router de modelos: {'ON' if router['enabled'] else 'OFF'}"
+        if low.startswith(("probar ", "test ")):
+            frase = arg.split(None, 1)[1]
+            cat = classify(frase)
+            default = data.get("opencode", {}).get("defaultModel", "?")
+            modelo = (router.get(cat) or default) if router.get("enabled") else default
+            return (f"Categoría: {cat}\nModelo que usaría: {modelo}"
+                    + ("" if router.get("enabled") else "\n(router OFF: usa el default)"))
+        parts = arg.split(None, 1)
+        if parts[0].lower() in CATEGORIES and len(parts) == 2:
+            router[parts[0].lower()] = parts[1].strip()
+            _save()
+            return f"🔀 {parts[0].lower()} → {parts[1].strip()}"
+        return ("Uso: /router | /router on|off | /router simple|code|complex <modelo> "
+                "| /router probar <frase>")
+
     TOOL_REGISTRY = {}  # name -> {"handler": fn, "description": str, "schema": dict}
 
     @classmethod

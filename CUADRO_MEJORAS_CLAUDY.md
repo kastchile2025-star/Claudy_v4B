@@ -45,7 +45,7 @@
 | C3 | **On-screen awareness de Siri AI**: el asistente entiende lo que hay en pantalla y actúa sobre ello | Claudy ya saca screenshots y los analiza; el salto es accionar: "agenda lo que está en pantalla", "responde este correo visible" | 🟡 | ⭐⭐⭐ | 4-6 h |
 | C4 | **Inteligencia visual sobre capturas** (2025): reconocer eventos en imágenes y crear citas de calendario automáticamente | Caso concreto del C3: screenshot/foto de un flyer → evento en Google Calendar (integración ya existente) | 🆕 | ⭐⭐ | 3-4 h |
 | C5 | **Passwords agéntico** (2026): agente que navega en background y completa flujos web multi-paso solos | Es el caso de uso estrella del browser automation ya planificado (plan 2.2 Playwright): formularios, descargas de facturas, portales | 📋 (plan 2.2) | ⭐⭐⭐ | 4-6 h |
-| C6 | **Jerarquía de modelos AFM 3** (router por complejidad): modelo chico para tareas rápidas, grande para razonamiento, especializado para imágenes | Router de modelos en Claudy: clasificación barata (haiku/qwen) para intents y resúmenes, premium solo para informes/código. Ahorro directo de costes | 🆕 | ⭐⭐⭐ | 4-6 h |
+| C6 | **Jerarquía de modelos AFM 3** (router por complejidad): modelo chico para tareas rápidas, grande para razonamiento, especializado para imágenes | Router de modelos en Claudy: clasificación barata (haiku/qwen) para intents y resúmenes, premium solo para informes/código. Ahorro directo de costes | ✅ (11 jun 2026, `model_router.py` reescrito + comando `/router`) | ⭐⭐⭐ | 4-6 h |
 | C7 | **Live Translation** (2025): traducción bidireccional en vivo en conversaciones | Comando/modo `/traducir` en chat y Telegram: Claudy traduce mensajes entrantes/salientes al vuelo | 🆕 | ⭐ | 2-3 h |
 | C8 | **Hold Assist / Call Screening** (2025) → filtrado inteligente de interrupciones | Versión Claudy: resumir y priorizar notificaciones acumuladas de Telegram en una sola entrega ("3 mensajes importantes, 5 ruido") | 🆕 | ⭐ | 3-4 h |
 | C9 | **Resúmenes de cámaras del hogar** (2026) → condensar alertas secuenciales en una notificación con descripción y búsqueda natural | Patrón aplicable al cron/scheduler: agrupar avisos repetidos del mismo origen en un digest | 🆕 | ⭐ | 2-3 h |
@@ -60,7 +60,7 @@
 |---|---|---|---|
 | 1 | ✅ **A3+B5 — Filtro de comandos Manual/Smart/YOLO + lectura libre solo en workspace** (hecho 11 jun 2026) | Seguridad es prerequisito para todo lo agéntico que viene después; el informe muestra cómo OpenClaw pagó caro ignorarla | 4-6 h |
 | 2 | ✅ **C1 — Notify Me (vigilar páginas web)** (hecho 11 jun 2026) | Win rápido con piezas que ya existen (cron + scraper + Telegram); utilidad diaria inmediata | 3-4 h |
-| 3 | **C6 — Router de modelos por complejidad** | Ahorro de costes en cada interacción; mejora latencia percibida | 4-6 h |
+| 3 | ✅ **C6 — Router de modelos por complejidad** (hecho 11 jun 2026) | Ahorro de costes en cada interacción; mejora latencia percibida | 4-6 h |
 | 4 | **A1 — Auto-skills (bucle de aprendizaje cerrado)** | El diferenciador de Hermes; Claudy ya tiene la mitad (skills + FTS5) | 6-8 h |
 | 5 | **C2 — "Describe una skill" en lenguaje natural** | Multiplica el valor de A1: las skills las crea el usuario hablando | 4-6 h |
 | 6 | **A4 — Filtro anti-inyección de prompts** | Claudy procesa contenido externo (webs, docs, Telegram) a diario | 2-3 h |
