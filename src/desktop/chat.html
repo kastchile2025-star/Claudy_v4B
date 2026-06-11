@@ -148,6 +148,12 @@
       -webkit-app-region: no-drag;
     }
 
+    /* Fondo de respaldo: cuando la transparencia de WebView2 falla, las zonas
+       transparentes se pintaban BLANCAS (marco blanco alrededor del chat).
+       Un fondo sólido del color del panel evita que eso ocurra jamás. */
+    html, body { background: #05091d !important; }
+    body.theme-light { background: #dde4ee !important; }
+
     /* ============================================================
        LIGHT THEME — overrides scoped under body.theme-light.
        Remap the dark utility classes used in the layout to a
@@ -179,6 +185,10 @@
     body.theme-light .text-purple-400,
     body.theme-light .text-purple-400\/60 { color: #7c3aed !important; }
     body.theme-light .text-emerald-400 { color: #059669 !important; }
+    /* Toggle Deep Research: violet-300/400 son demasiado claros sobre fondo blanco */
+    body.theme-light .text-violet-300  { color: #6d28d9 !important; }
+    body.theme-light .text-violet-400  { color: #7c3aed !important; }
+    body.theme-light .bg-violet-600\/20 { background-color: rgba(124, 58, 237, 0.12) !important; }
 
     body.theme-light .border-cyan-500\/10,
     body.theme-light .border-cyan-500\/20,
@@ -425,6 +435,15 @@
       const [historyOpen, setHistoryOpen] = useState(false);
       const [histItems, setHistItems] = useState([]);
       const [histLoading, setHistLoading] = useState(false);
+      const histListRef = useRef(null);
+
+      // Al abrir el historial (o al cargar sus ítems) saltar al final,
+      // donde están los mensajes más recientes.
+      useEffect(() => {
+        if (historyOpen && histListRef.current) {
+          histListRef.current.scrollTop = histListRef.current.scrollHeight;
+        }
+      }, [historyOpen, histItems]);
 
       // ── Canvas panel (derecha) ──
       const [canvasOpen, setCanvasOpen] = useState(false);
@@ -616,11 +635,19 @@
         };
       }, []);
 
-      // Auto scroll to bottom
+      // Auto scroll to bottom. El scroll inmediato a veces se queda corto porque
+      // las tarjetas (opciones, resumen, markdown) crecen DESPUÉS de renderizar;
+      // reintentamos un par de veces para quedar de verdad al final.
       useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        const toEnd = (smooth) => {
+          messagesEndRef.current?.scrollIntoView(smooth ? { behavior: 'smooth', block: 'end' } : { block: 'end' });
+        };
+        toEnd(true);
+        const t1 = setTimeout(() => toEnd(false), 250);
+        const t2 = setTimeout(() => toEnd(false), 700);
         // Highlight code blocks
         Prism.highlightAll();
+        return () => { clearTimeout(t1); clearTimeout(t2); };
       }, [messages, typing]);
 
       // Global setters for Python to call
@@ -686,12 +713,12 @@
             optionsCard: { options, callbackId, active: true }
           }]);
         };
-        window.addSummaryCard = (topic, depth, images, references, style, language) => {
+        window.addSummaryCard = (topic, depth, images, references, style, language, research) => {
           setMessages(prev => [...prev, {
             id: Math.random(),
             role: 'bot',
             ts: Date.now(),
-            summaryCard: { topic, depth, images, references, style, language }
+            summaryCard: { topic, depth, images, references, style, language, research }
           }]);
         };
         window.addFileCard = (filename, message, openFileId, openFolderId) => {
@@ -871,28 +898,21 @@
         }
       };
 
-      const handleOptionClick = (value, callbackId, messageIndex) => {
-        // Trigger Python callback
+      const clickedOptionCards = useRef(new Set());
+      const handleOptionClick = (value, callbackId, messageId) => {
+        // Guard anti doble-clic: un segundo clic rápido (antes de que la tarjeta
+        // desaparezca) disparaba el callback dos veces y "respondía" también la
+        // pregunta siguiente, saltándosela visualmente.
+        if (clickedOptionCards.current.has(callbackId)) return;
+        clickedOptionCards.current.add(callbackId);
+
+        // Trigger Python callback (Python añade la burbuja con la respuesta elegida)
         if (window.pywebview && window.pywebview.api) {
           window.pywebview.api.trigger_callback(callbackId, value);
         }
-        
-        // Deactivate options card so user knows it's clicked
-        setMessages(prev => {
-          const updated = [...prev];
-          if (updated[messageIndex] && updated[messageIndex].optionsCard) {
-            updated[messageIndex].optionsCard.active = false;
-          }
-          return updated;
-        });
 
-        // Add user response bubble
-        setMessages(prev => [...prev, {
-          id: Math.random(),
-          role: 'user',
-          text: `Seleccionado: ${value}`,
-          ts: Date.now()
-        }]);
+        // Quitar la tarjeta de opciones: solo queda visible la respuesta elegida.
+        setMessages(prev => prev.filter(m => m.id !== messageId));
       };
 
       return (
@@ -913,13 +933,18 @@
                   <button onClick={handleToggleHistory} title="Cerrar" class="text-slate-400 hover:text-white text-sm px-1">✕</button>
                 </div>
               </div>
-              <div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+              <div ref={histListRef} class="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
                 {histLoading && <div class="text-[10px] text-slate-500">Cargando…</div>}
                 {!histLoading && histItems.length === 0 && <div class="text-[10px] text-slate-500">Sin historial todavía.</div>}
                 {histItems.map((m, i) => (
-                  <div key={i} class={`rounded-xl px-3 py-2 border text-xs break-words ${m.role === 'user' ? 'bg-indigo-500/10 border-indigo-500/20 text-slate-200' : 'bg-slate-900/70 border-cyan-500/10 text-slate-100'}`}>
-                    <div class={`text-[9px] font-bold uppercase tracking-wider mb-0.5 ${m.role === 'user' ? 'text-indigo-300' : 'text-cyan-300'}`}>{m.role === 'user' ? 'Tú' : 'Claudy'}{m.time ? ' · ' + m.time : ''}</div>
-                    <div>{m.text}</div>
+                  <div key={i} class={`group rounded-xl px-3 py-2 border text-xs break-words ${m.role === 'user' ? 'bg-indigo-500/10 border-indigo-500/20 text-slate-200' : 'bg-slate-900/70 border-cyan-500/10 text-slate-100'}`}>
+                    <div class={`flex items-center justify-between gap-1 text-[9px] font-bold uppercase tracking-wider mb-0.5 ${m.role === 'user' ? 'text-indigo-300' : 'text-cyan-300'}`}>
+                      <span>{m.role === 'user' ? 'Tú' : 'Claudy'}{m.time ? ' · ' + m.time : ''}</span>
+                      <CopyButton text={m.text} className="text-slate-500 hover:text-cyan-300 hover:bg-slate-900/60 hover:border-cyan-500/20 opacity-0 group-hover:opacity-100 shrink-0" />
+                    </div>
+                    {/* select-text: permite seleccionar un trozo y copiarlo con Ctrl+C
+                        (el body global lleva select-none) */}
+                    <div class="select-text cursor-text" style={{ userSelect: 'text', WebkitUserSelect: 'text' }}>{m.text}</div>
                   </div>
                 ))}
               </div>
@@ -1009,6 +1034,38 @@
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
                   </svg>
                 </button>
+
+                {/* Buscar archivo en el PC — prellena el comando y enfoca el input */}
+                <button
+                  onClick={() => {
+                    playSound('click');
+                    setInputText('/buscar_archivo ');
+                    inputRef.current?.focus();
+                  }}
+                  title="Buscar un archivo en el PC (escribe el nombre y Enter)"
+                  class="flex-1 py-2.5 rounded-xl border bg-slate-900/60 hover:bg-amber-700/30 text-slate-300 hover:text-white border-amber-500/10 hover:border-amber-500/40 active:scale-[0.98] transition-all flex items-center justify-center"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m5 5l-4.35-4.35M19 11a8 8 0 11-16 0 8 8 0 0116 0z" />
+                  </svg>
+                </button>
+
+                {/* Limpieza del PC — analiza y propone qué limpiar */}
+                <button
+                  onClick={() => {
+                    playSound('click');
+                    if (window.pywebview && window.pywebview.api) {
+                      setTyping(true);
+                      window.pywebview.api.send_message('/limpiar');
+                    }
+                  }}
+                  title="Analizar el PC y proponer limpieza (temporales, cachés, papelera)"
+                  class="flex-1 py-2.5 rounded-xl border bg-slate-900/60 hover:bg-rose-700/30 text-slate-300 hover:text-white border-rose-500/10 hover:border-rose-500/40 active:scale-[0.98] transition-all flex items-center justify-center"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
               </div>
 
               {/* QCORE Products Panel */}
@@ -1058,7 +1115,7 @@
           <div class="flex-1 flex flex-col justify-between bg-slate-950/40 relative">
             
             {/* Chat Header */}
-            <div class="drag-bar h-14 border-b border-cyan-500/10 px-4 flex items-center justify-between z-10">
+            <div class="drag-bar pywebview-drag-region h-14 border-b border-cyan-500/10 px-4 flex items-center justify-between z-10">
               <div class="no-drag">
                 <h1 class="text-sm font-bold text-white flex items-center gap-1.5">
                   Asistente IA 
@@ -1216,7 +1273,7 @@
                             <button
                               key={oIdx}
                               disabled={!card.active}
-                              onClick={() => handleOptionClick(val, card.callbackId, index)}
+                              onClick={() => handleOptionClick(val, card.callbackId, msg.id)}
                               class={`text-left p-3 rounded-xl border transition-all duration-200 ${
                                 card.active 
                                   ? 'bg-slate-900/60 border-cyan-500/10 hover:border-cyan-500/40 hover:bg-slate-900 hover:scale-[1.01]' 
@@ -1250,6 +1307,8 @@
                           <span class="text-slate-200 font-medium break-words">{card.topic}</span>
                           <span class="text-slate-400 font-semibold">Alcance:</span>
                           <span class="text-slate-200">{card.depth}</span>
+                          {card.research && <span class="text-slate-400 font-semibold">Investigación:</span>}
+                          {card.research && <span class="text-slate-200">{card.research}</span>}
                           <span class="text-slate-400 font-semibold">Imágenes:</span>
                           <span class="text-slate-200">{card.images}</span>
                           <span class="text-slate-400 font-semibold">Referencias:</span>
@@ -1329,7 +1388,7 @@
                 {/* Switch Deep Research */}
                 <button
                   onClick={() => { playSound('click'); setDeepResearch(v => !v); }}
-                  title={deepResearch ? "Deep Research activo — búsqueda profunda en internet + archivo extenso" : "Activar Deep Research"}
+                  title={deepResearch ? "Deep Research activo — busca en internet en vivo y responde en el chat (pide 'informe' para generar documento)" : "Activar Deep Research"}
                   class={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[9px] font-bold tracking-wide transition-all select-none ${
                     deepResearch
                       ? 'bg-violet-600/20 border-violet-500/50 text-violet-300 shadow-[0_0_8px_rgba(139,92,246,0.3)]'

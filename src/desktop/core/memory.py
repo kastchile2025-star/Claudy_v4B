@@ -174,6 +174,19 @@ class MemoryMixin:
             icon = "📁" if kind == "carpeta" else "📄"
             return f"{icon} Análisis de {kind}: {base}"
 
+        # Resultado de creación de archivo ("Archivo creado: C:\...\X.docx"):
+        # mostrar solo la línea con la ruta, sin el volcado de detalles.
+        if low.startswith("archivo creado:"):
+            first = t.splitlines()[0].strip()
+            return f"📄 {first}"
+
+        # Informes completos (Markdown largo con título y secciones): el panel
+        # debe mostrar una etiqueta con el tema, no el documento entero.
+        if len(t) > 600 and (t.lstrip().startswith("# ") or t.count("## ") >= 2):
+            m_t = re.search(r"^#\s+(.+)$", t, re.M)
+            title = m_t.group(1).strip() if m_t else t.strip().splitlines()[0][:70]
+            return f"📄 Informe generado: {title} (guardado como archivo)"
+
         # Prompts internos de formato / instrucciones de máquina: no mostrar.
         noise = (
             "body_html", "solo el json", "sólo el json",

@@ -11,11 +11,11 @@
 |---|---|---|
 | 0 — Seguridad | ✅ Hecha | Tag `v4-estable`; PAT fuera del remote (**revocar en GitHub pendiente de Felipe**); node_modules/dist fuera del repo |
 | 1 — Limpieza | ✅ Hecha | CLI TS, web React, patches y bots Discord/WhatsApp eliminados. Solo Telegram |
-| 2 — Partir pet.py | 🟡 Núcleo hecho | `core/memory`, `core/llm`, `core/gateway`, `core/prompts` extraídos (pet.py 19.090 → ~16.500 líneas). Pendiente gradual: `features/` (documentos, email, calendar, scheduler) y `ui/` |
+| 2 — Partir pet.py | ✅ Hecha | `core/` (memory, llm, gateway, prompts, intents) + `features/` (documents, email, scheduler, calendar) extraídos. pet.py 19.090 → 14.409 líneas (−25%). Pendiente menor: `ui/` (webview_api, bubbles) |
 | 3 — Memoria FTS5 | ✅ Hecha | FTS5 toda la historia, contexto eficiente, archivado garantizado (fix de compresión que borraba), vault incremental |
 | 4 — Telegram | ✅ Hecha | channels/telegram_bot.py: HTML nativo, progreso 1 mensaje, hot-reload, watchdog, /memoria /resumen /estado. Pendiente menor: cola de mensajes |
-| 5 — Respuestas | ✅ Hecha | Prompt único por canal, streaming default, modelos 2026, Pollinations opt-in, extract_text único. Pendiente: unificar los ~49 intents por keyword en registro |
-| 6 — Calidad | ✅ Hecha | Logging rotativo, 20 tests nuevos (todos verdes), README/requirements reescritos |
+| 5 — Respuestas | ✅ Hecha | Prompt único por canal, streaming default, modelos 2026, Pollinations opt-in, extract_text único. Intents: registro declarativo SLASH_COMMANDS (33 comandos) en core/intents.py — las heurísticas de lenguaje natural viven en el mismo módulo |
+| 6 — Calidad | ✅ Hecha | Logging rotativo, 31 tests nuevos (44 totales, todos verdes), README/requirements reescritos |
 **Regla de oro:** la interfaz actual de `chat.html` (sidebar CLAUDY v4.0, estados Google Drive/Telegram, PRODUCTOS QCORE, Deep Research, consola) **NO se toca visualmente**. Todo el refactor es interno.
 
 ---

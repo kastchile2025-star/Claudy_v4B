@@ -224,7 +224,14 @@ FONT_MONO = ("Cascadia Mono", 10)         # code-ish
 
 # Memoria infinita: lógica y constantes viven en core/memory.py (refactor v5)
 from core.gateway import GatewayMixin
+from core.intents import IntentsMixin
 from core.prompts import PromptsMixin
+from features.documents import DocumentsMixin
+from features.email import EmailMixin
+from features.scheduler import SchedulerMixin
+from features.calendar import CalendarMixin
+from features.skill_loop import SkillLoopMixin
+from features.cleaner import CleanerMixin
 from core.llm import LLMMixin
 from core.memory import (
     MemoryMixin,
@@ -374,348 +381,48 @@ CHAT_WEBVIEW_PHYS_H = int(round(BUBBLE_HEIGHT * DPI_SCALE)) - _CHAT_CHROME_H
 
 import uuid
 
-class WebViewApi:
-    def __init__(self, pet):
-        self._pet = pet
-        self._callbacks = {}
-
-    def set_focused(self, focused):
-        self._pet._webview_focused = focused
-        # When the webview loses focus (e.g., user clicked another window),
-        # kick off the focus check so panels and bubble auto-hide.
-        if not focused and getattr(self._pet, "_webview_visible", False):
-            try:
-                self._pet.after(150, self._pet._check_bubble_focus)
-            except Exception:
-                pass
-
-    def _register_callback(self, cid, cb):
-        if cid:
-            self._callbacks[cid] = cb
-
-    def trigger_callback(self, cid, *args):
-        cb = self._callbacks.get(cid)
-        if cb:
-            threading.Thread(target=cb, args=args, daemon=True).start()
-
-    def send_message(self, message):
-        def _run():
-            self._pet._handle_web_submit(message)
-        threading.Thread(target=_run, daemon=True).start()
-
-    def new_conversation(self):
-        def _run():
-            self._pet._handle_web_new_conversation()
-        threading.Thread(target=_run, daemon=True).start()
-
-    def select_product(self, product_name):
-        def _run():
-            self._pet._handle_web_product_switch(product_name)
-        threading.Thread(target=_run, daemon=True).start()
-
-    def analyze_folder(self):
-        def _run():
-            self._pet._handle_web_analyze_folder()
-        threading.Thread(target=_run, daemon=True).start()
-
-    def pick_attachment(self):
-        def _run():
-            self._pet._handle_web_pick_attachment()
-        threading.Thread(target=_run, daemon=True).start()
-
-    def open_last_location(self):
-        def _run():
-            self._pet._open_last_file_location()
-        threading.Thread(target=_run, daemon=True).start()
-
-    def minimize_window(self):
-        self._pet.after(0, self._pet.hide_bubble)
-
-    def cancel_processing(self):
-        """Botón de pánico (doble ESC): interrumpe lo que Claudy esté haciendo
-        (informe a medias, etc.) sin reiniciar la app."""
-        try:
-            self._pet._request_cancel()
-        except Exception:
-            pass
-
-    def show_settings(self):
-        """Open the history/settings window (alarms, themes, skins, API keys)."""
-        self._pet.after(0, self._pet.show_history_window)
-
-    # ── Google Calendar bridge ────────────────────────────────────────────
-    def _gcal(self):
-        import google_calendar as gcal
-        return gcal
-
-    def get_calendar_status(self):
-        try:
-            return self._gcal().status()
-        except Exception as e:
-            return {"connected": False, "reason": str(e)}
-
-    def get_calendar_events(self):
-        try:
-            return self._gcal().list_upcoming()
-        except Exception as e:
-            return {"connected": False, "reason": str(e), "events": []}
-
-    def calendar_connect(self):
-        """Lanza el flujo OAuth (abre navegador 1 vez). Bloquea hasta autorizar."""
-        try:
-            return self._gcal().connect()
-        except Exception as e:
-            return {"connected": False, "reason": str(e)}
-
-    def create_calendar_event(self, payload):
-        try:
-            p = payload or {}
-            attendees = p.get("attendees") or []
-            if isinstance(attendees, str):
-                attendees = [a.strip() for a in attendees.replace(";", ",").split(",") if a.strip()]
-            return self._gcal().create_event(
-                summary=p.get("summary") or "Reunión",
-                start_iso=p.get("start"),
-                end_iso=p.get("end"),
-                description=p.get("description", ""),
-                attendees=attendees,
-                location=p.get("location", ""),
-                add_meet=bool(p.get("addMeet")),
-            )
-        except Exception as e:
-            return {"ok": False, "reason": str(e)}
-
-    def set_calendar_open(self, is_open):
-        """Abre/cierra el panel Calendario (derecha): ensancha/reposiciona la ventana."""
-        self._pet._calendar_open = bool(is_open)
-        self._pet.after(0, lambda: self._pet._resize_webview_for_panels())
-        return True
-
-    # ── Panel Historial (izquierda) ───────────────────────────────────────
-    def set_history_open(self, is_open):
-        """Abre/cierra el panel Historial (izquierda): ensancha/reposiciona la ventana."""
-        self._pet._history_panel_open = bool(is_open)
-        self._pet.after(0, lambda: self._pet._resize_webview_for_panels())
-        return True
-
-    def get_history_archive(self, limit=200):
-        """Devuelve el historial eterno de conversaciones para el panel."""
-        try:
-            msgs = self._pet._load_memory() or []
-            out = []
-            for m in msgs:
-                role = m.get("role")
-                shown = self._pet._tidy_history_text(role, m.get("text") or "")
-                if shown is None:
-                    continue  # ruido interno: no mostrar
-                out.append({
-                    "role": "user" if role == "Usuario" else "claudy",
-                    "text": shown[:2000],
-                    "time": m.get("time", "") or "",
-                })
-            # Límite tras compactar/filtrar: así se ven los últimos N mensajes limpios.
-            if limit:
-                out = out[-int(limit):]
-            return out
-        except Exception as e:
-            return []
-
-    def open_settings_window(self):
-        """Abre la ventana clásica de Ajustes (alarmas, temas, skins, API keys)."""
-        self._pet.after(0, self._pet.show_history_window)
-        return True
-
-    def speak_message(self, message):
-        def _run():
-            self._pet._speak_text(message)
-        threading.Thread(target=_run, daemon=True).start()
-
-    def set_voice_enabled(self, enabled):
-        """Toggle global TTS desde el botón de voz del chat."""
-        self._pet._voice_enabled = bool(enabled)
-        return self._pet._voice_enabled
-
-    def get_voice_enabled(self):
-        return bool(getattr(self._pet, "_voice_enabled", False))
-
-    def get_drive_status(self):
-        return getattr(self._pet, "_drive_connected", True)
-
-    def get_telegram_status(self):
-        """Estado de conexión con Telegram para el indicador del sidebar.
-        Devuelve el último valor verificado al instante y, si está viejo (>30s),
-        dispara una re-verificación en segundo plano (no bloquea la UI)."""
-        pet = self._pet
-        try:
-            last = getattr(pet, "_telegram_last_check", 0)
-            if time.time() - last > 30:
-                pet._telegram_last_check = time.time()  # evita ráfagas de checks
-                threading.Thread(target=pet._verify_telegram_connection, daemon=True).start()
-        except Exception:
-            pass
-        return getattr(pet, "_telegram_connected", False)
-
-    def get_history(self):
-        raw_msgs = getattr(self._pet, "_current_session_msgs", []) or []
-        serializable = []
-        for m in raw_msgs:
-            serializable.append({
-                "role": m.get("role", "system"),
-                "text": m.get("text", "") or "",
-                "ts": m.get("ts", time.time()),
-                "fileCard": m.get("fileCard", None),
-                "optionsCard": m.get("optionsCard", None),
-                "summaryCard": m.get("summaryCard", None),
-            })
-        return serializable
+# Webview UI: clases del puente JS<->Python viven en ui/webview_api.py (refactor v5)
+from ui.bubbles import BubblesMixin
+from ui.webview_api import (
+    WebViewApi,
+    WebViewStatusWrapper,
+    WebViewEntryWrapper,
+    WebViewChatWrapper,
+)
 
 
-class WebViewStatusWrapper:
-    def __init__(self, pet):
-        self.pet = pet
-
-    def configure(self, text=None, fg=None, **kwargs):
-        if text is not None:
-            self.pet._eval_in_web(f"updateStatusText({json.dumps(text)})")
-            # Show speech bubble when chat is hidden and a background task is running
-            if not getattr(self.pet, '_webview_visible', False) and text.strip():
-                try:
-                    self.pet.show_pet_speech_bubble(text, duration=5000)
-                except Exception:
-                    pass
 
 
-class WebViewEntryWrapper:
-    def __init__(self, pet):
-        self.pet = pet
-        self._val = ""
-
-    def get(self, *args):
-        return self._val
-
-    def delete(self, first, last=None):
-        self._val = ""
-        self.pet._eval_in_web("try { clearInputField(); } catch(e) {}")
-
-    def insert(self, index, text):
-        self._val = text
-        self.pet._eval_in_web(f"try {{ insertInputText({json.dumps(text)}); }} catch(e) {{}}")
-
-    def focus_set(self):
-        self.pet._eval_in_web("try { focusInputField(); } catch(e) {}")
-
-    def config(self, **kwargs):
-        pass
 
 
-class WebViewChatWrapper:
-    def __init__(self, pet):
-        self.pet = pet
-        self._messages = list(getattr(pet, "_current_session_msgs", []) or [])
-
-    def add_user(self, text, ts=None):
-        ts = ts or time.time()
-        self._messages.append({"role": "user", "text": text, "ts": ts})
-        self.pet._current_session_msgs = list(self._messages)
-        self.pet._eval_in_web(f"try {{ addUserMessage({json.dumps(text)}, {ts}); }} catch(e) {{}}")
-
-    def add_bot(self, text, ts=None):
-        ts = ts or time.time()
-        self._messages.append({"role": "bot", "text": text, "ts": ts})
-        self.pet._current_session_msgs = list(self._messages)
-        self.pet._eval_in_web(f"try {{ addBotMessage({json.dumps(text)}, {ts}); }} catch(e) {{}}")
-
-    def begin_stream(self, ts=None):
-        ts = ts or time.time()
-        self.pet._eval_in_web(f"try {{ beginBotStream({ts}); }} catch(e) {{}}")
-
-    def update_stream(self, text):
-        self.pet._eval_in_web(f"try {{ updateBotStream({json.dumps(text)}); }} catch(e) {{}}")
-
-    def end_stream(self, text, ts=None):
-        ts = ts or time.time()
-        self._messages.append({"role": "bot", "text": text, "ts": ts})
-        self.pet._current_session_msgs = list(self._messages)
-        self.pet._eval_in_web(f"try {{ endBotStream({json.dumps(text)}, {ts}); }} catch(e) {{}}")
-
-    def add_system(self, text):
-        self._messages.append({"role": "system", "text": text, "ts": time.time()})
-        self.pet._current_session_msgs = list(self._messages)
-        self.pet._eval_in_web(f"try {{ addSystemMessage({json.dumps(text)}); }} catch(e) {{}}")
-
-    def show_typing(self):
-        self.pet._eval_in_web("try { showTypingIndicator(); } catch(e) {}")
-
-    def hide_typing(self):
-        self.pet._eval_in_web("try { hideTypingIndicator(); } catch(e) {}")
-
-    def clear(self):
-        self._messages.clear()
-        self.pet._current_session_msgs = []
-        self.pet._eval_in_web("try { clearChat(); } catch(e) {}")
-
-    def add_options(self, options, on_select):
-        callback_id = f"opt_cb_{uuid.uuid4().hex}"
-        self.pet.js_api._register_callback(callback_id, on_select)
-        self._messages.append({
-            "role": "bot",
-            "ts": time.time(),
-            "optionsCard": {"options": options, "callbackId": callback_id, "active": True}
-        })
-        self.pet._current_session_msgs = list(self._messages)
-        self.pet._eval_in_web(f"try {{ addOptionsCard({json.dumps(options)}, {json.dumps(callback_id)}); }} catch(e) {{}}")
-
-    def add_summary_card(self, topic, depth, images, references, style, language):
-        self._messages.append({
-            "role": "bot",
-            "ts": time.time(),
-            "summaryCard": {"topic": topic, "depth": depth, "images": images, "references": references, "style": style, "language": language}
-        })
-        self.pet._current_session_msgs = list(self._messages)
-        self.pet._eval_in_web(f"try {{ addSummaryCard({json.dumps(topic)}, {json.dumps(depth)}, {json.dumps(images)}, {json.dumps(references)}, {json.dumps(style)}, {json.dumps(language)}); }} catch(e) {{}}")
-
-    def add_file_card(self, filename, on_open_file=None, on_open_folder=None, message="Listo. Archivo generado"):
-        open_file_id = f"file_cb_{uuid.uuid4().hex}" if on_open_file else None
-        open_folder_id = f"folder_cb_{uuid.uuid4().hex}" if on_open_folder else None
-        
-        if on_open_file:
-            self.pet.js_api._register_callback(open_file_id, on_open_file)
-        if on_open_folder:
-            self.pet.js_api._register_callback(open_folder_id, on_open_folder)
-
-        self._messages.append({
-            "role": "bot",
-            "ts": time.time(),
-            "fileCard": {"filename": filename, "message": message, "openFileId": open_file_id, "openFolderId": open_folder_id}
-        })
-        self.pet._current_session_msgs = list(self._messages)
-        self.pet._eval_in_web(f"try {{ addFileCard({json.dumps(filename)}, {json.dumps(message)}, {json.dumps(open_file_id)}, {json.dumps(open_folder_id)}); }} catch(e) {{}}")
-
-    def load_history(self, messages):
-        self.clear()
-        for m in messages:
-            role = m.get("role", "")
-            text = m.get("text", "")
-            ts = m.get("ts", time.time())
-            fileCard = m.get("fileCard", None)
-            optionsCard = m.get("optionsCard", None)
-            summaryCard = m.get("summaryCard", None)
-            
-            if fileCard:
-                self.add_file_card(fileCard["filename"], None, None, fileCard["message"])
-            elif optionsCard:
-                self.add_options(optionsCard["options"], lambda x: None)
-            elif summaryCard:
-                self.add_summary_card(summaryCard["topic"], summaryCard["depth"], summaryCard["images"], summaryCard["references"], summaryCard["style"], summaryCard["language"])
-            elif role in ("user", "Usuario") or role == "user":
-                self.add_user(text, ts)
-            elif role in ("bot", "Claudy") or role == "bot":
-                self.add_bot(text, ts)
-            else:
-                self.add_system(text)
 
 
-class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
+def _make_app_icon(size=64):
+    """Genera el ícono de Claudy: círculo oscuro + estrella de 4 puntas lavanda."""
+    import math
+    from PIL import Image as _PILImg, ImageDraw as _Draw
+    img = _PILImg.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = _Draw.Draw(img)
+    m = max(1, size // 32)
+    # Fondo: círculo azul oscuro casi negro
+    d.ellipse([m, m, size - m, size - m], fill=(11, 14, 32, 255))
+    # Estrella de 4 puntas (+ 4 intermedio pequeño) en lavanda
+    cx, cy = size / 2, size / 2
+    ro = size * 0.38   # punta larga
+    ri = size * 0.13   # punta corta (intermedia)
+    pts = []
+    for i in range(8):
+        ang = math.pi * i / 4 - math.pi / 2
+        r = ro if i % 2 == 0 else ri
+        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+    d.polygon(pts, fill=(200, 185, 255, 255))
+    # Punto central pequeño blanco
+    dot = max(2, size // 16)
+    d.ellipse([cx - dot, cy - dot, cx + dot, cy + dot], fill=(255, 255, 255, 230))
+    return img
+
+
+class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, BubblesMixin, tk.Tk):
     BUBBLES = [
         "Estoy listo para ayudarte.",
         "Toca dos veces para hablar.",
@@ -731,6 +438,14 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         self.attributes("-topmost", True)
         self.configure(bg=TRANSPARENT_COLOR)
         self.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+
+        # Ícono de la ventana (barra de tareas Windows)
+        try:
+            _ico = _make_app_icon(32)
+            self._tk_app_icon = ImageTk.PhotoImage(_ico)
+            self.wm_iconphoto(True, self._tk_app_icon)
+        except Exception:
+            pass
 
         # ===== One-time 3D Crab Skin Migration (hilo daemon — no bloquea arranque) =====
         threading.Thread(target=self._migrate_skin_if_needed, daemon=True, name="skin-migration").start()
@@ -840,6 +555,10 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         # Self-improving skills loop (Hermes-style): guard + auto-refine threshold
         self._refining_skill = False
         self._skill_refine_threshold = 5  # auto-refine after N uses since last refine
+        # Bucle de aprendizaje cerrado + Curator (features/skill_loop.py)
+        self._last_auto_skill_eval = 0.0
+        self._curator_running = False
+        self.after(15 * 60 * 1000, self._curator_tick)  # primera pasada a los 15 min
 
         # Google Drive connection monitor
         self._drive_connected = True
@@ -1001,21 +720,6 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 pass
         threading.Thread(target=_worker, daemon=True, name="global-hotkey").start()
 
-    def _toggle_bubble_from_hotkey(self):
-        if self.bubble_win and self.bubble_interactive and not self.bubble_minimized:
-            try:
-                mf = getattr(self, "_minimize_bubble", None)
-                if mf:
-                    mf()
-                    return
-            except Exception:
-                pass
-            self.hide_bubble()
-            return
-        if self.bubble_minimized and hasattr(self, "_expand_bubble"):
-            self._expand_bubble()
-            return
-        self.show_chat_bubble()
 
     def _generate_web_avatar(self):
         """Convert the chroma-key sprite (#ff00ff background) to a PNG with real
@@ -1111,6 +815,11 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 width=BUBBLE_WIDTH,
                 height=BUBBLE_HEIGHT,
                 frameless=True,
+                # Sin easy_drag: arrastrar desde cualquier punto movía la ventana
+                # e impedía seleccionar texto (p.ej. copiar en el Historial). La
+                # ventana solo se mueve desde la barra superior, que lleva la
+                # clase CSS 'pywebview-drag-region' en chat.html.
+                easy_drag=False,
                 transparent=True,
                 background_color='#000000',
                 js_api=self.js_api,
@@ -1171,6 +880,15 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             self._compress_and_save_to_obsidian()
         except Exception as ex:
             print(f"[nueva conv] compress error: {ex}")
+        # Bucle de aprendizaje cerrado (Hermes-style): evaluar en background si
+        # la sesión que se cierra contiene un procedimiento digno de ser skill.
+        try:
+            _session_snapshot = list(self._current_session_msgs or [])
+            threading.Thread(
+                target=self._auto_skill_check, args=(_session_snapshot,),
+                daemon=True, name="auto-skill").start()
+        except Exception:
+            pass
         self._current_session_msgs = []
         self._chat_view = WebViewChatWrapper(self)
         self._chat_view.clear()
@@ -1304,27 +1022,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             except Exception as e:
                 print(f"[webview trigger submit] run submit error: {e}")
 
-    def _show_welcome_bubble_when_ready(self, _attempts=0):
-        """Wait for the webview HTML to be fully loaded before showing the welcome chat.
-        Retries every 250ms for up to ~8 seconds, then opens anyway (Tkinter fallback)."""
-        MAX_ATTEMPTS = 32  # 32 * 250ms = 8 seconds max wait
-        if not self._webview_ready and _attempts < MAX_ATTEMPTS:
-            self.after(250, lambda: self._show_welcome_bubble_when_ready(_attempts + 1))
-            return
-        self._show_welcome_bubble()
 
-    def _show_welcome_bubble(self):
-        saludos = [
-            "Hola, soy Claudy, tu asistente personal. ¿En qué andas hoy?",
-            "Buenas, soy Claudy. ¿Qué tema te tiene la cabeza ocupada hoy?",
-            "Hey, soy Claudy. ¿Hay algo en lo que te pueda dar una mano ahora?",
-            "Hola, Claudy aquí. ¿Qué pregunta llevas dando vueltas hoy?",
-            "Soy Claudy, tu copiloto. ¿Qué quieres resolver primero?",
-        ]
-        try:
-            self.show_chat_bubble(text=random.choice(saludos))
-        except Exception:
-            pass
 
     def _restart_app(self):
         """Re-launch pet.py with the current Python interpreter, then close this instance."""
@@ -2075,16 +1773,17 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             activeborderwidth=0,
             font=("Bahnschrift SemiBold", 10),
         )
-        auto_start_label = "Desactivar inicio automatico" if self._is_auto_start_enabled() else "Activar inicio automatico"
+        auto_on = self._is_auto_start_enabled()
+        auto_start_label = ("🟢  Inicio automático: ON" if auto_on else "⚪  Inicio automático: OFF")
         items = [
-            ("Hablar aqui", lambda: self.show_chat_bubble("Que tienes en mente?")),
-            ("Abrir terminal", self.launch_claudy),
+            ("💬  Hablar aquí", lambda: self.show_chat_bubble("Que tienes en mente?")),
+            ("🖥️  Abrir terminal", self.launch_claudy),
             None,
             (auto_start_label, self._toggle_auto_start_menu),
-            ("Ocultar a bandeja", self._hide_to_tray),
+            ("🫥  Ocultar a bandeja", self._hide_to_tray),
             None,
-            ("Reiniciar", self._restart_app),
-            ("Cerrar", self.destroy),
+            ("🔄  Reiniciar", self._restart_app),
+            ("⛔  Cerrar Claudy", self.destroy),
         ]
         for item in items:
             if item is None:
@@ -2094,16 +1793,18 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 self.menu.add_command(label=label, command=command)
 
     def _context_menu_items(self):
-        auto_start_label = "Desactivar inicio automatico" if self._is_auto_start_enabled() else "Activar inicio automatico"
+        auto_on = self._is_auto_start_enabled()
+        auto_start_label = "Inicio automático: ON" if auto_on else "Inicio automático: OFF"
+        auto_icon = "🟢" if auto_on else "⚪"
         return [
-            ("Hablar aqui", lambda: self.show_chat_bubble("Que tienes en mente?"), "primary"),
-            ("Abrir terminal", self.launch_claudy, "primary"),
+            ("💬", "Hablar aquí", lambda: self.show_chat_bubble("Que tienes en mente?"), "primary"),
+            ("🖥️", "Abrir terminal", self.launch_claudy, "primary"),
             None,
-            (auto_start_label, self._toggle_auto_start_menu, "normal"),
-            ("Ocultar a bandeja", self._hide_to_tray, "normal"),
+            (auto_icon, auto_start_label, self._toggle_auto_start_menu, "normal"),
+            ("🫥", "Ocultar a bandeja", self._hide_to_tray, "normal"),
             None,
-            ("Reiniciar", self._restart_app, "normal"),
-            ("Cerrar", self.destroy, "danger"),
+            ("🔄", "Reiniciar", self._restart_app, "normal"),
+            ("⛔", "Cerrar Claudy", self.destroy, "danger"),
         ]
 
     def _hide_context_popup(self, _event=None):
@@ -2121,42 +1822,67 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             popup = tk.Toplevel(self)
             popup.overrideredirect(True)
             popup.attributes("-topmost", True)
-            popup.configure(bg="#58c7ff")
+            # Borde exterior degradado simulado: marco violeta de 1px.
+            popup.configure(bg="#7c3aed")
 
-            frame = tk.Frame(
-                popup,
-                bg="#05091d",
-                bd=0,
-                highlightbackground="#58c7ff",
-                highlightthickness=1,
-            )
+            frame = tk.Frame(popup, bg="#0a0e23", bd=0)
             frame.pack(fill="both", expand=True, padx=1, pady=1)
 
-            def add_row(label, command, kind="normal"):
-                normal_bg = "#05091d"
-                hover_bg = "#172862"
-                fg = "#f7f9ff"
+            # ── Cabecera con identidad ──
+            header = tk.Frame(frame, bg="#0a0e23")
+            header.pack(fill="x", padx=14, pady=(10, 6))
+            tk.Label(
+                header, text="CLAUDY", bg="#0a0e23", fg="#a78bfa",
+                font=("Bahnschrift SemiBold", 11), anchor="w",
+            ).pack(side="left")
+            tk.Label(
+                header, text=" v4.0", bg="#0a0e23", fg="#5b6391",
+                font=("Bahnschrift", 8), anchor="w",
+            ).pack(side="left")
+            tk.Label(
+                header, text="●", bg="#0a0e23", fg="#34d399",
+                font=("Segoe UI", 8), anchor="e",
+            ).pack(side="right")
+            tk.Frame(frame, bg="#251d4f", height=1).pack(fill="x", padx=10)
+
+            def add_row(icon, label, command, kind="normal"):
+                normal_bg = "#0a0e23"
                 if kind == "danger":
-                    hover_bg = "#1f367e"
-                    fg = "#58c7ff"
-                row = tk.Label(
-                    frame,
-                    text=label,
-                    bg=normal_bg,
-                    fg=fg,
-                    anchor="w",
-                    padx=22,
-                    pady=5,
-                    font=("Bahnschrift SemiBold", 10),
-                    cursor="hand2",
+                    fg, hover_bg, hover_fg, accent = "#fb7185", "#2b0f1d", "#fda4af", "#f43f5e"
+                elif kind == "primary":
+                    fg, hover_bg, hover_fg, accent = "#e2e8f0", "#1a1440", "#ffffff", "#8b5cf6"
+                else:
+                    fg, hover_bg, hover_fg, accent = "#aab3d6", "#141a38", "#e2e8f0", "#22d3ee"
+
+                row = tk.Frame(frame, bg=normal_bg, cursor="hand2")
+                row.pack(fill="x", padx=6, pady=1)
+                bar = tk.Frame(row, bg=normal_bg, width=3)
+                bar.pack(side="left", fill="y")
+                ico = tk.Label(
+                    row, text=icon, bg=normal_bg, fg=fg,
+                    font=("Segoe UI Emoji", 10), padx=8, pady=6,
                 )
-                row.pack(fill="x")
+                ico.pack(side="left")
+                txt = tk.Label(
+                    row, text=label, bg=normal_bg, fg=fg, anchor="w",
+                    padx=2, pady=6, font=("Bahnschrift SemiBold", 10),
+                )
+                txt.pack(side="left", fill="x", expand=True)
+
+                widgets = (row, bar, ico, txt)
 
                 def on_enter(_e):
-                    row.configure(bg=hover_bg, fg="#ffffff" if kind != "danger" else "#58c7ff")
+                    for wdg in widgets:
+                        wdg.configure(bg=hover_bg)
+                    bar.configure(bg=accent)
+                    ico.configure(fg=hover_fg)
+                    txt.configure(fg=hover_fg)
 
                 def on_leave(_e):
-                    row.configure(bg=normal_bg, fg=fg)
+                    for wdg in widgets:
+                        wdg.configure(bg=normal_bg)
+                    ico.configure(fg=fg)
+                    txt.configure(fg=fg)
 
                 def on_click(_e):
                     self._hide_context_popup()
@@ -2165,22 +1891,24 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                     except Exception as ex:
                         print(f"[context menu] action error: {ex}")
 
-                row.bind("<Enter>", on_enter)
-                row.bind("<Leave>", on_leave)
-                row.bind("<Button-1>", on_click)
+                for wdg in widgets:
+                    wdg.bind("<Enter>", on_enter)
+                    wdg.bind("<Leave>", on_leave)
+                    wdg.bind("<Button-1>", on_click)
 
             def add_separator():
-                sep = tk.Frame(frame, bg="#223a80", height=1)
-                sep.pack(fill="x", padx=0, pady=2)
+                tk.Frame(frame, bg="#1b2147", height=1).pack(fill="x", padx=10, pady=3)
 
-            for item in self._context_menu_items():
+            items = self._context_menu_items()
+            for item in items:
                 if item is None:
                     add_separator()
                 else:
                     add_row(*item)
+            tk.Frame(frame, bg="#0a0e23", height=6).pack(fill="x")  # respiro inferior
 
             popup.update_idletasks()
-            w = popup.winfo_reqwidth()
+            w = max(popup.winfo_reqwidth(), 230)
             h = popup.winfo_reqheight()
             x = max(work_area.left + 8, min(event.x_root, work_area.right - w - 8))
             y = max(work_area.top + 8, min(event.y_root, work_area.bottom - h - 8))
@@ -2395,13 +2123,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             import pystray
             from PIL import Image as PILImage
 
-        # Create a small icon image from the first sprite.
-        sprite_path = ASSET_FRAMES[0]
-        if os.path.exists(sprite_path):
-            icon_image = PILImage.open(sprite_path).resize((16, 16))
-        else:
-            # Fallback: create a simple colored square.
-            icon_image = PILImage.new("RGBA", (16, 16), (124, 107, 255, 255))
+        # Ícono limpio para el system tray (diseño propio, no la sprite aplastada)
+        icon_image = _make_app_icon(64)
 
         def _show_all():
             self._show_from_tray()
@@ -2642,54 +2365,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             # Poll again every 5000 ms (5 seconds) — guaranteed to run
             self.after(5000, self._check_google_drive)
 
-    def hide_bubble(self):
-        self._cancel_idle_timer()
-        self._stop_zzz_animation()
-        if self.bubble_win:
-            try:
-                self.bubble_win.destroy()
-            except Exception:
-                pass
-            self.bubble_win = None
-        if self.webview_win:
-            try:
-                # Move off-screen instead of hide() to keep WebView2 rendered
-                self.webview_win.move(-9999, -9999)
-            except Exception:
-                pass
-        # Also close the Tkinter history window if it is open
-        if self.history_win is not None:
-            try:
-                self.history_win.destroy()
-            except Exception:
-                pass
-            self.history_win = None
-        self._webview_visible = False
-        self._bubble_hidden_at = time.time()
-        self._bubble_canvas = None
-        self._chat_view = None
-        self.bubble_interactive = False
-        self.bubble_minimized = False
-        # Restore Claudy topmost now that the webview is hidden
-        try:
-            self.attributes("-topmost", True)
-        except Exception:
-            pass
-            
-        # Restore pre-chat pet position if saved
-        if hasattr(self, "_pre_chat_pet_x") and self._pre_chat_pet_x is not None:
-            try:
-                self.geometry(f"+{self._pre_chat_pet_x}+{self._pre_chat_pet_y}")
-                self.base_x = self._pre_chat_pet_x
-                self.base_y = self._pre_chat_pet_y
-            except Exception:
-                pass
-            self._pre_chat_pet_x = None
-            self._pre_chat_pet_y = None
 
-    def _on_bubble_focus_out(self, _event=None):
-        # Delay check so focus can settle on the new widget
-        self.after(50, self._check_bubble_focus)
 
     def _check_bubble_focus(self):
         if not self.bubble_win:
@@ -2777,376 +2453,20 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 pass
         self.hide_bubble()
 
-    def bubble_position(self, width, height):
-        margin = 18      # screen-edge breathing room
-        pet_gap = 4      # gap between Claudy and the bubble/chat
-        pet_x = self.base_x
-        pet_y = self.base_y
-        pet_w = self.width
-        pet_h = self.height
 
-        if width >= 500:
-            # Large chat window: position ABOVE the pet so Claudy stays visible
-            # below it. Anchor horizontally to the pet's side: if pet is near the
-            # right edge, align chat's right edge with pet's right edge (and vice
-            # versa). Fall back to side-by-side only when the chat is taller than
-            # the available vertical space above the pet.
-            available_above = pet_y - work_area.top - pet_gap
-            if height <= available_above:
-                # Anchor to whichever side the pet is closer to, so the chat
-                # doesn't get clamped off-screen on the opposite edge.
-                space_left = pet_x - work_area.left
-                space_right = work_area.right - (pet_x + pet_w)
-                if space_right <= space_left:
-                    # Pet is near right edge → align chat's right edge to pet's right edge
-                    x = (pet_x + pet_w) - width
-                else:
-                    # Pet near left edge → align chat's left edge to pet's left edge
-                    x = pet_x
-                y = pet_y - height - pet_gap
-            else:
-                # Chat doesn't fit above → fall back to side-by-side
-                space_left = pet_x - work_area.left
-                space_right = work_area.right - (pet_x + pet_w)
-                if space_left >= space_right:
-                    x = pet_x - width - pet_gap
-                else:
-                    x = pet_x + pet_w + pet_gap
-                y = pet_y + pet_h - height
-        else:
-            # Position small thought bubble ABOVE Claudy, centered horizontally
-            x = pet_x + pet_w // 2 - width // 2
-            y = pet_y - height - pet_gap
 
-            # If it doesn't fit above, try beside (left, then right)
-            if y < work_area.top + margin:
-                y = work_area.top + margin
-                left_x = pet_x - width - pet_gap
-                right_x = pet_x + pet_w + pet_gap
-                if left_x >= work_area.left + margin:
-                    x = left_x
-                elif right_x + width <= work_area.right - margin:
-                    x = right_x
-
-        # Clamp to screen edges
-        x = max(work_area.left + margin, min(x, work_area.right - width - margin))
-        y = max(work_area.top + margin, min(y, work_area.bottom - height - margin))
-        return x, y
-
-    def minimized_position(self, size):
-        """Position for the minimized Zzz bubble: floats just above pet's head."""
-        pet_x = self.base_x
-        pet_y = self.base_y
-        pet_w = self.width
-        # Center horizontally on pet, closer to its head
-        x = pet_x + pet_w // 2 - size // 2
-        y = pet_y - size + 42
-        return x, y
-
-    def _sync_minimized_bubble(self):
-        """If chat is minimized, keep the Zzz bubble glued to the pet."""
-        if not (self.bubble_win and self.bubble_minimized):
-            return
-        try:
-            sz = BUBBLE_MINI_SIZE
-            cx, cy = self.minimized_position(sz)
-            self.bubble_win.geometry(f"{sz}x{sz}+{cx}+{cy}")
-        except tk.TclError:
-            pass
 
     # ------------------------------------------------------------------
     # Bubble drawing helpers
     # ------------------------------------------------------------------
-    def _rounded_bubble_path(self, w, h, r, tail_h=10, tail_w=14):
-        """Return a list of (x,y) points for a speech-bubble polygon."""
-        points = []
-        # Top edge.
-        points += self._arc_points(r, r, r, 180, 270)
-        points += self._arc_points(w - r, r, r, 270, 360)
-        # Right edge.
-        points += self._arc_points(w - r, h - r - tail_h, r, 0, 45)
-        # Tail.
-        cx = w // 2
-        points.append((cx + tail_w // 2, h - tail_h))
-        points.append((cx, h))
-        points.append((cx - tail_w // 2, h - tail_h))
-        # Bottom-left rounding.
-        points += self._arc_points(r, h - r - tail_h, r, 135, 180)
-        return points
 
-    @staticmethod
-    def _arc_points(cx, cy, r, start_deg, end_deg, steps=8):
-        pts = []
-        for i in range(steps + 1):
-            ang = math.radians(start_deg + (end_deg - start_deg) * i / steps)
-            pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
-        return pts
 
-    def _draw_bubble(self, canvas, w, h, bg, border):
-        style = THEME.get("style", "glass")
-        if style == "terminal":
-            self._draw_bubble_terminal(canvas, w, h, bg, border)
-        elif style == "editorial":
-            self._draw_bubble_editorial(canvas, w, h, bg, border)
-        elif style == "minimal":
-            self._draw_bubble_minimal(canvas, w, h, bg, border)
-        elif style == "vintage":
-            self._draw_bubble_vintage(canvas, w, h, bg, border)
-        else:
-            self._draw_bubble_glass(canvas, w, h, bg, border)
 
-    def _draw_bubble_vintage(self, canvas, w, h, bg, border):
-        """Parchment paper background with grid lines and leather frame."""
-        try:
-            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            radius = 16
 
-            # 1. Leather/wood outer frame (dark brown rounded rect)
-            frame_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            frame_mask = Image.new("L", (w, h), 0)
-            ImageDraw.Draw(frame_mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
-            frame_fill = Image.new("RGBA", (w, h), (61, 52, 41, 255))  # #3d3429
-            frame_fill.putalpha(frame_mask)
-            img = Image.alpha_composite(img, frame_fill)
 
-            # 2. Inner parchment paper area (inset 8px)
-            inset = 8
-            paper_w, paper_h = w - inset * 2, h - inset * 2
-            paper = Image.new("RGBA", (paper_w, paper_h), (0, 0, 0, 0))
-            paper_mask = Image.new("L", (paper_w, paper_h), 0)
-            ImageDraw.Draw(paper_mask).rounded_rectangle(
-                (0, 0, paper_w - 1, paper_h - 1), radius=radius - 4, fill=255)
-            # Paper color with subtle noise
-            paper_base = Image.new("RGBA", (paper_w, paper_h), (212, 197, 160, 255))  # #d4c5a0
-            paper_base.putalpha(paper_mask)
-            img.paste(paper_base, (inset, inset), paper_base)
 
-            # 3. Grid lines on paper
-            draw = ImageDraw.Draw(img)
-            grid_color = (204, 190, 156, 255)  # very faint
-            grid_spacing = 20
-            for gx in range(inset + grid_spacing, w - inset, grid_spacing):
-                draw.line([(gx, inset + 4), (gx, h - inset - 4)], fill=grid_color, width=1)
-            for gy in range(inset + grid_spacing, h - inset, grid_spacing):
-                draw.line([(inset + 4, gy), (w - inset - 4, gy)], fill=grid_color, width=1)
 
-            # 4. Leather frame border (2px)
-            draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius,
-                                   outline=(90, 78, 61, 255), width=2)
-            # Inner border on paper edge
-            draw.rounded_rectangle((inset - 1, inset - 1, w - inset, h - inset),
-                                   radius=radius - 4, outline=(160, 145, 115, 255), width=1)
 
-            # 5. Corner studs (small circles at corners)
-            stud_r = 4
-            stud_color = (120, 105, 82, 200)
-            for sx, sy in [(14, 14), (w - 15, 14), (14, h - 15), (w - 15, h - 15)]:
-                draw.ellipse((sx - stud_r, sy - stud_r, sx + stud_r, sy + stud_r),
-                             fill=stud_color, outline=(80, 70, 55, 255))
-
-            tk_img = ImageTk.PhotoImage(img)
-            self._bg_photo_image_ref = tk_img
-            canvas.create_image(0, 0, anchor="nw", image=tk_img, tags=("bubble_bg",))
-        except Exception:
-            canvas.create_rectangle(0, 0, w, h, fill="#d4c5a0", outline="#5a4e3d", width=2,
-                                    tags=("bubble_bg",))
-
-    def _draw_bubble_minimal(self, canvas, w, h, bg, border):
-        """Matte solid background with clean 1px border — Obsidian Clean theme."""
-        try:
-            bg_rgb = (10, 10, 12)  # #0a0a0c
-            border_rgb = (39, 39, 42)  # #27272a
-            radius = 24
-            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            mask = Image.new("L", (w, h), 0)
-            mask_d = ImageDraw.Draw(mask)
-            mask_d.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
-            fill_layer = Image.new("RGBA", (w, h), (*bg_rgb, 255))
-            fill_layer.putalpha(mask)
-            img = Image.alpha_composite(img, fill_layer)
-            draw_on = ImageDraw.Draw(img)
-            draw_on.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius,
-                                      outline=(*border_rgb, 255), width=1)
-            tk_img = ImageTk.PhotoImage(img)
-            self._bg_photo_image_ref = tk_img
-            canvas.create_image(0, 0, anchor="nw", image=tk_img, tags=("bubble_bg",))
-        except Exception:
-            canvas.create_rectangle(0, 0, w, h, fill=bg, outline=border, width=1,
-                                    tags=("bubble_bg",))
-
-    def _draw_bubble_glass(self, canvas, w, h, bg, border):
-        # Premium neon shell: deep gradient, vignette, dotted texture and soft dual glow.
-        try:
-            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            d = ImageDraw.Draw(img)
-
-            top_rgb = _hex_to_rgb("#07142d")
-            bottom_rgb = _hex_to_rgb("#070814")
-            accent_left = _hex_to_rgb(THEME.get("accent_glow", "#58c7ff"))
-            accent_right = _hex_to_rgb(THEME.get("accent", "#c02dff"))
-
-            for y in range(h):
-                t = y / h
-                r = int(top_rgb[0] + (bottom_rgb[0] - top_rgb[0]) * t)
-                g = int(top_rgb[1] + (bottom_rgb[1] - top_rgb[1]) * t)
-                b = int(top_rgb[2] + (bottom_rgb[2] - top_rgb[2]) * t)
-                d.line([(0, y), (w, y)], fill=(r, g, b, 255))
-
-            for i in range(0, w, 12):
-                for j in range(0, h, 12):
-                    blend = i / max(1, w - 1)
-                    dot_rgb = (
-                        int(accent_left[0] * (1 - blend) + accent_right[0] * blend),
-                        int(accent_left[1] * (1 - blend) + accent_right[1] * blend),
-                        int(accent_left[2] * (1 - blend) + accent_right[2] * blend),
-                    )
-                    d.ellipse((i, j, i + 1, j + 1), fill=(*dot_rgb, 28))
-
-            vignette = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            vd = ImageDraw.Draw(vignette)
-            vd.ellipse((-w * 0.25, -h * 0.1, w * 0.55, h * 0.7), fill=(*accent_left, 48))
-            vd.ellipse((w * 0.45, h * 0.05, w * 1.15, h * 0.95), fill=(*accent_right, 42))
-            vignette = vignette.filter(ImageFilter.GaussianBlur(52))
-            img = Image.alpha_composite(img, vignette)
-
-            mask = Image.new("L", (w, h), 0)
-            mask_d = ImageDraw.Draw(mask)
-            radius = 34
-            mask_d.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
-            img.putalpha(mask)
-
-            glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            gd = ImageDraw.Draw(glow)
-            gd.rounded_rectangle((6, 6, w - 7, h - 7), radius=radius,
-                                 outline=(*accent_left, 160), width=4)
-            gd.rounded_rectangle((10, 10, w - 11, h - 11), radius=radius - 4,
-                                 outline=(*accent_right, 140), width=3)
-            glow = glow.filter(ImageFilter.GaussianBlur(10))
-            img = Image.alpha_composite(glow, img)
-
-            draw_on_img = ImageDraw.Draw(img)
-            border_rgb = _hex_to_rgb(border)
-            draw_on_img.rounded_rectangle((6, 6, w - 7, h - 7), radius=radius,
-                                          outline=(*border_rgb, 255), width=2)
-            draw_on_img.rounded_rectangle((14, 14, w - 15, h - 15), radius=26,
-                                          outline=(*_hex_to_rgb(THEME.get("divider", "#4f2cc8")), 135), width=1)
-
-            tk_img = ImageTk.PhotoImage(img)
-            self._bg_photo_image_ref = tk_img
-            canvas.create_image(0, 0, anchor="nw", image=tk_img, tags=("bubble_bg",))
-        except Exception:
-            outer = self._rounded_bubble_path(w, h, 22, tail_h=0, tail_w=0)
-            canvas.create_polygon(outer, smooth=True, fill=bg, outline=border, width=2,
-                                  tags=("bubble_bg",))
-
-    def _draw_bubble_terminal(self, canvas, w, h, bg, border):
-        # Sharp rectangle, scanlines, double border, CRT corner glow
-        canvas.create_rectangle(0, 0, w, h, fill=bg, outline="", tags=("bubble_bg",))
-        # Scanlines — horizontal faint lines every 3px
-        for y in range(0, h, 3):
-            canvas.create_line(0, y, w, y, fill=THEME["divider"], width=1, tags=("bubble_bg",))
-        # Double border — outer thin, inner accent
-        canvas.create_rectangle(0, 0, w - 1, h - 1, outline=border, width=1, tags=("bubble_bg",))
-        canvas.create_rectangle(4, 4, w - 5, h - 5, outline=THEME["accent"], width=1, tags=("bubble_bg",))
-        # Tail/pointer at bottom-center
-        cx = w // 2
-        canvas.create_polygon(
-            [cx - 8, h - 1, cx, h + 8, cx + 8, h - 1],
-            fill=bg, outline=THEME["accent"], width=1, tags=("bubble_bg",)
-        )
-        # Corner brackets (CRT corners)
-        for (x0, y0, x1, y1, x2, y2) in [
-            (8, 8, 8, 16, 16, 8),               # TL
-            (w - 9, 8, w - 9, 16, w - 17, 8),    # TR
-            (8, h - 9, 8, h - 17, 16, h - 9),    # BL
-            (w - 9, h - 9, w - 9, h - 17, w - 17, h - 9),  # BR
-        ]:
-            canvas.create_line(x0, y0, x1, y1, fill=THEME["accent_glow"], width=2, tags=("bubble_bg",))
-            canvas.create_line(x0, y0, x2, y2, fill=THEME["accent_glow"], width=2, tags=("bubble_bg",))
-
-    def _draw_bubble_editorial(self, canvas, w, h, bg, border):
-        # Paper-like: cream background, single hairline border, no shadow drama
-        canvas.create_rectangle(0, 0, w, h, fill=bg, outline="", tags=("bubble_bg",))
-        # A single accent line on top (editorial bar)
-        canvas.create_rectangle(0, 0, w, 3, fill=THEME["accent"], outline="", tags=("bubble_bg",))
-        # Hairline border
-        canvas.create_rectangle(0, 0, w - 1, h - 1, outline=border, width=1, tags=("bubble_bg",))
-        # Tail
-        cx = w // 2
-        canvas.create_polygon(
-            [cx - 7, h - 1, cx, h + 7, cx + 7, h - 1],
-            fill=bg, outline=border, width=1, tags=("bubble_bg",)
-        )
-
-    def show_thought(self, text):
-        self.hide_bubble()
-        self.bubble_interactive = False
-
-        bub = tk.Toplevel(self)
-        bub.overrideredirect(True)
-        bub.attributes("-topmost", True)
-        bub.configure(bg=TRANSPARENT_COLOR)
-        bub.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
-
-        # Measure text to auto-size.
-        temp = tk.Label(bub, text=text, font=("Bahnschrift SemiBold", 10), wraplength=220)
-        temp.update_idletasks()
-        tw, th = temp.winfo_reqwidth(), temp.winfo_reqheight()
-        temp.destroy()
-
-        pad_x, pad_y = 28, 20
-        width = max(160, tw + pad_x * 2)
-        height = max(70, th + pad_y * 2 + 10)
-
-        canvas = tk.Canvas(bub, width=width, height=height, bg=TRANSPARENT_COLOR, highlightthickness=0, bd=0)
-        canvas.pack()
-
-        try:
-            img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            gd = ImageDraw.Draw(glow)
-            gd.rounded_rectangle((4, 4, width - 5, height - 5), radius=22,
-                                 outline=(192, 45, 255, 150), width=4)
-            glow = glow.filter(ImageFilter.GaussianBlur(7))
-            img = Image.alpha_composite(img, glow)
-            d = ImageDraw.Draw(img)
-            d.rounded_rectangle((8, 8, width - 9, height - 9), radius=20,
-                                fill=(5, 9, 29, 245), outline=(88, 199, 255, 190), width=1)
-            d.ellipse((18, height - 16, 28, height - 6), fill=(5, 9, 29, 230),
-                      outline=(88, 199, 255, 160), width=1)
-            # Pre-composite onto magenta background so semi-transparent pixels
-            # don't bleed pink through Tkinter's -transparentcolor.
-            bg_layer = Image.new("RGBA", (width, height), (255, 0, 255, 255))
-            composited = Image.alpha_composite(bg_layer, img)
-            # Convert to RGB (drop alpha) since we're using chroma-key transparency
-            final = composited.convert("RGB")
-            # Snap near-magenta pixels to exact #FF00FF so chroma-key works
-            px = final.load()
-            for _y in range(final.height):
-                for _x in range(final.width):
-                    r, g, b = px[_x, _y]
-                    if r > 200 and g < 55 and b > 200:
-                        px[_x, _y] = (255, 0, 255)
-            tk_img = ImageTk.PhotoImage(final)
-            self._thought_bg_ref = tk_img
-            canvas.create_image(0, 0, anchor="nw", image=tk_img)
-        except Exception:
-            canvas.create_polygon(
-                self._rounded_bubble_path(width, height, 22, tail_h=0, tail_w=0),
-                smooth=True, fill="#05091d", outline="#58c7ff", width=1,
-            )
-
-        canvas.create_text(
-            width // 2, height // 2 - 4,
-            text=text, width=width - pad_x * 2,
-            fill="#f7f9ff",
-            font=("Bahnschrift SemiBold", 10),
-            justify="center",
-        )
-
-        cx, cy = self.bubble_position(width, height)
-        bub.geometry(f"{width}x{height}+{cx}+{cy}")
-        self.bubble_win = bub
 
     def show_chat_bubble(self, text=None):
         # If a non-interactive thought bubble is open, destroy it first
@@ -3868,20 +3188,43 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             is_report_req = False
             topic = ""
 
-            # Deep Research switch activo: forzamos el flujo guiado de informe
-            # sin depender de las palabras gatillo. El tema es el prompt limpio
-            # quitando muletillas tipo "crea un docx/informe sobre ...".
+            # Deep Research switch activo: significa "busca en internet en vivo".
+            # Por defecto respondemos DIRECTAMENTE en el chat con una búsqueda
+            # fundamentada (sin generar ningún documento). SOLO escalamos al flujo
+            # guiado de informe si el texto lo pide explícitamente (informe,
+            # reporte, docx, investiga...). Antes esto forzaba SIEMPRE un informe.
             if getattr(self, "_deep_research_pending", False):
                 self._deep_research_pending = False
-                is_report_req = True
-                topic = re.sub(
-                    r"^\s*(?:crea(?:me)?|cre[aá]|hazme|haz|genera(?:me)?|necesito|quiero|hac[eé]r?)\s+"
-                    r"(?:un|una|el|la)?\s*"
-                    r"(?:informe|reporte|documento|docx|doc|word|pdf|archivo|texto)?\s*"
-                    r"(?:extenso|completo|detallado|profesional)?\s*"
-                    r"(?:sobre|de|acerca de|del|sobre el|sobre la)?\s*",
-                    "", prompt, flags=re.IGNORECASE,
-                ).strip() or prompt.strip()
+                _wants_report = any(w in plow for w in (
+                    "informe", "reporte", "documento", "docx", "word", "pdf",
+                    "investiga", "investigación", "investigacion", "monografia",
+                    "monografía", "ensayo", "paper",
+                ))
+                if _wants_report:
+                    is_report_req = True
+                    topic = re.sub(
+                        r"^\s*(?:crea(?:me)?|cre[aá]|hazme|haz|genera(?:me)?|necesito|quiero|hac[eé]r?)\s+"
+                        r"(?:un|una|el|la)?\s*"
+                        r"(?:informe|reporte|documento|docx|doc|word|pdf|archivo|texto)?\s*"
+                        r"(?:extenso|completo|detallado|profesional)?\s*"
+                        r"(?:sobre|de|acerca de|del|sobre el|sobre la)?\s*",
+                        "", prompt, flags=re.IGNORECASE,
+                    ).strip() or prompt.strip()
+                else:
+                    # Búsqueda web en vivo + respuesta inline en el chat (sin documento).
+                    _dr_query = prompt.strip()
+                    self._set_response_text(f"Buscando en internet: {_dr_query}...")
+                    status.configure(text="🔬 Búsqueda profunda en internet...", fg=THEME["accent"])
+
+                    def _deep_search_worker():
+                        try:
+                            result = self._web_search_and_answer(_dr_query)
+                        except Exception as e:
+                            result = f"Error buscando: {e}"
+                        self.after(0, lambda: self._finish_search_result(result, status, entry))
+
+                    threading.Thread(target=_deep_search_worker, daemon=True).start()
+                    return
 
             if (not is_report_req) and (plow.startswith("/informe") or plow.startswith("/reporte")):
                 is_report_req = True
@@ -6098,155 +5441,6 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         except tk.TclError:
             pass
 
-    def show_pet_speech_bubble(self, text, duration=5000, on_click=None):
-        """Show a premium floating speech bubble directly above the pet's head.
-
-        If on_click is given, clicking the bubble runs it (e.g. reopen the chat
-        to show the finished work).
-        """
-        if hasattr(self, "_pet_speech_win") and self._pet_speech_win:
-            try:
-                self._pet_speech_win.destroy()
-            except Exception:
-                pass
-            self._pet_speech_win = None
-            
-        win = tk.Toplevel(self)
-        win.overrideredirect(True)
-        win.attributes("-topmost", True)
-        
-        try:
-            win.wm_attributes("-alpha", 0.0)
-        except Exception:
-            pass
-            
-        win.configure(bg=TRANSPARENT_COLOR)
-        win.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
-
-        wraplength = 210
-        temp = tk.Label(win, text=text, font=("Bahnschrift SemiBold", 9), wraplength=wraplength)
-        temp.update_idletasks()
-        bw = max(180, temp.winfo_reqwidth() + 34)
-        bh = max(58, temp.winfo_reqheight() + 28)
-        temp.destroy()
-
-        canvas = tk.Canvas(win, width=bw, height=bh, bg=TRANSPARENT_COLOR, highlightthickness=0, bd=0)
-        canvas.pack(fill="both", expand=True)
-
-        try:
-            img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
-            glow = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
-            gd = ImageDraw.Draw(glow)
-            gd.rounded_rectangle((4, 4, bw - 5, bh - 5), radius=20,
-                                 outline=(88, 199, 255, 145), width=4)
-            gd.rounded_rectangle((8, 8, bw - 9, bh - 9), radius=18,
-                                 outline=(192, 45, 255, 130), width=3)
-            glow = glow.filter(ImageFilter.GaussianBlur(7))
-            img = Image.alpha_composite(img, glow)
-            d = ImageDraw.Draw(img)
-            d.rounded_rectangle((8, 8, bw - 9, bh - 9), radius=18,
-                                fill=(5, 9, 29, 246), outline=(88, 199, 255, 180), width=1)
-            d.polygon([(bw // 2 - 9, bh - 10), (bw // 2, bh - 1), (bw // 2 + 9, bh - 10)],
-                      fill=(5, 9, 29, 246), outline=(88, 199, 255, 130))
-            # Pre-composite onto magenta background so semi-transparent pixels
-            # don't bleed pink through Tkinter's -transparentcolor.
-            bg_layer = Image.new("RGBA", (bw, bh), (255, 0, 255, 255))
-            composited = Image.alpha_composite(bg_layer, img)
-            final = composited.convert("RGB")
-            # Snap near-magenta pixels to exact #FF00FF so chroma-key works
-            px = final.load()
-            for _y in range(final.height):
-                for _x in range(final.width):
-                    r, g, b = px[_x, _y]
-                    if r > 200 and g < 55 and b > 200:
-                        px[_x, _y] = (255, 0, 255)
-            tk_img = ImageTk.PhotoImage(final)
-            win._speech_bg_ref = tk_img
-            canvas.create_image(0, 0, anchor="nw", image=tk_img)
-        except Exception:
-            canvas.create_rectangle(0, 0, bw, bh, fill="#05091d", outline="#58c7ff", width=1)
-
-        canvas.create_text(
-            bw // 2, bh // 2 - 2,
-            text=text,
-            width=wraplength,
-            fill="#f7f9ff",
-            font=("Bahnschrift SemiBold", 9),
-            justify="center",
-        )
-        
-        win.update_idletasks()
-        
-        px = self.winfo_x()
-        py = self.winfo_y()
-        pw = self.winfo_width()
-        
-        cx = px + pw // 2
-        bx = cx - bw // 2
-        by = py - bh - 10
-        
-        win.geometry(f"{bw}x{bh}+{bx}+{by}")
-        self._pet_speech_win = win
-
-        # Click en la burbuja → ejecuta el callback (p.ej. reabrir el chat).
-        if on_click is not None:
-            def _do_click(_e=None):
-                try:
-                    win.destroy()
-                except Exception:
-                    pass
-                if getattr(self, "_pet_speech_win", None) == win:
-                    self._pet_speech_win = None
-                try:
-                    on_click()
-                except Exception:
-                    pass
-            canvas.configure(cursor="hand2")
-            canvas.bind("<Button-1>", _do_click)
-
-        def fade_in(alpha=0.0, current_y=by+10):
-            if not win.winfo_exists():
-                return
-            if alpha < 1.0:
-                alpha += 0.15
-                current_y -= 1.5
-                win.attributes("-alpha", min(1.0, alpha))
-                win.geometry(f"+{bx}+{int(current_y)}")
-                self.after(20, lambda: fade_in(alpha, current_y))
-            else:
-                win.attributes("-alpha", 1.0)
-                win.geometry(f"+{bx}+{by}")
-                if duration is not None:
-                    self.after(duration, lambda: fade_out())
-                
-        def fade_out(alpha=1.0):
-            if not win.winfo_exists():
-                return
-            if alpha > 0.0:
-                alpha -= 0.15
-                win.attributes("-alpha", max(0.0, alpha))
-                self.after(20, lambda: fade_out(alpha))
-            else:
-                try:
-                    win.destroy()
-                except Exception:
-                    pass
-                if getattr(self, "_pet_speech_win", None) == win:
-                    self._pet_speech_win = None
-                    
-                # If minimized and no longer working, restore Zzz sleep visual elements
-                if getattr(self, "bubble_minimized", False) and not getattr(self, "_milestone_active", False):
-                    canvas = getattr(self, "_canvas", None)
-                    idle_items = getattr(self, "_idle_items", None)
-                    if canvas and idle_items:
-                        for item in idle_items:
-                            try:
-                                canvas.itemconfigure(item, state="normal")
-                            except Exception:
-                                pass
-                        self._start_zzz_animation()
-                    
-        fade_in()
 
     def _format_exchange(self, user_text, bot_text):
         """Build marker-tagged exchange. Prefers DB history if available, else inline."""
@@ -6550,54 +5744,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
     # Mission Control — sembrar borrador de correo en el Inbox
     # ============================================================
     # Contactos conocidos: destinatario, copia y marca a usar.
-    _MC_KNOWN_CONTACTS = {
-        "combas": {
-            "name": "Conservatorio COMBAS",
-            "aliases": ["combas", "conservatorio"],
-            "to": ["secretaria@combas.cl"],
-            "cc": ["jeanpaul.harb@combas.cl"],
-            "brand": "smartstudent",
-        },
-        "tentacion": {
-            "name": "Tentación a Granel",
-            "aliases": ["tentacion", "tentación", "granel", "marco", "gonzalez", "gonzález"],
-            "to": ["agraneltentacion@gmail.com"],
-            "cc": [],
-            "brand": "point",
-        },
-    }
     # Marcas disponibles para el remitente y el estilo del correo.
-    _MC_BRANDS = {
-        "smartstudent": {
-            "label": "SmartStudent (educativo)",
-            "template": "smartstudent",
-            "from": "SmartStudent <smartstudentweb@gmail.com>",
-            "replyTo": "jorge.castro@qcorespa.com",
-            "productId": "smartstudent",
-            "primary": "#2563eb",
-            "signature": "Equipo SmartStudent · www.smartstudent.cl",
-            "guidance": "Marca SmartStudent (plataforma educativa SaaS). Tono cercano, claro y profesional, en español de Chile.",
-        },
-        "point": {
-            "label": "Point (POS / comercio)",
-            "template": "point",
-            "from": "QCORE SPA <jorge.castro@qcorespa.com>",
-            "replyTo": "jorge.castro@qcorespa.com",
-            "productId": "",
-            "primary": "#D81B60",
-            "signature": "Equipo Point · QCORE SPA",
-            "guidance": "Marca Point (sistema POS con control de inventario FEFO para comercios). Tono cercano, claro y práctico, orientado al dueño del negocio, en español de Chile.",
-        },
-        "qcore": {
-            "label": "QCORE SPA (corporativo)",
-            "from": "QCORE SPA <jorge.castro@qcorespa.com>",
-            "replyTo": "jorge.castro@qcorespa.com",
-            "productId": "",
-            "primary": "#6c5ce7",
-            "signature": "QCORE SPA · jorge.castro@qcorespa.com",
-            "guidance": "Marca QCORE SPA (consultora tecnológica). Tono profesional corporativo, en español de Chile.",
-        },
-    }
     _MC_SEEDED_DRAFTS_PATH = r"C:\Users\Felipe\Documents\QCORE-LOCAL\MISSION-CONTROL\logs\seeded-drafts.json"
 
     # Dónde queda el correo dentro del Inbox de Mission Control (kind + origin).
@@ -6609,313 +5756,18 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         "5": ("website-reply",          "website-lead",  "Respuesta a lead web",          "Respuesta a un contacto entrante desde el sitio web"),
     }
 
-    def _try_seed_mc_draft(self, prompt, plow, status, entry=None):
-        """Detecta pedidos de 'crear correo borrador' y lanza el flujo guiado que
-        pregunta destinatario, ubicación en Mission Control y estilo antes de
-        sembrarlo en el Inbox (logs/seeded-drafts.json). Devuelve True si tomó el pedido."""
-        create_verbs = (
-            "crea", "créa", "crear", "haz", "hazme", "redacta", "redáctame",
-            "prepara", "prepárame", "genera", "escribe", "escríbeme", "arma", "ármame",
-            "quiero", "necesito", "dame",
-        )
-        has_create = any(v in plow for v in create_verbs)
-        mentions_draft = "borrador" in plow
-        mentions_mail = any(w in plow for w in ("correo", "email", "e-mail", "mail"))
-        mentions_mc = any(w in plow for w in ("mission control", "inbox", "casilla", "bandeja"))
-
-        # Un borrador de correo SIEMPRE es para Mission Control. Señal fuerte:
-        # "borrador" junto a correo/MC dispara aunque no haya verbo de creación.
-        strong = mentions_draft and (mentions_mail or mentions_mc)
-        if not (strong or (has_create and (mentions_mail or mentions_draft))):
-            return False
-
-        self._start_guided_email_flow(prompt, plow, status, entry)
-        return True
 
     # ============================================================
     # Guided Email Flow (Asistente de Correos para Mission Control)
     # ============================================================
-    def _detect_email_style(self, plow):
-        """Detecta la marca/estilo mencionada en el texto. Devuelve la clave o None."""
-        if "smart" in plow:
-            return "smartstudent"
-        if "point" in plow or " pos" in plow:
-            return "point"
-        if "qcore" in plow or "corporativo" in plow:
-            return "qcore"
-        return None
 
-    def _extract_email_topic(self, prompt, plow):
-        """Quita el 'andamiaje' (verbos, 'correo/borrador', destinatario, estilo, MC) y
-        devuelve el tema restante. Sirve para decidir si hay contenido suficiente."""
-        import re as _re
-        t = " " + (prompt or "") + " "
-        t = _re.sub(r'\b(crea|créa|crear|haz|hazme|redacta|redáctame|prepara|prepárame|genera|escribe|escríbeme|arma|ármame|quiero|necesito|dame)\b', ' ', t, flags=_re.I)
-        t = _re.sub(r'\b(un|una|el|la|los|las|de|del)\b', ' ', t, flags=_re.I)
-        t = _re.sub(r'\b(correo|email|e-mail|mail|borrador|mensaje)\b', ' ', t, flags=_re.I)
-        t = _re.sub(r'\bestilo\s+\w+\b', ' ', t, flags=_re.I)
-        t = _re.sub(r'\b(smartstudent|point|qcore|pos|corporativo)\b', ' ', t, flags=_re.I)
-        t = _re.sub(r'\b(mission\s+control|misi[oó]n\s+control|inbox|casilla|bandeja)\b', ' ', t, flags=_re.I)
-        for c in self._MC_KNOWN_CONTACTS.values():
-            for a in c.get("aliases", []):
-                t = _re.sub(r'\b' + _re.escape(a) + r'\b', ' ', t, flags=_re.I)
-        t = _re.sub(r'\b(a\s+granel)\b', ' ', t, flags=_re.I)
-        t = _re.sub(r'[\w.+-]+@[\w-]+\.[\w.-]+', ' ', t)  # emails
-        # conectores colgantes al inicio
-        t = _re.sub(r'^\s*(para|a|que\s+sea|y\s+que\s+sea|y\s+que|que|sobre|avisando\s+que|avisando|diciendo\s+que|informando\s+que|informando|enviando)\s+', ' ', t, flags=_re.I)
-        t = _re.sub(r'\s+', ' ', t).strip(" ,.;:-")
-        return t
 
-    def _start_guided_email_flow(self, prompt, plow, status, entry):
-        # Detectar contacto conocido para ofrecerlo primero (sin auto-seleccionarlo).
-        detected_key = None
-        for key, c in self._MC_KNOWN_CONTACTS.items():
-            if any(a in plow for a in c.get("aliases", [key])):
-                detected_key = key
-                break
 
-        # ── ONE-SHOT: si ya hay destinatario + tema claro, saltamos las preguntas ──
-        topic = self._extract_email_topic(prompt, plow)
-        detected_style = self._detect_email_style(plow)
-        if detected_key and topic and len(topic.split()) >= 3:
-            c = self._MC_KNOWN_CONTACTS[detected_key]
-            brand_key = detected_style or c.get("brand", "qcore")
-            self._guided_email_active = False
-            self._guided_email_step = 0
-            self._guided_email_data = {
-                "prompt": prompt,
-                "content": prompt,  # el LLM se enfoca en el pedido real
-                "recipient_name": c["name"],
-                "contact_key": detected_key,
-                "to_list": list(c.get("to", [])),
-                "cc_list": list(c.get("cc", [])),
-                "kind": "general-reply",
-                "origin": "direct-email",
-                "brand_key": brand_key,
-            }
-            chat = getattr(self, "_chat_view", None)
-            if chat is not None:
-                try:
-                    last = chat._messages[-1] if getattr(chat, "_messages", None) else None
-                    if not (last and last.get("role") == "user" and last.get("text") == prompt):
-                        chat.add_user(prompt)
-                except Exception:
-                    pass
-            self._finalize_and_seed_email(self._guided_email_data, status)
-            return
 
-        self._guided_email_active = True
-        self._guided_email_step = 1
-        self._guided_email_data = {
-            "prompt": prompt,
-            "content": None,
-            "recipient_name": None,
-            "contact_key": None,
-            "to_list": [],
-            "cc_list": [],
-            "kind": "general-reply",
-            "origin": "direct-email",
-            "brand_key": "qcore",
-            "style_label": None,
-        }
-        self._bubble_status = status
-        self._bubble_entry = entry
 
-        chat = getattr(self, "_chat_view", None)
-        if chat is not None:
-            try:
-                last = chat._messages[-1] if getattr(chat, "_messages", None) else None
-                if not (last and last.get("role") == "user" and last.get("text") == prompt):
-                    chat.add_user(prompt)
-            except Exception:
-                pass
-            chat.add_bot(
-                "Vamos a preparar el borrador para el **Inbox de Mission Control**.\n\n"
-                "**Pregunta 1/3: ¿A quién va dirigido el correo?**"
-            )
-            options = []
-            for key, c in self._MC_KNOWN_CONTACTS.items():
-                dest = ", ".join(c.get("to", [])) or "sin destinatario"
-                label = f"{c['name']}" + (" ⭐" if key == detected_key else "")
-                options.append((f"contact:{key}", label, dest))
-            options.append(("otro", "Otro cliente / destinatario", "Escribe el correo del nuevo cliente o destinatario a continuación"))
-            chat.add_options(options, self._handle_email_option_select)
 
-        try:
-            status.configure(text="Correo · Paso 1: Destinatario", fg=THEME["accent"])
-        except Exception:
-            pass
-        if entry is not None:
-            try:
-                entry.configure(state="normal")
-                entry.focus_set()
-            except Exception:
-                pass
 
-    def _handle_email_option_select(self, option_value):
-        status = getattr(self, "_bubble_status", None)
-        entry = getattr(self, "_bubble_entry", None)
-        self._handle_guided_email_step(option_value, status, entry)
 
-    def _ask_email_content(self, chat, status):
-        self._guided_email_step = 15
-        chat.add_bot("**Pregunta 2/3: ¿De qué se trata el correo?** (escríbelo con tus palabras)")
-        try:
-            status.configure(text="Correo · Paso 2: Contenido", fg=THEME["accent"])
-        except Exception:
-            pass
-
-    def _ask_email_style(self, chat, status):
-        self._guided_email_step = 4
-        chat.add_bot("**Pregunta 3/3: ¿Qué estilo / marca usamos para redactar?**")
-        descs = {
-            "smartstudent": "Plataforma educativa. Tono cercano y profesional (plantilla SmartStudent, azul)",
-            "point": "POS / comercio. Tono cercano y práctico para el dueño del negocio (rosado Point)",
-            "qcore": "Consultora tecnológica. Tono profesional corporativo (morado QCORE)",
-        }
-        suggested = self._guided_email_data.get("brand_key", "qcore")
-        order = [suggested] + [k for k in ("smartstudent", "point", "qcore") if k != suggested]
-        options = []
-        for k in order:
-            b = self._MC_BRANDS.get(k)
-            if not b:
-                continue
-            label = b.get("label", k)
-            if k == suggested:
-                label += " ⭐"
-            options.append((k, label, descs.get(k, "")))
-        chat.add_options(options, self._handle_email_option_select)
-        try:
-            status.configure(text="Correo · Paso 3: Estilo", fg=THEME["accent"])
-        except Exception:
-            pass
-
-    def _handle_guided_email_step(self, prompt, status, entry):
-        chat = getattr(self, "_chat_view", None)
-        if chat is None:
-            return
-        data = self._guided_email_data
-        step = self._guided_email_step
-        plow = (prompt or "").lower().strip()
-
-        if step == 1:
-            # Elegir destinatario.
-            if prompt.startswith("contact:"):
-                key = prompt.split(":", 1)[1]
-                c = self._MC_KNOWN_CONTACTS.get(key)
-                if c:
-                    data["recipient_name"] = c["name"]
-                    data["contact_key"] = key
-                    data["to_list"] = list(c.get("to", []))
-                    data["cc_list"] = list(c.get("cc", []))
-                    data["brand_key"] = c.get("brand", "qcore")
-                    chat.add_user(c["name"])
-                    self._ask_email_content(chat, status)
-                    return
-            if prompt == "otro" or plow == "otro":
-                self._guided_email_step = 2
-                chat.add_bot("Escribe el **correo (o nombre)** del destinatario:")
-                try:
-                    status.configure(text="Correo · Destinatario personalizado", fg=THEME["accent"])
-                except Exception:
-                    pass
-                return
-            # Si escribió algo libre, intentar resolver contacto conocido o usarlo como destinatario.
-            matched = None
-            for key, c in self._MC_KNOWN_CONTACTS.items():
-                if any(a in plow for a in c.get("aliases", [key])):
-                    matched = (key, c)
-                    break
-            if matched:
-                key, c = matched
-                data["recipient_name"] = c["name"]
-                data["contact_key"] = key
-                data["to_list"] = list(c.get("to", []))
-                data["cc_list"] = list(c.get("cc", []))
-                data["brand_key"] = c.get("brand", "qcore")
-                chat.add_user(c["name"])
-            else:
-                self._set_custom_recipient(data, prompt)
-                chat.add_user(prompt)
-            self._ask_email_content(chat, status)
-            return
-
-        if step == 2:
-            # Destinatario personalizado escrito por el usuario.
-            self._set_custom_recipient(data, prompt)
-            chat.add_user(prompt)
-            self._ask_email_content(chat, status)
-            return
-
-        if step == 15:
-            # Contenido / tema del correo.
-            content = (prompt or "").strip()
-            data["content"] = content
-            chat.add_user(content if len(content) <= 120 else content[:117] + "…")
-            self._ask_email_style(chat, status)
-            return
-
-        if step == 4:
-            # Estilo / marca.
-            if prompt in self._MC_BRANDS:
-                brand_key = prompt
-            elif "smart" in plow:
-                brand_key = "smartstudent"
-            elif "point" in plow or "pos" in plow:
-                brand_key = "point"
-            elif "qcore" in plow or "corporativo" in plow:
-                brand_key = "qcore"
-            else:
-                brand_key = data.get("brand_key", "qcore")
-            data["brand_key"] = brand_key
-            data["style_label"] = self._MC_BRANDS.get(brand_key, self._MC_BRANDS["qcore"]).get("label", brand_key)
-            chat.add_user(data["style_label"])
-            self._finalize_and_seed_email(data, status)
-            return
-
-    def _finalize_and_seed_email(self, data, status):
-        """Cierra el flujo y dispara la redacción/siembra del borrador en el Inbox de MC.
-        Los borradores SIEMPRE quedan en el Inbox (kind general-reply / origin direct-email)."""
-        chat = getattr(self, "_chat_view", None)
-        self._guided_email_active = False
-        self._guided_email_step = 0
-        brand_key = data.get("brand_key", "qcore")
-        brand = self._MC_BRANDS.get(brand_key, self._MC_BRANDS["qcore"])
-        data["style_label"] = brand.get("label", brand_key)
-        dest = ", ".join(data.get("to_list") or []) or "(sin destinatario — complétalo en el Inbox)"
-        if chat:
-            chat.add_bot(
-                "Listo, tengo todo. Redactando el borrador para el **Inbox de Mission Control**…\n\n"
-                f"**Para:** {dest}\n"
-                f"**Estilo:** {data.get('style_label')}"
-            )
-            chat.show_typing()
-        try:
-            status.configure(text="Redactando borrador para Mission Control...", fg="#58c7ff")
-        except Exception:
-            pass
-        brief = data.get("content") or data.get("prompt") or ""
-        threading.Thread(
-            target=self._seed_mc_draft_worker,
-            args=(brief, data.get("recipient_name") or "destinatario",
-                  data.get("contact_key") or "contacto", brand,
-                  list(data.get("to_list") or []), list(data.get("cc_list") or []), status,
-                  data.get("kind", "general-reply"), data.get("origin", "direct-email"),
-                  data.get("custom_reference")),
-            daemon=True,
-        ).start()
-
-    def _set_custom_recipient(self, data, text):
-        import re as _re
-        emails = _re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", text or "")
-        if emails:
-            data["to_list"] = emails
-            data["recipient_name"] = emails[0].split("@")[0]
-        else:
-            data["to_list"] = []
-            data["recipient_name"] = (text or "").strip() or "destinatario"
-        data["cc_list"] = []
-        data["contact_key"] = _re.sub(r"[^a-z0-9]+", "-", (data["recipient_name"] or "contacto").lower()).strip("-") or "contacto"
 
     # ============================================================
     # Mi Portafolio — edición directa de archivos locales del proyecto
@@ -7120,518 +5972,11 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
 
     _SMARTSTUDENT_LOGO_URL = "https://smartstudent-web.vercel.app/img/logo4.png"
 
-    def _structured_email_llm_prompt(self, role_desc, recipient_name, prompt, eyebrow_hint, tail_hint):
-        """Prompt común para plantillas con contenido estructurado (SmartStudent / Point)."""
-        return (
-            f"{role_desc}\n"
-            f"Destinatario: {recipient_name}.\n\n"
-            "=== PEDIDO DEL USUARIO (este es el TEMA del correo, respétalo al pie de la letra) ===\n"
-            f"{prompt}\n"
-            "=== FIN DEL PEDIDO ===\n\n"
-            "Redacta el correo SOBRE EXACTAMENTE ese pedido. El asunto, la intro y los items deben "
-            "tratar ese tema concreto y nada más. Si el pedido es puntual (p. ej. avisar que el contrato "
-            "quedó firmado por ambas partes), NO inventes un listado de features ni un pitch de producto: "
-            "escribe solo lo que corresponde a ese mensaje.\n\n"
-            "Devuelve UNICAMENTE un objeto JSON válido (sin texto antes ni después, sin fences) "
-            "con esta forma exacta:\n"
-            '{\n'
-            '  "subject": "asunto breve y claro, sobre el tema del pedido",\n'
-            '  "eyebrow": "ETIQUETA EN MAYÚSCULAS que resuma el tema del pedido",\n'
-            '  "greeting_name": "nombre de pila del destinatario o \"\" si se desconoce",\n'
-            '  "greeting_tail": "remate corto del saludo acorde al tema",\n'
-            '  "intro": "párrafo introductorio de 1-2 frases sobre el tema",\n'
-            '  "items": [ {"title": "título del punto", "body": "descripción (puede usar <strong> y <code>)", "featured": false} ],\n'
-            '  "recommendation": "texto de recomendación final o \"\" si no aplica",\n'
-            '  "closing": "frase de cierre breve"\n'
-            '}\n'
-            f"(Solo como referencia de FORMATO, no de tema: un eyebrow se ve así \"{eyebrow_hint}\" y un "
-            f"remate así \"{tail_hint}\" — pero adáptalos al pedido real.)\n"
-            "Reglas: 'items' es una lista de 1 a 6 puntos; si el pedido no amerita varios puntos, usa 1. "
-            "Marca featured=true solo en un punto si hay uno destacado. No incluyas saludos ni firma dentro "
-            "de los textos: eso lo arma la plantilla. No incluyas HTML completo, solo los campos pedidos. Solo el JSON."
-        )
 
-    def _build_point_email_html(self, data, recipient_name, prompt):
-        """Arma el HTML del correo con la plantilla institucional Point
-        (header magenta, eyebrow rosado, tarjetas numeradas con badge rosado,
-        punto destacado en variante morada, callout morado, firma Jorge Castro · QCORE)."""
-        import html as _html
 
-        def esc(v):
-            return _html.escape((v or "").strip())
 
-        eyebrow = esc(data.get("eyebrow")) or "POINT · COMERCIO"
-        greeting_name = esc(data.get("greeting_name"))
-        greeting_tail = esc(data.get("greeting_tail")) or "acá va tu sistema"
-        intro = esc(data.get("intro")) or "Te escribo con la información de tu sistema Point."
-        closing = esc(data.get("closing")) or "Cualquier duda me escribes y te acompaño. ¡Saludos!"
-        recommendation = (data.get("recommendation") or "").strip()
 
-        items = data.get("items")
-        if not isinstance(items, list) or not items:
-            items = [{"title": "Detalle", "body": esc(prompt) or "Te comparto la información solicitada."}]
 
-        if greeting_name:
-            title = f"Hola {greeting_name} \U0001F44B — {greeting_tail}"
-        else:
-            title = f"\U0001F44B {greeting_tail}"
-
-        cards = []
-        for i, it in enumerate(items, start=1):
-            it = it if isinstance(it, dict) else {}
-            t = esc(it.get("title")) or f"Paso {i}"
-            body = (it.get("body") or "").strip()  # permite <strong>/<code> del LLM
-            featured = bool(it.get("featured"))
-            box_bg = "#f5f3ff" if featured else "#fdf2f8"
-            box_border = "#ddd6fe" if featured else "#fbcfe8"
-            badge_bg = "#8E24AA" if featured else "#D81B60"
-            cards.append(
-                f'''          <tr>
-            <td style="padding:0 40px 12px;">
-              <table width="100%" cellpadding="0" cellspacing="0" style="background:{box_bg};border:1px solid {box_border};border-radius:12px;">
-                <tr>
-                  <td style="padding:18px 20px;">
-                    <table width="100%" cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="width:40px;vertical-align:top;">
-                          <div style="width:32px;height:32px;border-radius:8px;background:{badge_bg};color:#ffffff;font-size:15px;font-weight:800;text-align:center;line-height:32px;">{i}</div>
-                        </td>
-                        <td>
-                          <div style="font-size:15px;font-weight:700;color:#0f172a;">{t}</div>
-                          <div style="font-size:13px;color:#475569;margin-top:6px;line-height:1.6;">{body}</div>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>'''
-            )
-
-        rec_html = ""
-        if recommendation:
-            rec_html = f'''          <tr>
-            <td style="padding:0 40px 24px;">
-              <div style="border-left:3px solid #8E24AA;background:#f8fafc;padding:14px 18px;border-radius:0 8px 8px 0;">
-                <div style="font-size:12px;font-weight:700;color:#8E24AA;text-transform:uppercase;letter-spacing:1px;">Recomendación</div>
-                <div style="font-size:13px;color:#475569;margin-top:4px;line-height:1.6;">{recommendation}</div>
-              </div>
-            </td>
-          </tr>'''
-
-        return f'''<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 0;">
-    <tr>
-      <td align="center">
-        <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,0.08);">
-          <tr>
-            <td style="background:linear-gradient(135deg,#1a0a14 0%,#3d0f2e 50%,#5b1248 100%);padding:0;">
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr><td style="height:4px;background:linear-gradient(90deg,#D81B60,#8E24AA,#D81B60);"></td></tr>
-                <tr>
-                  <td style="padding:32px 40px 24px;">
-                    <div style="font-size:28px;font-weight:900;color:#ffffff;letter-spacing:1px;">Point<span style="color:#D81B60;"> POS</span></div>
-                    <div style="font-size:12px;color:#e9b8d4;margin-top:4px;letter-spacing:2px;text-transform:uppercase;">Punto de venta + inventario · by QCORE</div>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:32px 40px 12px;">
-              <div style="font-size:12px;color:#D81B60;font-weight:700;letter-spacing:2px;text-transform:uppercase;">{eyebrow}</div>
-              <h1 style="margin:8px 0 0;font-size:22px;font-weight:800;color:#0f172a;line-height:1.3;">{title}</h1>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:8px 40px 20px;">
-              <p style="margin:0;font-size:14px;color:#475569;line-height:1.6;">{intro}</p>
-            </td>
-          </tr>
-{chr(10).join(cards)}
-{rec_html}
-          <tr>
-            <td style="padding:0 40px 32px;">
-              <p style="margin:0 0 6px;font-size:14px;color:#475569;line-height:1.6;">{closing}</p>
-              <table cellpadding="0" cellspacing="0" style="margin-top:24px;border-top:1px solid #e2e8f0;padding-top:20px;width:100%;">
-                <tr>
-                  <td style="padding-right:16px;vertical-align:middle;width:72px;">
-                    {self._qcore_logo_badge_html(64, 34)}
-                  </td>
-                  <td style="vertical-align:middle;border-left:2px solid #e2e8f0;padding-left:16px;">
-                    <div style="font-size:14px;font-weight:700;color:#1e293b;">Jorge Castro</div>
-                    <div style="font-size:12px;color:#475569;margin-top:2px;">Account Director · QCORE</div>
-                    <div style="font-size:12px;color:#64748b;margin-top:2px;">Santiago, Chile</div>
-                    <div style="margin-top:4px;line-height:1.4;">
-                      <a href="mailto:jorge.castro@qcorespa.com" style="color:#D81B60;text-decoration:none;font-size:12px;font-weight:500;">jorge.castro@qcorespa.com</a>
-                    </div>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <tr>
-            <td style="background:#f8fafc;padding:20px 40px;text-align:center;">
-              <div style="font-size:10px;color:#94a3b8;line-height:1.6;">Point POS · Enviado por QCORE GROUP TECHNOLOGIES SPA · Santiago, Chile</div>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>'''
-
-    def _qcore_logo_badge_html(self, size=64, font=34):
-        """Badge institucional QCORE (cuadro morado redondeado con la 'Q' blanca).
-        Se usa como logo en las firmas hasta que exista una imagen hospedada."""
-        radius = round(size / 4)
-        return (
-            f'<table cellpadding="0" cellspacing="0" role="presentation" '
-            f'style="width:{size}px;height:{size}px;border-radius:{radius}px;'
-            f'background-color:#4f46e5;background:linear-gradient(135deg,#7b6ef0,#4f46e5);">'
-            f'<tr><td align="center" valign="middle" style="font-size:{font}px;font-weight:800;'
-            f'color:#ffffff;font-family:\'Segoe UI\',Arial,sans-serif;line-height:{size}px;">Q</td></tr>'
-            f'</table>'
-        )
-
-    def _build_qcore_email_html(self, data, recipient_name, prompt):
-        """Envuelve el cuerpo redactado en una tarjeta corporativa QCORE con la
-        firma institucional fija (badge "Q", Jorge Castro · Account Director ·
-        Santiago, Chile · www.qcorespa.com)."""
-        import html as _html
-
-        body_html = (data.get("body_html") or "").strip()
-        if not body_html:
-            safe = _html.escape((prompt or "").strip())
-            body_html = (
-                f'<p style="margin:0 0 12px;font-size:14px;color:#1e293b;line-height:1.6;">Estimado/a {_html.escape(recipient_name)},</p>'
-                f'<p style="margin:0;font-size:14px;color:#475569;line-height:1.6;">{safe}</p>'
-            )
-
-        return f'''<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 0;">
-    <tr>
-      <td align="center">
-        <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,0.08);">
-          <tr><td style="height:4px;background:linear-gradient(90deg,#6c5ce7,#4f46e5,#a29bfe);"></td></tr>
-          <tr>
-            <td style="padding:32px 40px 8px;font-size:14px;color:#1e293b;line-height:1.6;">
-              {body_html}
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:24px 40px 32px;">
-              <p style="margin:0 0 18px;font-size:14px;color:#475569;line-height:1.6;">Saludos Cordiales,</p>
-              <table cellpadding="0" cellspacing="0" style="width:100%;">
-                <tr>
-                  <td style="padding-right:16px;vertical-align:middle;width:72px;">
-                    {self._qcore_logo_badge_html(64, 34)}
-                  </td>
-                  <td style="vertical-align:middle;border-left:2px solid #e2e8f0;padding-left:16px;">
-                    <div style="font-size:16px;font-weight:700;color:#1e293b;">Jorge Castro</div>
-                    <div style="font-size:13px;color:#64748b;margin-top:2px;">Account Director</div>
-                    <div style="font-size:13px;color:#64748b;margin-top:2px;">Santiago, Chile</div>
-                    <div style="margin-top:4px;line-height:1.2;">
-                      <a href="https://www.qcorespa.com" style="color:#4f46e5;text-decoration:none;font-size:13px;font-weight:500;">www.qcorespa.com</a>
-                    </div>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <tr>
-            <td style="background:#f8fafc;padding:20px 40px;text-align:center;">
-              <div style="font-size:10px;color:#94a3b8;line-height:1.6;">Este correo fue enviado por QCORE SPA · Santiago, Chile</div>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>'''
-
-    def _build_smartstudent_email_html(self, data, recipient_name, prompt):
-        """Arma el HTML del correo con la plantilla institucional SmartStudent
-        (header navy, eyebrow azul, tarjetas numeradas con ✓, callout de
-        recomendación, firma de Jorge Castro y footer QCORE)."""
-        import html as _html
-
-        def esc(v):
-            return _html.escape((v or "").strip())
-
-        eyebrow = esc(data.get("eyebrow")) or "ACTUALIZACIÓN PLATAFORMA"
-        greeting_name = esc(data.get("greeting_name"))
-        greeting_tail = esc(data.get("greeting_tail")) or "tu plataforma quedó al día"
-        intro = esc(data.get("intro")) or (
-            "Quería confirmarte que aplicamos las configuraciones que conversamos."
-        )
-        closing = esc(data.get("closing")) or "Cualquier ajuste me avisas. ¡Saludos!"
-        recommendation = (data.get("recommendation") or "").strip()
-
-        items = data.get("items")
-        if not isinstance(items, list) or not items:
-            items = [{"title": "Detalle", "body": esc(prompt) or "Te comparto la actualización solicitada."}]
-
-        if greeting_name:
-            title = f"Hola {greeting_name} \U0001F44B — {greeting_tail}"
-        else:
-            title = f"\U0001F44B {greeting_tail}"
-
-        cards = []
-        for i, it in enumerate(items, start=1):
-            it = it if isinstance(it, dict) else {}
-            t = esc(it.get("title")) or f"Punto {i}"
-            body = (it.get("body") or "").strip()  # permite <strong>/<code> del LLM
-            featured = bool(it.get("featured"))
-            box_bg = "#eff6ff" if featured else "#f8fafc"
-            box_border = "#bfdbfe" if featured else "#e2e8f0"
-            badge_bg = "#2563eb" if featured else "#dcfce7"
-            badge_fg = "#ffffff" if featured else "#16a34a"
-            badge_char = "★" if featured else "✓"
-            title_html = (
-                f'<div style="font-size:15px;font-weight:700;color:#0f172a;">{i} · '
-                f'<span style="color:#2563eb;">{t}</span></div>' if featured
-                else f'<div style="font-size:15px;font-weight:700;color:#0f172a;">{i} · {t}</div>'
-            )
-            cards.append(
-                f'''          <tr>
-            <td style="padding:0 40px 16px;">
-              <table width="100%" cellpadding="0" cellspacing="0" style="background:{box_bg};border:1px solid {box_border};border-radius:12px;">
-                <tr>
-                  <td style="padding:18px 20px;">
-                    <table width="100%" cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="width:36px;vertical-align:top;">
-                          <div style="width:32px;height:32px;border-radius:8px;background:{badge_bg};color:{badge_fg};font-size:16px;font-weight:800;text-align:center;line-height:32px;">{badge_char}</div>
-                        </td>
-                        <td>
-                          {title_html}
-                          <div style="font-size:13px;color:#475569;margin-top:4px;line-height:1.5;">{body}</div>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>'''
-            )
-
-        rec_html = ""
-        if recommendation:
-            rec_html = f'''          <tr>
-            <td style="padding:0 40px 24px;">
-              <div style="border-left:3px solid #2563eb;background:#f8fafc;padding:14px 18px;border-radius:0 8px 8px 0;">
-                <div style="font-size:12px;font-weight:700;color:#2563eb;text-transform:uppercase;letter-spacing:1px;">Recomendación</div>
-                <div style="font-size:13px;color:#475569;margin-top:4px;line-height:1.6;">{recommendation}</div>
-              </div>
-            </td>
-          </tr>'''
-
-        logo = self._SMARTSTUDENT_LOGO_URL
-        return f'''<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 0;">
-    <tr>
-      <td align="center">
-        <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,0.08);">
-          <tr>
-            <td style="background:linear-gradient(135deg,#060d1a 0%,#0d1b2e 50%,#112240 100%);padding:0;">
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr><td style="height:4px;background:linear-gradient(90deg,#2563eb,#3B82F6,#4ADE80);"></td></tr>
-                <tr>
-                  <td style="padding:32px 40px 24px;">
-                    <table cellpadding="0" cellspacing="0" width="100%">
-                      <tr>
-                        <td style="vertical-align:middle;width:88px;padding-right:10px;">
-                          <img src="{logo}" alt="SmartStudent" style="width:80px;height:80px;border-radius:16px;object-fit:contain;display:block;" />
-                        </td>
-                        <td>
-                          <div style="font-size:28px;font-weight:900;color:#ffffff;letter-spacing:1px;">Smart<span style="color:#2563eb;">Student</span></div>
-                          <div style="font-size:12px;color:#94a3b8;margin-top:4px;letter-spacing:2px;text-transform:uppercase;">Gestión Escolar con Inteligencia Artificial</div>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:32px 40px 12px;">
-              <div style="font-size:12px;color:#2563eb;font-weight:700;letter-spacing:2px;text-transform:uppercase;">{eyebrow}</div>
-              <h1 style="margin:8px 0 0;font-size:22px;font-weight:800;color:#0f172a;line-height:1.3;">{title}</h1>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:8px 40px 20px;">
-              <p style="margin:0;font-size:14px;color:#475569;line-height:1.6;">{intro}</p>
-            </td>
-          </tr>
-{chr(10).join(cards)}
-{rec_html}
-          <tr>
-            <td style="padding:0 40px 32px;">
-              <p style="margin:0 0 6px;font-size:14px;color:#475569;line-height:1.6;">{closing}</p>
-              <table cellpadding="0" cellspacing="0" style="margin-top:24px;border-top:1px solid #e2e8f0;padding-top:20px;width:100%;">
-                <tr>
-                  <td style="padding-right:14px;vertical-align:top;width:90px;">
-                    <img src="{logo}" alt="SmartStudent" style="width:80px;height:80px;border-radius:20px;object-fit:contain;display:block;" />
-                  </td>
-                  <td style="vertical-align:top;">
-                    <div style="font-size:14px;font-weight:700;color:#1e293b;">Jorge Castro</div>
-                    <div style="font-size:12px;color:#475569;margin-top:2px;">Account Director · SmartStudent</div>
-                    <div style="font-size:12px;color:#64748b;margin-top:2px;">Santiago, Chile</div>
-                    <div style="margin-top:4px;line-height:1.2;">
-                      <a href="https://www.smartstudent.cl" style="color:#2563eb;text-decoration:none;font-size:12px;font-weight:500;">www.smartstudent.cl</a>
-                    </div>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <tr>
-            <td style="background:#f8fafc;padding:20px 40px;text-align:center;">
-              <div style="font-size:10px;color:#94a3b8;line-height:1.6;">Este correo fue enviado por QCORE SPA · Santiago, Chile</div>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>'''
-
-    def _seed_mc_draft_worker(self, prompt, recipient_name, contact_key, brand, to_list, cc_list, status,
-                              kind="general-reply", origin="direct-email", custom_reference=None):
-        import datetime as _dt
-        import json as _json
-        template = brand.get("template")
-        try:
-            if template == "smartstudent":
-                llm_prompt = self._structured_email_llm_prompt(
-                    "Eres redactor de correos de SmartStudent (plataforma educativa SaaS). "
-                    "Tono cercano, claro y profesional, en español de Chile.",
-                    recipient_name, prompt,
-                    "ACTUALIZACIÓN PLATAFORMA · COMBAS", "tu plataforma quedó al día",
-                )
-                raw = self._llm_structured(llm_prompt, expect_json=True)
-                data = self._extract_json(raw) or {}
-                subject = (data.get("subject") or "").strip() or f"Actualización SmartStudent · {recipient_name}"
-                html = self._build_smartstudent_email_html(data, recipient_name, prompt)
-            elif template == "point":
-                llm_prompt = self._structured_email_llm_prompt(
-                    "Eres redactor de correos de Point (sistema POS con control de inventario FEFO para comercios). "
-                    "Tono cercano, claro y práctico, orientado al dueño del negocio, en español de Chile.",
-                    recipient_name, prompt,
-                    "ENTREGA DE SOFTWARE · TENTACIÓN A GRANEL", "acá va tu sistema listo",
-                )
-                raw = self._llm_structured(llm_prompt, expect_json=True)
-                data = self._extract_json(raw) or {}
-                subject = (data.get("subject") or "").strip() or f"Point · {recipient_name}"
-                html = self._build_point_email_html(data, recipient_name, prompt)
-            else:
-                llm_prompt = (
-                    f"Eres redactor de correos profesionales. {brand['guidance']}\n"
-                    f"Destinatario: {recipient_name}.\n"
-                    f"Pedido del usuario: \"{prompt}\".\n\n"
-                    "Redacta SOLO el cuerpo del correo en español (saludo inicial + párrafos). "
-                    "NO incluyas despedida, ni firma, ni datos de contacto: eso se añade automáticamente. "
-                    "Devuelve UNICAMENTE un objeto JSON válido, sin texto antes ni después y sin fences, "
-                    "con esta forma exacta:\n"
-                    '{"subject": "asunto breve", "body_html": "<p>saludo</p><p>párrafos del cuerpo en HTML</p>"}\n'
-                    "El body_html debe usar etiquetas <p> con estilos inline simples y profesionales. "
-                    "No incluyas comentarios ni explicaciones, solo el JSON."
-                )
-                raw = self._llm_structured(llm_prompt, expect_json=True)
-                data = self._extract_json(raw) or {}
-                subject = (data.get("subject") or "").strip() or f"Mensaje para {recipient_name}"
-                html = self._build_qcore_email_html(data, recipient_name, prompt)
-
-            now = _dt.datetime.now(_dt.timezone.utc)
-            stamp = now.strftime("%Y%m%d%H%M%S")
-            iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            seed_id = f"seed-claudy-{contact_key}-{stamp}"
-            draft = {
-                "id": seed_id,
-                "kind": kind,
-                "relatedMessageId": f"{seed_id}-msg",
-                "createdAt": iso,
-                "status": "pending-approval",
-                "origin": origin,
-                "reason": (custom_reference.strip()[:200] if custom_reference and custom_reference.strip()
-                           else f"Borrador creado por Claudy a partir de: {prompt.strip()[:200]}"),
-                "from": brand["from"],
-                "to": to_list,
-                "cc": cc_list,
-                "replyTo": brand["replyTo"],
-                "subject": subject,
-                "html": html,
-            }
-            if brand.get("productId"):
-                draft["productId"] = brand["productId"]
-
-            path = self._MC_SEEDED_DRAFTS_PATH
-            existing = []
-            try:
-                if os.path.exists(path):
-                    with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        loaded = _json.load(f)
-                        if isinstance(loaded, list):
-                            existing = loaded
-            except Exception:
-                existing = []
-            existing.append(draft)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                _json.dump(existing, f, ensure_ascii=False, indent=2)
-
-            dest = ", ".join(to_list) if to_list else "(sin destinatario — complétalo en el Inbox)"
-            def _ok():
-                ch = getattr(self, "_chat_view", None)
-                if ch:
-                    ch.hide_typing()
-                    ch.add_system(
-                        f"✅ Borrador creado en el **Inbox de Mission Control**.\n\n"
-                        f"**Para:** {dest}\n**Asunto:** {subject}\n\n"
-                        f"Aparecerá en *Borradores pendientes* en ~1 segundo si Mission Control está abierto."
-                    )
-                try:
-                    status.configure(text="Borrador sembrado en Mission Control", fg="#00ff99")
-                except Exception:
-                    pass
-            self.after(0, _ok)
-        except Exception as e:
-            def _err(ex=e):
-                ch = getattr(self, "_chat_view", None)
-                if ch:
-                    ch.hide_typing()
-                    ch.add_system(f"❌ No pude crear el borrador en Mission Control: {ex}")
-                try:
-                    status.configure(text=f"Error: {ex}", fg="#ff5555")
-                except Exception:
-                    pass
-            self.after(0, _err)
 
     # ============================================================
     # Guided Report Flow (Asistente de Informes Interactivo)
@@ -7643,6 +5988,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         self._guided_report_data = {
             "topic": self._guided_report_topic,
             "depth": None,
+            "research": None,
             "images": None,
             "references": None,
             "style": None,
@@ -7651,20 +5997,18 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         self._bubble_status = status
         self._bubble_entry = entry
 
-        # Clear visible chat and show starting message
+        # El flujo de informe se AÑADE al final de la conversación actual (no
+        # borramos el chat): así el usuario conserva el contexto y el cuestionario
+        # empuja hacia abajo, con el auto-scroll llevándolo al final.
         chat = getattr(self, "_chat_view", None)
         if chat is not None:
-            try:
-                chat.clear()
-            except Exception:
-                pass
             chat.add_user(f"Quiero un informe sobre: {self._guided_report_topic}")
             
             chat.add_bot(
                 f"Perfecto, vamos a estructurar un gran informe sobre:\n"
                 f"**{self._guided_report_topic}**\n\n"
                 f"Por defecto se creará en formato **DOCX** dentro de tu carpeta de documentos.\n\n"
-                f"**Pregunta 1/5: ¿Qué alcance y profundidad deseas para el informe?**"
+                f"**Pregunta 1/6: ¿Qué alcance y profundidad deseas para el informe?**"
             )
             options = [
                 ("1", "Resumen Ejecutivo", "Una síntesis concisa, al grano y directa al núcleo de la información"),
@@ -7713,10 +6057,44 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 chat.add_user(prompt)
                 
             self._guided_report_data["depth"] = ans
-            
-            # Go to step 2
+
+            # Go to step 2: modo de investigación
             self._guided_report_step = 2
-            chat.add_bot("**Pregunta 2/5: ¿Deseas incluir recursos visuales o imágenes?**")
+            chat.add_bot("**Pregunta 2/6: ¿Cómo quieres que investigue el tema?**")
+            options = [
+                ("1", "Buscar en internet", "Búsqueda web estándar: leo fuentes actuales y redacto con datos reales"),
+                ("2", "Respuesta general", "Sin internet: redacto solo con mi conocimiento general"),
+                ("3", "Deep Research", "Investigación profunda: analizo el doble de fuentes web para máxima precisión")
+            ]
+            chat.add_options(options, self._handle_option_select)
+            status.configure(text="Paso 2: Investigación", fg=THEME["accent"])
+
+        elif step == 2:
+            # Parse research-mode answer
+            title_map = {
+                "1": "Buscar en internet",
+                "2": "Respuesta general",
+                "3": "Deep Research"
+            }
+            if prompt in title_map:
+                ans = title_map[prompt]
+                chat.add_user(ans)
+            else:
+                if "1" in plow or "internet" in plow or "web" in plow or "buscar" in plow:
+                    ans = "Buscar en internet"
+                elif "2" in plow or "general" in plow or "conocimiento" in plow:
+                    ans = "Respuesta general"
+                elif "3" in plow or "deep" in plow or "profund" in plow:
+                    ans = "Deep Research"
+                else:
+                    ans = prompt
+                chat.add_user(prompt)
+
+            self._guided_report_data["research"] = ans
+
+            # Go to step 3: imágenes
+            self._guided_report_step = 3
+            chat.add_bot("**Pregunta 3/6: ¿Deseas incluir recursos visuales o imágenes?**")
             options = [
                 ("1", "Sin imágenes", "Un documento puramente textual, limpio y minimalista"),
                 ("2", "Pocas imágenes", "Un par de imágenes clave para ilustrar conceptos fundamentales"),
@@ -7724,9 +6102,9 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 ("4", "Carpeta de recursos aparte", "Yo busco y descargo las imágenes y te las entrego organizadas en una carpeta aparte")
             ]
             chat.add_options(options, self._handle_option_select)
-            status.configure(text="Paso 2: Imágenes", fg=THEME["accent"])
-            
-        elif step == 2:
+            status.configure(text="Paso 3: Imágenes", fg=THEME["accent"])
+
+        elif step == 3:
             # Parse images answer
             title_map = {
                 "1": "Sin imágenes",
@@ -7751,10 +6129,10 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 chat.add_user(prompt)
                 
             self._guided_report_data["images"] = ans
-            
-            # Go to step 3
-            self._guided_report_step = 3
-            chat.add_bot("**Pregunta 3/5: ¿Cómo prefieres el manejo de fuentes y referencias?**")
+
+            # Go to step 4
+            self._guided_report_step = 4
+            chat.add_bot("**Pregunta 4/6: ¿Cómo prefieres el manejo de fuentes y referencias?**")
             options = [
                 ("1", "Sin citas", "Un reporte auto-explicativo sin referencias a pie de página ni bibliografía"),
                 ("2", "Con referencias al final", "Una lista ordenada de fuentes y enlaces de consulta al final del documento"),
@@ -7762,9 +6140,9 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 ("4", "Citas con formato IEEE", "Citas numeradas entre corchetes, ideales para informes técnicos o de ingeniería")
             ]
             chat.add_options(options, self._handle_option_select)
-            status.configure(text="Paso 3: Referencias", fg=THEME["accent"])
-            
-        elif step == 3:
+            status.configure(text="Paso 4: Referencias", fg=THEME["accent"])
+
+        elif step == 4:
             # Parse references answer
             title_map = {
                 "1": "Sin citas",
@@ -7789,19 +6167,19 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 chat.add_user(prompt)
                 
             self._guided_report_data["references"] = ans
-            
-            # Go to step 4
-            self._guided_report_step = 4
-            chat.add_bot("**Pregunta 4/5: ¿Qué tono y estilo de maquetación deseas aplicar?**")
+
+            # Go to step 5
+            self._guided_report_step = 5
+            chat.add_bot("**Pregunta 5/6: ¿Qué tono y estilo de maquetación deseas aplicar?**")
             options = [
                 ("1", "Profesional Académico", "Texto formal, justificado, interlineado estándar y estructura sobria"),
                 ("2", "Corporativo Elegante", "Con portada formal, índice interactivo, fuentes modernas y justificación limpia"),
                 ("3", "Casual Creativo", "Un tono más cercano, diseño dinámico y enfoque de lectura ágil")
             ]
             chat.add_options(options, self._handle_option_select)
-            status.configure(text="Paso 4: Estilo", fg=THEME["accent"])
-            
-        elif step == 4:
+            status.configure(text="Paso 5: Estilo", fg=THEME["accent"])
+
+        elif step == 5:
             # Parse style answer
             title_map = {
                 "1": "Profesional Académico",
@@ -7823,18 +6201,18 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 chat.add_user(prompt)
                 
             self._guided_report_data["style"] = ans
-            
-            # Go to step 5
-            self._guided_report_step = 5
-            chat.add_bot("**Pregunta 5/5: ¿En qué idioma deseas que redacte el informe?**")
+
+            # Go to step 6
+            self._guided_report_step = 6
+            chat.add_bot("**Pregunta 6/6: ¿En qué idioma deseas que redacte el informe?**")
             options = [
                 ("1", "Español", "Redacción directa, natural y con ortografía impecable en español"),
                 ("2", "Inglés", "Redacción fluida, técnica y profesional en inglés")
             ]
             chat.add_options(options, self._handle_option_select)
-            status.configure(text="Paso 5: Idioma", fg=THEME["accent"])
-            
-        elif step == 5:
+            status.configure(text="Paso 6: Idioma", fg=THEME["accent"])
+
+        elif step == 6:
             # Parse language answer
             title_map = {
                 "1": "Español",
@@ -7866,7 +6244,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 images=self._guided_report_data['images'],
                 references=self._guided_report_data['references'],
                 style=self._guided_report_data['style'],
-                language=self._guided_report_data['language']
+                language=self._guided_report_data['language'],
+                research=self._guided_report_data.get('research')
             )
             status.configure(text="Investigando y redactando...", fg=THEME["accent"])
 
@@ -7888,6 +6267,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                 try:
                     topic = rdata.get("topic", "Tema General")
                     depth = rdata.get("depth", "Extenso y actualizado")
+                    research_pref = rdata.get("research") or "Buscar en internet"
                     images_pref = rdata.get("images", "No")
                     references = rdata.get("references", "Sí, con citas APA")
                     style = rdata.get("style", "Profesional justificado con portada e índice")
@@ -7897,21 +6277,36 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                     if self._is_cancelled():
                         self._stop_milestone_progress()
                         return
-                    self._report_progress(10, "Investigando en internet", status)
+                    # Modo de investigación elegido en el cuestionario:
+                    #  - "Respuesta general": sin internet, solo conocimiento del modelo.
+                    #  - "Buscar en internet": búsqueda estándar (4 fuentes).
+                    #  - "Deep Research": investigación profunda (8 fuentes).
+                    _rp = (research_pref or "").lower()
+                    _skip_web = "general" in _rp or "conocimiento" in _rp
+                    _deep_web = "deep" in _rp or "profund" in _rp
+                    _max_pages = 8 if _deep_web else 4
 
                     web_context = ""
                     web_sources = []
-                    try:
-                        _seen = {"n": 0}
-                        def _on_src(u):
-                            _seen["n"] += 1
-                            # 10% → 30% repartido entre las páginas leídas (máx ~4).
-                            pct = min(30, 10 + _seen["n"] * 5)
-                            self._report_progress(pct, f"Leyendo fuente {_seen['n']}", status)
-                        web_context, web_sources = self._gather_web_context(
-                            topic, max_pages=4, on_status=_on_src)
-                    except Exception:
-                        web_context, web_sources = "", []
+                    if _skip_web:
+                        self._report_progress(10, "Preparando redacción (sin internet)", status)
+                    else:
+                        self._report_progress(
+                            10,
+                            "Investigación profunda en internet" if _deep_web else "Investigando en internet",
+                            status)
+                        try:
+                            _seen = {"n": 0}
+                            def _on_src(u):
+                                _seen["n"] += 1
+                                # 10% → 30% repartido entre las páginas leídas.
+                                _step_pct = max(2, int(20 / _max_pages))
+                                pct = min(30, 10 + _seen["n"] * _step_pct)
+                                self._report_progress(pct, f"Leyendo fuente {_seen['n']}", status)
+                            web_context, web_sources = self._gather_web_context(
+                                topic, max_pages=_max_pages, on_status=_on_src)
+                        except Exception:
+                            web_context, web_sources = "", []
 
                     # Load professional formatting rules from skill file
                     _skill_rules = ""
@@ -7948,9 +6343,35 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                     else:  # "Actualizado al día" u otros
                         min_words = 2000
 
-                    # Directiva de citas según lo elegido por el usuario.
+                    # Directiva de citas según lo elegido por el usuario, en el
+                    # MISMO idioma del informe: si el informe es en inglés y las
+                    # instrucciones van en español (con '## Referencias' literal),
+                    # el modelo mezcla idiomas y deja encabezados en español.
+                    _is_en = "ingl" in (language or "").lower() or "english" in (language or "").lower()
                     _rl = (references or "").lower()
-                    if "apa" in _rl:
+                    if _is_en:
+                        _refs_h = "## References"
+                        if "apa" in _rl:
+                            citation_directive = (
+                                "APA CITATIONS (MANDATORY): insert in-text citations as (Author/Organization, year) "
+                                f"whenever you use data from a source. The final '{_refs_h}' section must list each "
+                                "source in APA 7 format: Author/Organization. (Year). *Title*. Retrieved from URL. "
+                                "Use the real URLs from the sources block; if the author is unknown, use the site name."
+                            )
+                        elif "ieee" in _rl:
+                            citation_directive = (
+                                "IEEE CITATIONS (MANDATORY): number references in square brackets [1], [2] in the text "
+                                f"and list them at the end under '{_refs_h}' as: [n] Author, \"Title,\" Site, Year. URL. "
+                                "Use the real URLs from the sources block."
+                            )
+                        elif "final" in _rl:
+                            citation_directive = (
+                                f"Include a '{_refs_h}' section at the end listing the sources with their real URLs. "
+                                "No in-text citations needed."
+                            )
+                        else:  # "Sin citas"
+                            citation_directive = "Do not include a references section or citations."
+                    elif "apa" in _rl:
                         citation_directive = (
                             "FORMATO DE CITAS APA (OBLIGATORIO): inserta citas en el texto con el formato "
                             "(Autor/Organización, año) cuando uses un dato de una fuente. La sección final "
@@ -7974,16 +6395,30 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
 
                     # Build a web-evidence block from the scraped sources so the
                     # LLM redacts from REAL current data, not only its memory.
+                    # También en el idioma del informe para no inducir español.
                     if web_context:
                         _src_list = "\n".join(
                             f"[{i+1}] {s['title']} — {s['url']}"
                             for i, s in enumerate(web_sources)
                         )
+                        if _is_en:
+                            web_block = (
+                                f"REAL, CURRENT INFORMATION GATHERED FROM THE INTERNET (use it as the factual base; "
+                                f"prioritize this data over your internal memory and cite sources by number [n]):\n\n"
+                                f"{web_context}\n\n"
+                                f"SOURCES AVAILABLE FOR REFERENCES:\n{_src_list}\n\n"
+                            )
+                        else:
+                            web_block = (
+                                f"INFORMACION REAL Y ACTUAL RECOPILADA DE INTERNET (úsala como base factual; "
+                                f"prioriza estos datos sobre tu memoria interna y cita las fuentes por su número [n]):\n\n"
+                                f"{web_context}\n\n"
+                                f"FUENTES DISPONIBLES PARA REFERENCIAS:\n{_src_list}\n\n"
+                            )
+                    elif _is_en:
                         web_block = (
-                            f"INFORMACION REAL Y ACTUAL RECOPILADA DE INTERNET (úsala como base factual; "
-                            f"prioriza estos datos sobre tu memoria interna y cita las fuentes por su número [n]):\n\n"
-                            f"{web_context}\n\n"
-                            f"FUENTES DISPONIBLES PARA REFERENCIAS:\n{_src_list}\n\n"
+                            "NOTE: No internet information could be gathered; write from your own knowledge "
+                            "but avoid inventing specific figures or dates you cannot back up.\n\n"
                         )
                     else:
                         web_block = (
@@ -8000,6 +6435,16 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                         f"{citation_directive}\n\n"
                         f"DIRECTRICES DE FORMATO PROFESIONAL:\n{_skill_rules}\n"
                     )
+                    if _is_en:
+                        # Las reglas del skill están redactadas en español y citan
+                        # encabezados como '## Conclusiones'. Para informes en inglés,
+                        # esta nota manda: aplicar el FORMATO pero todo en inglés.
+                        common_ctx += (
+                            "\nCRITICAL LANGUAGE OVERRIDE: The report language is ENGLISH. "
+                            "The formatting guidelines above may be written in Spanish — apply their FORMAT "
+                            "(headings hierarchy, tables, bold) but write EVERY heading and ALL content in English "
+                            "(e.g. '## Conclusions', '## References' — never '## Conclusiones' or '## Referencias').\n"
+                        )
                     raw_content = self._write_report_by_sections(
                         topic=topic, depth=depth, style=style, language=language,
                         common_ctx=common_ctx, web_sources=web_sources,
@@ -8015,15 +6460,26 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                     # Strip any accidental slash commands from the LLM response
                     raw_content = _re.sub(r'^/\S+.*$', '', raw_content, flags=_re.MULTILINE).strip()
                     if not raw_content or len(raw_content) < 100:
-                        raw_content = (
-                            f"# Informe: {topic}\n\n"
-                            f"## Introducción\n"
-                            f"Este informe presenta información sobre {topic}.\n\n"
-                            f"## Desarrollo\n"
-                            f"El tema de {topic} abarca múltiples aspectos relevantes para su comprensión.\n\n"
-                            f"## Conclusiones\n"
-                            f"En conclusión, {topic} es un tema de gran importancia.\n"
-                        )
+                        if _is_en:
+                            raw_content = (
+                                f"# Report: {topic}\n\n"
+                                f"## Introduction\n"
+                                f"This report presents information about {topic}.\n\n"
+                                f"## Development\n"
+                                f"The topic of {topic} covers multiple aspects relevant to its understanding.\n\n"
+                                f"## Conclusions\n"
+                                f"In conclusion, {topic} is a topic of great importance.\n"
+                            )
+                        else:
+                            raw_content = (
+                                f"# Informe: {topic}\n\n"
+                                f"## Introducción\n"
+                                f"Este informe presenta información sobre {topic}.\n\n"
+                                f"## Desarrollo\n"
+                                f"El tema de {topic} abarca múltiples aspectos relevantes para su comprensión.\n\n"
+                                f"## Conclusiones\n"
+                                f"En conclusión, {topic} es un tema de gran importancia.\n"
+                            )
 
                     # ── Step 2: Optionally download images ──
                     # Queremos imágenes salvo que el usuario haya elegido "Sin imágenes".
@@ -8031,7 +6487,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
                     _ip = (images_pref or "").lower()
                     wants_images = bool(_ip) and not ("sin imágenes" in _ip or "sin imagenes" in _ip or _ip.strip() == "no")
                     if wants_images:
-                        max_imgs = 5 if "muchas" in _ip else 3
+                        max_imgs = 8 if "muchas" in _ip else 3
                         self._report_progress(75, "Buscando imágenes", status)
                         try:
                             image_paths = self._download_report_images(topic, max_images=max_imgs)
@@ -8189,248 +6645,17 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     # ALARMAS  ─  motor completo
     # ══════════════════════════════════════════════════════════════════
-    def _alarms_path(self):
-        p = os.path.join(os.path.expanduser("~"), ".claudy", "alarms.json")
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        return p
 
-    def _load_alarms(self):
-        try:
-            with open(self._alarms_path(), "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
 
-    def _save_alarms(self, alarms):
-        try:
-            with open(self._alarms_path(), "w", encoding="utf-8") as f:
-                json.dump(alarms, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
 
-    def _parse_alarm_time(self, text):
-        """Parse Spanish natural language time from text.
-        Returns (fire_ts, label) or (None, None) on failure.
-        Examples: 'en 30 minutos', 'a las 15:30', 'mañana a las 9', '2 horas'.
-        """
-        import re as _re
-        import time as _time
-        now = _time.time()
-        tl = text.lower()
 
-        # en N minutos / en N horas / en N segundos
-        m = _re.search(r'en\s+(\d+)\s*(minuto|minutos|min|hora|horas|h|segundo|segundos|seg)', tl)
-        if m:
-            qty = int(m.group(1))
-            unit = m.group(2)
-            if unit.startswith("s"):
-                delta = qty
-            elif unit.startswith("m"):
-                delta = qty * 60
-            else:
-                delta = qty * 3600
-            label = _re.sub(r'(/alarma|alarma\s*(para|en|a\s*las)?)', '', tl, flags=_re.IGNORECASE).strip()
-            return now + delta, label or text
 
-        # a las HH:MM  o  a las H (am/pm)
-        m = _re.search(r'a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', tl)
-        if m:
-            import datetime as _dt
-            h = int(m.group(1))
-            mins = int(m.group(2)) if m.group(2) else 0
-            ampm = (m.group(3) or "").lower()
-            if ampm == "pm" and h < 12:
-                h += 12
-            elif ampm == "am" and h == 12:
-                h = 0
-            target = _dt.datetime.now().replace(hour=h, minute=mins, second=0, microsecond=0)
-            if target.timestamp() <= now:
-                target += _dt.timedelta(days=1)  # next day if already past
-            label = _re.sub(r'(/alarma|alarma\s*(para|en|a\s*las?)?)', '', tl, flags=_re.IGNORECASE).strip()
-            label = _re.sub(r'a\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?', '', label).strip(" ,-")
-            return target.timestamp(), label or f"Alarma {h:02d}:{mins:02d}"
 
-        # mañana a las HH:MM
-        m = _re.search(r'mañana\s+a\s+las?\s+(\d{1,2})(?::(\d{2}))?', tl)
-        if m:
-            import datetime as _dt
-            h = int(m.group(1))
-            mins = int(m.group(2)) if m.group(2) else 0
-            target = _dt.datetime.now().replace(hour=h, minute=mins, second=0, microsecond=0)
-            target += _dt.timedelta(days=1)
-            label = _re.sub(r'(/alarma|alarma\s*(para|mañana)?|mañana\s+a\s+las?\s+\d+(?::\d+)?)', '', tl).strip(" ,-")
-            return target.timestamp(), label or f"Alarma mañana {h:02d}:{mins:02d}"
 
-        return None, None
 
-    def _alarm_set(self, text):
-        """Create and schedule an alarm from natural language text."""
-        import time as _time
-        fire_ts, label = self._parse_alarm_time(text)
-        if fire_ts is None:
-            return (
-                "⏰ No entendí la hora, Felipe. Prueba con:\n"
-                "• \"en 30 minutos\"\n"
-                "• \"en 2 horas\"\n"
-                "• \"a las 15:30\"\n"
-                "• \"mañana a las 9\""
-            )
-        alarms = self._load_alarms()
-        alarm_id = str(int(_time.time() * 1000))[-6:]
-        label = label or "Alarma"
-        alarms.append({"id": alarm_id, "fire": fire_ts, "label": label, "created": _time.time()})
-        self._save_alarms(alarms)
-        self._schedule_alarm(alarm_id, fire_ts, label)
 
-        import datetime as _dt
-        dt = _dt.datetime.fromtimestamp(fire_ts)
-        secs = fire_ts - _time.time()
-        if secs < 3600:
-            when = f"en {int(secs//60)} min {int(secs%60)} seg"
-        else:
-            when = dt.strftime("el %d/%m a las %H:%M")
-        return f"⏰ Alarma #{alarm_id} configurada — {when}\n📌 {label}"
 
-    def _schedule_alarm(self, alarm_id, fire_ts, label):
-        """Spawn a background thread that fires the alarm at fire_ts."""
-        import time as _time
-        import threading as _th
 
-        def _waiter():
-            delay = fire_ts - _time.time()
-            if delay > 0:
-                _time.sleep(delay)
-            # Fire! — update alarm to done
-            alarms = self._load_alarms()
-            alarms = [a for a in alarms if a.get("id") != alarm_id]
-            self._save_alarms(alarms)
-            # Notify in UI thread
-            self.after(0, lambda: self._fire_alarm_notify(label))
-
-        t = _th.Thread(target=_waiter, daemon=True, name=f"alarm-{alarm_id}")
-        t.start()
-
-    def _fire_alarm_notify(self, label):
-        """Visual + audio alarm notification."""
-        msg = f"⏰ ¡ALARMA, Felipe!\n{label}"
-        self.show_pet_speech_bubble(msg, duration=30000)
-        chat = getattr(self, "_chat_view", None)
-        if chat:
-            chat.add_bot(msg)
-        try:
-            import winsound
-            for _ in range(3):
-                winsound.Beep(1000, 400)
-        except Exception:
-            pass
-        try:
-            self._notify("⏰ Claudy", label)
-        except Exception:
-            pass
-
-    def _alarm_list(self):
-        import time as _time
-        import datetime as _dt
-        alarms = self._load_alarms()
-        if not alarms:
-            return "No tienes alarmas pendientes, Felipe.\nUsa: /alarma en 30 minutos [etiqueta]"
-        lines = ["⏰ Alarmas pendientes:"]
-        for a in sorted(alarms, key=lambda x: x["fire"]):
-            dt = _dt.datetime.fromtimestamp(a["fire"])
-            secs = a["fire"] - _time.time()
-            if secs < 0:
-                remain = "(pasada)"
-            elif secs < 3600:
-                remain = f"en {int(secs//60)} min"
-            else:
-                remain = dt.strftime("%d/%m %H:%M")
-            lines.append(f"  #{a['id']} — {remain} — {a.get('label','')}")
-        lines.append("\nUsa /alarma del <id> para borrar.")
-        return "\n".join(lines)
-
-    def _alarm_delete(self, alarm_id):
-        alarms = self._load_alarms()
-        before = len(alarms)
-        alarms = [a for a in alarms if a.get("id") != alarm_id]
-        self._save_alarms(alarms)
-        if len(alarms) < before:
-            return f"✅ Alarma #{alarm_id} eliminada."
-        return f"⚠️ No encontré la alarma #{alarm_id}."
-
-    def _alarm_delete_all(self):
-        """Delete ALL pending alarms."""
-        alarms = self._load_alarms()
-        count = len(alarms)
-        if count == 0:
-            return "No tienes alarmas pendientes, Felipe."
-        self._save_alarms([])
-        self._alarm_badge_hide()
-        return f"✅ Eliminé todas las alarmas ({count} en total)."
-
-    def _alarm_delete_by_text(self, text):
-        """Delete an alarm matching a time (HH:MM) or label keyword in the text."""
-        import re as _re
-        import datetime as _dt
-        import time as _t
-        alarms = self._load_alarms()
-        if not alarms:
-            return "No tienes alarmas pendientes, Felipe."
-
-        tl = text.lower()
-
-        # Try to match HH:MM or H.MM or H:MM from the text
-        m = _re.search(r'(\d{1,2})[.:h](\d{2})', tl)
-        if m:
-            h, mins = int(m.group(1)), int(m.group(2))
-            # Find alarm whose fire time matches hour+minute
-            matched = []
-            for a in alarms:
-                dt = _dt.datetime.fromtimestamp(a["fire"])
-                if dt.hour == h and dt.minute == mins:
-                    matched.append(a)
-            if matched:
-                ids = [a["id"] for a in matched]
-                remaining = [a for a in alarms if a["id"] not in ids]
-                self._save_alarms(remaining)
-                labels = ", ".join(a.get("label","") or f"#{a['id']}" for a in matched)
-                return f"✅ Alarma(s) de las {h:02d}:{mins:02d} eliminada(s): {labels}"
-
-        # Try to match by label keyword (any word > 3 chars from text that matches label)
-        noise = {"alarma", "borra", "elimina", "cancela", "quita", "la", "el", "de", "las",
-                 "eliminar", "borrar", "cancelar", "quitar", "que", "esta", "ese", "esa"}
-        words = [w for w in _re.split(r'\W+', tl) if len(w) > 3 and w not in noise]
-        if words:
-            matched = []
-            for a in alarms:
-                label_low = (a.get("label") or "").lower()
-                if any(w in label_low for w in words):
-                    matched.append(a)
-            if matched:
-                ids = [a["id"] for a in matched]
-                remaining = [a for a in alarms if a["id"] not in ids]
-                self._save_alarms(remaining)
-                labels = ", ".join(a.get("label","") or f"#{a['id']}" for a in matched)
-                return f"✅ Alarma(s) eliminada(s): {labels}"
-
-        # Last resort: show list and ask for ID
-        lines = ["⚠️ No encontré qué alarma borrar. Estas son tus alarmas pendientes:"]
-        for a in sorted(alarms, key=lambda x: x["fire"]):
-            dt = _dt.datetime.fromtimestamp(a["fire"])
-            lines.append(f"  #{a['id']} — {dt.strftime('%H:%M')} — {a.get('label','')}")
-        lines.append("\nDi: \"elimina la alarma de las HH:MM\" o \"/alarma del <id>\"")
-        return "\n".join(lines)
-
-    def _restore_pending_alarms(self):
-        """Call on startup to re-schedule any persisted alarms that haven't fired yet."""
-        import time as _time
-        alarms = self._load_alarms()
-        active = []
-        for a in alarms:
-            if a["fire"] > _time.time():
-                self._schedule_alarm(a["id"], a["fire"], a.get("label", "Alarma"))
-                active.append(a)
-        if len(active) != len(alarms):
-            self._save_alarms(active)  # prune past alarms
 
     # ══════════════════════════════════════════════════════════════════
     # NOTAS  ─  motor completo
@@ -8871,6 +7096,9 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         import os
         import re as _re
 
+        import time as _time
+        _UA = "ClaudyReportBot/4.0 (contacto: smartstudentweb@gmail.com)"
+
         img_dir = os.path.join(os.path.expanduser("~"), "Documents", "Claudy", "Informes", "images")
         os.makedirs(img_dir, exist_ok=True)
         downloaded = []
@@ -8886,121 +7114,207 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         )
         no_articles = _re.sub(r"\s+", " ", no_articles).strip()
         first_words = " ".join(base.split()[:3])
+
+        # PRIMERO: pedirle al LLM las entidades/artículos de Wikipedia que
+        # corresponden al tema. Buscar la frase cruda ("los últimos modelos de
+        # anthropic") devolvía artículos sin relación y las imágenes salían de
+        # cualquier cosa (paisajes al azar). Con entidades ("Anthropic",
+        # "Claude (modelo de lenguaje)") las páginas — y sus fotos — son del tema.
+        llm_terms = []
+        try:
+            _resp = self.send_quick_message(
+                f"Tema de un informe: '{topic}'.\n"
+                "Dame de 1 a 3 títulos de artículos de Wikipedia (entidades, nombres propios o "
+                "conceptos centrales) que traten EXACTAMENTE este tema, el más específico primero. "
+                "Corrige errores de tipeo evidentes (p.ej. 'antropic' → 'Anthropic'). "
+                "Responde SOLO con los títulos, uno por línea, sin numeración ni comentarios.",
+                _skip_skill_action=True, timeout=60, max_tokens=120, tier="fast")
+            llm_terms = [
+                l.strip().strip('-•* "')
+                for l in (_resp or "").splitlines()
+                if l.strip() and len(l.strip()) < 70
+            ][:3]
+        except Exception as e:
+            print(f"[imgs] extracción de entidades con LLM falló: {e}")
+            llm_terms = []
+
         candidates = []
-        for q in (base, no_articles, first_words):
-            q = q.strip()
+        for q in (llm_terms + [base, no_articles, first_words]):
+            q = (q or "").strip()
             if q and q not in candidates:
                 candidates.append(q)
 
         print(f"[imgs] candidatos de búsqueda: {candidates}")
 
-        def _find_page(lang, query):
-            """Return (lang, page_title) for the best Wikipedia match, or (None, None)."""
+        def _find_pages(lang, query, limit=3):
+            """Return list of (lang, page_title) for the top Wikipedia matches."""
             try:
                 search_url = (
                     f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search"
-                    f"&srsearch={urllib.parse.quote(query)}&format=json&srlimit=1"
+                    f"&srsearch={urllib.parse.quote(query)}&format=json&srlimit={limit}"
                 )
                 req = urllib.request.Request(
-                    search_url, headers={"User-Agent": "Claudy/4.0 (educational)"}
+                    search_url, headers={"User-Agent": _UA}
                 )
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     sdata = json.loads(resp.read())
-                results = sdata.get("query", {}).get("search", [])
-                if results:
-                    return lang, results[0]["title"]
+                return [(lang, r["title"]) for r in sdata.get("query", {}).get("search", [])]
             except Exception as e:
-                print(f"[imgs] _find_page({lang}, {query!r}) error: {e}")
-            return None, None
+                print(f"[imgs] _find_pages({lang}, {query!r}) error: {e}")
+                return []
 
         try:
-            # Step A: probar (idioma, consulta) hasta encontrar una página real.
-            wiki_lang, page_title = None, None
+            # Step A: recolectar VARIAS páginas relevantes al tema, en orden de
+            # relevancia (las entidades del LLM van primero en `candidates`).
+            found_pages = []  # list of (lang, title)
             for query in candidates:
                 for lang in ("es", "en"):
-                    wiki_lang, page_title = _find_page(lang, query)
-                    if page_title:
-                        break
-                if page_title:
+                    for pair in _find_pages(lang, query, limit=3):
+                        if pair not in found_pages:
+                            found_pages.append(pair)
+                if len(found_pages) >= 10:
                     break
 
-            if not page_title:
+            if not found_pages:
                 print("[imgs] ninguna página de Wikipedia encontrada para los candidatos")
-                return []
-            print(f"[imgs] página encontrada: {wiki_lang}:{page_title}")
+            else:
+                print(f"[imgs] páginas encontradas: {found_pages[:8]}")
 
-            # Step B: Get ALL images listed on that page
-            images_url = (
-                f"https://{wiki_lang}.wikipedia.org/w/api.php?action=query"
-                f"&titles={urllib.parse.quote(page_title)}"
-                f"&prop=images&format=json&imlimit=20"
-            )
-            req2 = urllib.request.Request(
-                images_url, headers={"User-Agent": "Claudy/4.0 (educational)"}
-            )
-            with urllib.request.urlopen(req2, timeout=15) as resp2:
-                idata = json.loads(resp2.read())
+            def _filter_img(name, _seen):
+                """jpg/png reales, sin íconos/banderas/mapas; True si pasa."""
+                low = name.lower()
+                if low in _seen:
+                    return False
+                if not any(low.endswith(ext) for ext in (".jpg", ".jpeg", ".png")):
+                    return False
+                if any(skip in low for skip in ("flag", "icon", "symbol", "coat", "blank", "map")):
+                    return False
+                _seen.add(low)
+                return True
 
-            pages = idata.get("query", {}).get("pages", {})
-            img_titles = []
-            for page in pages.values():
-                for img in page.get("images", []):
-                    name = img.get("title", "")
-                    # Filter: only jpg/png, skip icons/flags/small graphics
-                    low = name.lower()
-                    if any(low.endswith(ext) for ext in (".jpg", ".jpeg", ".png")):
-                        if not any(skip in low for skip in ("flag", "icon", "logo", "symbol", "coat", "blank", "map")):
-                            img_titles.append(name)
-            
+            # Step B: ir sumando páginas (más relevantes primero) hasta reunir
+            # suficientes candidatas (~3x lo pedido) o agotar 8 páginas.
+            img_titles = []   # list of (lang, img_title)
+            _seen_titles = set()
+            for _pi, (lang, page_title) in enumerate(found_pages[:8]):
+                if len(img_titles) >= max_images * 3 and _pi >= 2:
+                    break
+                try:
+                    images_url = (
+                        f"https://{lang}.wikipedia.org/w/api.php?action=query"
+                        f"&titles={urllib.parse.quote(page_title)}"
+                        f"&prop=images&format=json&imlimit=50"
+                    )
+                    req2 = urllib.request.Request(
+                        images_url, headers={"User-Agent": _UA}
+                    )
+                    with urllib.request.urlopen(req2, timeout=15) as resp2:
+                        idata = json.loads(resp2.read())
+                except Exception as e:
+                    print(f"[imgs] error listando imágenes de {lang}:{page_title}: {e}")
+                    continue
+
+                pages = idata.get("query", {}).get("pages", {})
+                for page in pages.values():
+                    for img in page.get("images", []):
+                        name = img.get("title", "")
+                        if _filter_img(name, _seen_titles):
+                            img_titles.append((lang, name))
+                _time.sleep(0.3)  # espaciar para no gatillar el rate-limit
+
+            # Step B2: si las páginas de Wikipedia dieron pocas fotos (típico en
+            # temas tech/empresas), buscar directamente en Wikimedia Commons,
+            # que es el banco de imágenes y tiene mucho más material del tema.
+            if len(img_titles) < max_images:
+                for query in candidates[:2]:
+                    if len(img_titles) >= max_images * 2:
+                        break
+                    try:
+                        _time.sleep(0.4)  # espaciar para no gatillar el rate-limit
+                        commons_url = (
+                            "https://commons.wikimedia.org/w/api.php?action=query&list=search"
+                            f"&srsearch={urllib.parse.quote(query)}&srnamespace=6"
+                            "&srlimit=20&format=json"
+                        )
+                        reqc = urllib.request.Request(
+                            commons_url, headers={"User-Agent": _UA}
+                        )
+                        with urllib.request.urlopen(reqc, timeout=15) as respc:
+                            cdata = json.loads(respc.read())
+                        for r in cdata.get("query", {}).get("search", []):
+                            name = r.get("title", "")
+                            if _filter_img(name, _seen_titles):
+                                img_titles.append(("commons", name))
+                    except Exception as e:
+                        print(f"[imgs] búsqueda en Commons falló ({query!r}): {e}")
+
             print(f"[imgs] imágenes candidatas tras filtro: {len(img_titles)}")
             if not img_titles:
                 return []
 
-            # Step C: Get thumbnail URLs for the filtered images
+            # Step C: obtener las URLs de miniatura EN LOTE. Pedirlas una por una
+            # (1 llamada API por imagen + 1 descarga, en ráfaga) disparaba el
+            # rate-limit de Wikipedia (HTTP 429) y casi todas las descargas
+            # fallaban → informes sin imágenes. Ahora: 1 llamada API por cada 50
+            # títulos, descargas espaciadas y reintento ante 429.
             safe_base = _re.sub(r'[^\w]', '_', topic)[:30]
-            for img_title in img_titles[:max_images * 2]:  # fetch extra in case some fail
+
+            _by_lang = {}
+            for lang, t in img_titles:
+                _by_lang.setdefault(lang, []).append(t)
+
+            thumb_urls = []
+            for lang, titles in _by_lang.items():
+                _host = "commons.wikimedia.org" if lang == "commons" else f"{lang}.wikipedia.org"
+                for i0 in range(0, len(titles), 50):
+                    chunk = titles[i0:i0 + 50]
+                    try:
+                        info_url = (
+                            f"https://{_host}/w/api.php?action=query"
+                            f"&titles={urllib.parse.quote('|'.join(chunk))}"
+                            "&prop=imageinfo&iiprop=url&iiurlwidth=800&format=json"
+                        )
+                        req3 = urllib.request.Request(info_url, headers={"User-Agent": _UA})
+                        with urllib.request.urlopen(req3, timeout=20) as resp3:
+                            info = json.loads(resp3.read())
+                        for pg in info.get("query", {}).get("pages", {}).values():
+                            ii = pg.get("imageinfo", [{}])[0]
+                            u = ii.get("thumburl") or ii.get("url", "")
+                            if u:
+                                # Fix protocol-relative URLs (//upload.wikimedia.org/...)
+                                if u.startswith("//"):
+                                    u = "https:" + u
+                                thumb_urls.append(u)
+                    except Exception as e:
+                        print(f"[imgs] consulta en lote falló ({lang}): {e}")
+                    _time.sleep(0.4)
+
+            print(f"[imgs] URLs de miniatura obtenidas: {len(thumb_urls)}")
+
+            for thumb_url in thumb_urls:
                 if len(downloaded) >= max_images:
                     break
-                try:
-                    info_url = (
-                        f"https://{wiki_lang}.wikipedia.org/w/api.php?action=query"
-                        f"&titles={urllib.parse.quote(img_title)}"
-                        "&prop=imageinfo&iiprop=url&iiurlwidth=800&format=json"
-                    )
-                    req3 = urllib.request.Request(
-                        info_url, headers={"User-Agent": "Claudy/4.0"}
-                    )
-                    with urllib.request.urlopen(req3, timeout=15) as resp3:
-                        info = json.loads(resp3.read())
-
-                    for pg in info.get("query", {}).get("pages", {}).values():
-                        ii = pg.get("imageinfo", [{}])[0]
-                        thumb_url = ii.get("thumburl") or ii.get("url", "")
-                        if not thumb_url:
-                            continue
-                        # Fix protocol-relative URLs from Wikipedia (e.g. //upload.wikimedia.org/...)
-                        if thumb_url.startswith("//"):
-                            thumb_url = "https:" + thumb_url
-
-                        ext = ".jpg" if ".jpg" in thumb_url.lower() else ".png"
-                        local_path = os.path.join(img_dir, f"{safe_base}_{len(downloaded)+1}{ext}")
-
-                        req4 = urllib.request.Request(
-                            thumb_url, headers={"User-Agent": "Claudy/4.0"}
-                        )
+                ext = ".jpg" if ".jpg" in thumb_url.lower() else ".png"
+                local_path = os.path.join(img_dir, f"{safe_base}_{len(downloaded)+1}{ext}")
+                for _attempt in (1, 2):
+                    try:
+                        req4 = urllib.request.Request(thumb_url, headers={"User-Agent": _UA})
                         with urllib.request.urlopen(req4, timeout=20) as r4:
-                            with open(local_path, "wb") as f:
-                                f.write(r4.read())
-
+                            data = r4.read()
                         # Validate: must be > 5KB (not a placeholder/tiny icon)
-                        if os.path.getsize(local_path) > 5120:
+                        if len(data) > 5120:
+                            with open(local_path, "wb") as f:
+                                f.write(data)
                             downloaded.append(local_path)
-                        else:
-                            os.remove(local_path)
-                        break  # one image per img_title iteration
-                except Exception as e:
-                    print(f"[imgs] descarga de {img_title!r} falló: {e}")
-                    continue
+                        break
+                    except Exception as e:
+                        if "429" in str(e) and _attempt == 1:
+                            print("[imgs] 429 de Wikipedia, esperando 3s para reintentar...")
+                            _time.sleep(3)
+                            continue
+                        print(f"[imgs] descarga de {thumb_url[:80]!r} falló: {e}")
+                        break
+                _time.sleep(0.5)  # espaciar descargas para no gatillar el rate-limit
         except Exception as e:
             print(f"[imgs] error general descargando imágenes: {e}")
 
@@ -9159,11 +7473,6 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             self.after_cancel(self._idle_hide_timer)
             self._idle_hide_timer = None
 
-    def _auto_hide_bubble(self):
-        """Hide the bubble after 60s of inactivity."""
-        if self.bubble_win and self.bubble_minimized:
-            self.hide_bubble()
-        self._idle_hide_timer = None
 
     def _record_activity(self):
         """Reset idle timer on user activity."""
@@ -10659,27 +8968,6 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             return text[:max_chars] + "\n\n[Contenido truncado por longitud.]"
         return text
 
-    def _read_docx_text(self, path):
-        try:
-            from docx import Document
-        except ImportError:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "python-docx"])
-            from docx import Document
-        doc = Document(path)
-        parts = []
-        for p in doc.paragraphs:
-            txt = (p.text or "").strip()
-            if txt:
-                parts.append(txt)
-        for idx, table in enumerate(doc.tables[:20], 1):
-            rows = []
-            for row in table.rows[:60]:
-                cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
-                if any(cells):
-                    rows.append(" | ".join(cells))
-            if rows:
-                parts.append(f"\nTabla {idx}\n" + "\n".join(rows))
-        return "\n".join(parts)
 
     def _read_excel_text(self, path):
         try:
@@ -10701,58 +8989,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             )
         return "\n\n".join(parts)
 
-    def _read_pptx_text(self, path):
-        try:
-            from pptx import Presentation
-        except ImportError:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "python-pptx"])
-            from pptx import Presentation
-        prs = Presentation(path)
-        parts = []
-        for slide_idx, slide in enumerate(prs.slides, 1):
-            texts = []
-            for shape in slide.shapes:
-                try:
-                    if getattr(shape, "has_table", False):
-                        for row in shape.table.rows:
-                            cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
-                            if any(cells):
-                                texts.append(" | ".join(cells))
-                    elif hasattr(shape, "text"):
-                        txt = (shape.text or "").strip()
-                        if txt:
-                            texts.append(txt)
-                except Exception:
-                    pass
-            if texts:
-                parts.append(f"Diapositiva {slide_idx}\n" + "\n".join(texts))
-        return "\n\n".join(parts)
 
-    def _read_pdf_text(self, path):
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "pypdf"])
-                from pypdf import PdfReader
-            except Exception:
-                try:
-                    from PyPDF2 import PdfReader
-                except Exception:
-                    return "[Para leer PDFs instala: pip install pypdf]"
-        except Exception:
-            try:
-                from PyPDF2 import PdfReader
-            except Exception:
-                return "[Para leer PDFs instala: pip install pypdf]"
-        reader = PdfReader(path)
-        parts = []
-        for page in reader.pages[:40]:
-            try:
-                parts.append(page.extract_text() or "")
-            except Exception:
-                pass
-        return "\n".join(parts).strip()
 
     # --- F3.9 Notificaciones de escritorio Windows ---
     def _notify(self, title, message):
@@ -11604,6 +9841,23 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         """Puente para que los mixins (core/llm) hablen sin importar pet."""
         _tts_speak(text)
 
+    def _ui_colors(self):
+        """Puente para que los mixins (features/) usen el tema activo sin
+        importar pet (THEME se rebinde al cambiar de tema)."""
+        return THEME
+
+    def _work_area(self):
+        """Puente: área útil de pantalla (RECT Win32) para ui/bubbles."""
+        return work_area
+
+    def _transparent_color(self):
+        """Puente: color clave de transparencia de ventanas para ui/bubbles."""
+        return TRANSPARENT_COLOR
+
+    def _bubble_mini_size(self):
+        """Puente: tamaño del bubble minimizado para ui/bubbles."""
+        return BUBBLE_MINI_SIZE
+
     def _debug_log(self, label, data):
         try:
             from core.logging_setup import get_logger
@@ -12133,166 +10387,11 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
     # CRON ENGINE
     # ==============================================================
 
-    def _load_cron_json(self):
-        if not os.path.exists(self._cron_file):
-            return []
-        try:
-            with open(self._cron_file, "r", encoding="utf-8-sig") as f:
-                return json.load(f)
-        except Exception:
-            return []
 
-    def _save_cron_json(self):
-        os.makedirs(os.path.dirname(self._cron_file), exist_ok=True)
-        with open(self._cron_file, "w", encoding="utf-8") as f:
-            json.dump(self._cron_jobs, f, indent=2, ensure_ascii=False)
 
-    def _start_cron_engine(self):
-        self._cron_jobs = self._load_cron_json()
 
-        def engine_loop():
-            while True:
-                try:
-                    now = datetime.datetime.now()
-                    for job in self._cron_jobs[:]:
-                        if not job.get("enabled", True):
-                            continue
-                        last = job.get("last_fired", "")
-                        fire = False
-                        if job["type"] == "interval":
-                            if not last:
-                                fire = True
-                            else:
-                                try:
-                                    last_dt = datetime.datetime.fromisoformat(last)
-                                    elapsed = (now - last_dt).total_seconds() / 60
-                                    if elapsed >= job["interval_min"]:
-                                        fire = True
-                                except Exception:
-                                    fire = True
-                        elif job["type"] == "daily":
-                            if last and last[:10] == now.strftime("%Y-%m-%d"):
-                                continue
-                            h, m = job.get("hour", 0), job.get("minute", 0)
-                            # Catch-up: dispara una vez al día si ya pasó la hora,
-                            # aunque Claudy se haya abierto más tarde (no solo en el minuto exacto).
-                            if now.hour > h or (now.hour == h and now.minute >= m):
-                                fire = True
-                        elif job["type"] == "weekly":
-                            if last and last[:10] == now.strftime("%Y-%m-%d"):
-                                continue
-                            wd = job.get("weekday", 0)  # 0=lunes ... 6=domingo
-                            h, m = job.get("hour", 0), job.get("minute", 0)
-                            # Catch-up: dispara una vez si es el día objetivo y ya pasó la hora,
-                            # aunque Claudy se haya abierto más tarde (no solo en el minuto exacto).
-                            if now.weekday() == wd and (now.hour > h or (now.hour == h and now.minute >= m)):
-                                fire = True
-                        if fire:
-                            job["last_fired"] = now.isoformat()
-                            self._save_cron_json()
-                            self.after(0, lambda j=job.copy(): self._execute_cron_job(j))
-                    time.sleep(30)
-                except Exception:
-                    time.sleep(60)
 
-        threading.Thread(target=engine_loop, daemon=True, name="cron-engine").start()
 
-    def _execute_cron_job(self, job):
-        # Trabajos de recordatorio: alarma de Claudy + correo, sin pasar por el LLM.
-        if job.get("action") == "reminder":
-            self._execute_cron_reminder(job)
-            return
-        # Trabajos de comando: ejecuta un programa/script externo (sin pasar por el LLM).
-        if job.get("action") == "command":
-            self._execute_cron_command(job)
-            return
-        msg = job.get("message", "")
-        if not msg:
-            return
-        try:
-            result = self.send_quick_message(msg)
-            result = self._strip_markdown(result)
-            notification = f"[CRON] {msg[:80]}\n\n{result}"
-            # Show in desktop bubble
-            self.show_chat_bubble(notification[:500])
-            # F3.20 Native Windows toast
-            try:
-                self._notify("Claudy CRON", result[:200])
-            except Exception:
-                pass
-            try:
-                self.after(0, lambda: self._set_state_briefly("wave", 1500))
-            except Exception:
-                pass
-            self._fire_hook("on_cron", message=msg, result=result)
-            # Send to Telegram if available
-            self._cron_notify_telegram(notification[:500])
-        except Exception:
-            pass
-
-    def _execute_cron_command(self, job):
-        """Ejecuta un comando/script externo programado.
-        El job define: "command" (lista de args o string), "cwd" (opcional) y
-        "label" (opcional, para la notificación). Pensado para automatizaciones
-        como el correo de facturación QCORE SPA."""
-        cmd = job.get("command")
-        if not cmd:
-            return
-        label = job.get("label") or "Tarea programada"
-        cwd = job.get("cwd") or None
-
-        def _run():
-            try:
-                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                shell = isinstance(cmd, str)
-                proc = subprocess.run(
-                    cmd, cwd=cwd, shell=shell, capture_output=True, text=True,
-                    timeout=job.get("timeout", 180), creationflags=flags,
-                )
-                ok = proc.returncode == 0
-                out = (proc.stdout or "").strip()[-200:]
-                err = (proc.stderr or "").strip()[-200:]
-                estado = "OK" if ok else f"ERROR (code {proc.returncode})"
-                resumen = f"[CRON cmd] {label}: {estado}"
-                if not job.get("silent"):
-                    try:
-                        self.after(0, lambda: self._notify("Claudy CRON", resumen[:200]))
-                    except Exception:
-                        pass
-                # Telegram + log
-                self._cron_notify_telegram(f"{resumen}\n{out or err}")
-                self._fire_hook("on_cron", message=label, result=out or err)
-            except Exception as e:
-                try:
-                    self._cron_notify_telegram(f"[CRON cmd] {label}: EXCEPTION {e}")
-                except Exception:
-                    pass
-
-        threading.Thread(target=_run, daemon=True, name="cron-command").start()
-
-    def _execute_cron_reminder(self, job):
-        """Dispara un recordatorio: alarma visual/sonora de Claudy + (opcional) correo.
-        Si el job trae "silent": true, NO muestra la alarma emergente y se entrega
-        solo como correo (y Telegram), p.ej. para digests diarios por email."""
-        msg = job.get("message") or "Recordatorio"
-        silent = job.get("silent", False)
-        # 1) Alarma de Claudy (burbuja + beep + toast + chat) — se omite si es silencioso.
-        if not silent:
-            try:
-                self._fire_alarm_notify(msg)
-            except Exception:
-                pass
-        # 2) Telegram, si está disponible
-        try:
-            self._cron_notify_telegram(msg)
-        except Exception:
-            pass
-        # 3) Correo, si el job lo pide y hay SMTP configurado
-        email = job.get("email")
-        if email and email.get("to"):
-            threading.Thread(
-                target=self._send_reminder_email, args=(email,), daemon=True
-            ).start()
 
     def _send_reminder_email(self, email):
         """Envía el correo del recordatorio por SMTP (config.json -> email).
@@ -12325,260 +10424,12 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             except Exception:
                 pass
 
-    def _cron_notify_telegram(self, text):
-        if not self._telegram_bot_app or not self._telegram_allowed_users:
-            return
-        import asyncio
-        try:
-            for uid in list(self._telegram_allowed_users)[:3]:
-                async def send():
-                    try:
-                        await self._telegram_bot_app.bot.send_message(
-                            chat_id=int(uid), text=f"[Claudy Cron]\n{text}"
-                        )
-                    except Exception:
-                        pass
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.ensure_future(send())
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
-    def _parse_cron_nl(self, prompt):
-        """
-        Parse natural-language cron requests in Spanish.
-        Returns (kind, params, message) or None.
-          kind = "interval", params = minutes
-          kind = "daily",    params = (hour, minute)
-        """
-        text = prompt.strip()
-        low = text.lower()
 
-        # Skip if not a scheduling request
-        triggers = ("recuerdame", "recuérdame", "avisame", "avísame", "avisa",
-                    "recordatorio", "programa", "agenda", "cada ", "todos los",
-                    "todas las", "diariamente", "diario", "/cron")
-        if not any(t in low for t in triggers):
-            return None
 
-        # ---- INTERVAL: "cada N min|hora|horas" ----
-        m = re.search(r'cada\s+(\d+)\s*(minutos?|mins?|m\b|horas?|h\b|segundos?|s\b)', low)
-        if m:
-            n = int(m.group(1))
-            unit = m.group(2)
-            if unit.startswith("s"):
-                interval_min = max(1, n // 60)
-            elif unit.startswith("h"):
-                interval_min = n * 60
-            else:
-                interval_min = n
-            msg = self._cron_strip_prefix(text)
-            msg = re.sub(r'cada\s+\d+\s*(minutos?|mins?|m\b|horas?|h\b|segundos?|s\b)\s*', '', msg, count=1, flags=re.IGNORECASE).strip()
-            msg = re.sub(r'^[,:\-\s]+', '', msg)
-            if msg:
-                return ("interval", interval_min, msg)
 
-        # ---- DAILY: "a las HH(:MM)? (am|pm)?" ----
-        # "a las 9", "a las 9am", "a las 14:30", "a las 22 hrs", "a las 9 de la noche"
-        dm = re.search(r'a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|hrs|h)?(?:\s+de\s+la\s+(manana|mañana|tarde|noche))?', low)
-        if dm:
-            h = int(dm.group(1))
-            mins = int(dm.group(2) or 0)
-            ampm = (dm.group(3) or "").lower()
-            partofday = (dm.group(4) or "").lower()
-            if ampm == "pm" and h < 12:
-                h += 12
-            if ampm == "am" and h == 12:
-                h = 0
-            if partofday in ("tarde", "noche") and h < 12:
-                h += 12
-            if partofday in ("manana", "mañana") and h == 12:
-                h = 0
-            if 0 <= h <= 23 and 0 <= mins <= 59:
-                msg = self._cron_strip_prefix(text)
-                msg = re.sub(r'a\s+las?\s+\d{1,2}(?::\d{2})?\s*(am|pm|hrs|h)?(\s+de\s+la\s+(manana|mañana|tarde|noche))?\s*', '', msg, count=1, flags=re.IGNORECASE).strip()
-                msg = re.sub(r'\b(todos\s+los\s+d[ií]as|diariamente|diario|cada\s+d[ií]a)\b\s*', '', msg, flags=re.IGNORECASE).strip()
-                msg = re.sub(r'^[,:\-\s]+', '', msg)
-                if msg:
-                    return ("daily", (h, mins), msg)
 
-        return None
 
-    def _cron_strip_prefix(self, text):
-        """Remove leading trigger words like 'recuerdame', 'avisame', '/cron'."""
-        t = text
-        t = re.sub(r'^/cron\s+', '', t, flags=re.IGNORECASE)
-        t = re.sub(r'^(recuerdame|recuérdame|avisame|avísame|avisa|agenda|programa|recordatorio[:\s]*|que)\s+', '', t, flags=re.IGNORECASE)
-        return t.strip()
-
-    def _generate_cron_expression(self, prompt):
-        """Generate a standard 5-field cron expression from Spanish text."""
-        text = (prompt or "").strip()
-        low = text.lower()
-        if not any(k in low for k in (
-            "/cron expr", "/cronexp", "generar cron", "genera cron", "crear cron",
-            "crea cron", "expresion cron", "expresión cron", "cron para", "cron de"
-        )):
-            return None
-
-        spec = re.sub(
-            r'^(/cron\s+expr|/cronexp|generar\s+cron|genera\s+cron|crear\s+cron|crea\s+cron|'
-            r'expresi[oó]n\s+cron|cron\s+(?:para|de))\s*[:\-]?\s*',
-            '',
-            text,
-            flags=re.IGNORECASE,
-        ).strip()
-        if not spec:
-            return (
-                "Dime el horario que quieres convertir a cron.\n\n"
-                "Ejemplos:\n"
-                "  /cron expr cada 15 minutos\n"
-                "  genera cron lunes a viernes a las 9:30\n"
-                "  cron para el dia 1 de cada mes a las 8"
-            )
-
-        low_spec = spec.lower()
-
-        def parse_time(default_hour=9, default_minute=0):
-            m = re.search(
-                r'a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|hrs|h)?'
-                r'(?:\s+de\s+la\s+(manana|mañana|tarde|noche))?',
-                low_spec,
-            )
-            if not m:
-                return default_hour, default_minute, "hora por defecto 09:00"
-            h = int(m.group(1))
-            minute = int(m.group(2) or 0)
-            ampm = (m.group(3) or "").lower()
-            partofday = (m.group(4) or "").lower()
-            if ampm == "pm" and h < 12:
-                h += 12
-            if ampm == "am" and h == 12:
-                h = 0
-            if partofday in ("tarde", "noche") and h < 12:
-                h += 12
-            if partofday in ("manana", "mañana") and h == 12:
-                h = 0
-            if not (0 <= h <= 23 and 0 <= minute <= 59):
-                raise ValueError("Hora invalida. Usa 0-23 para hora y 0-59 para minutos.")
-            return h, minute, f"{h:02d}:{minute:02d}"
-
-        day_names = {
-            "domingo": "0", "domingos": "0",
-            "lunes": "1",
-            "martes": "2",
-            "miercoles": "3", "miércoles": "3",
-            "jueves": "4",
-            "viernes": "5",
-            "sabado": "6", "sábado": "6", "sabados": "6", "sábados": "6",
-        }
-
-        try:
-            # Intervals.
-            m = re.search(r'cada\s+(\d+)\s*(minutos?|mins?|m\b)', low_spec)
-            if m:
-                n = max(1, min(59, int(m.group(1))))
-                expr = f"*/{n} * * * *"
-                desc = f"cada {n} minuto(s)"
-                return self._format_cron_expression_result(expr, desc, spec)
-
-            m = re.search(r'cada\s+(\d+)\s*(horas?|hrs?|h\b)', low_spec)
-            if m:
-                n = max(1, min(23, int(m.group(1))))
-                expr = f"0 */{n} * * *"
-                desc = f"cada {n} hora(s)"
-                return self._format_cron_expression_result(expr, desc, spec)
-
-            if re.search(r'\bcada\s+minuto\b|\btodos\s+los\s+minutos\b', low_spec):
-                return self._format_cron_expression_result("* * * * *", "cada minuto", spec)
-
-            if re.search(r'\bcada\s+hora\b|\btodas\s+las\s+horas\b', low_spec):
-                return self._format_cron_expression_result("0 * * * *", "cada hora", spec)
-
-            # Monthly by day number.
-            m = re.search(r'(?:dia|día)\s+(\d{1,2})\s+de\s+cada\s+mes|cada\s+mes\s+(?:el\s+)?(?:dia|día)\s+(\d{1,2})', low_spec)
-            if m:
-                day = int(m.group(1) or m.group(2))
-                if not 1 <= day <= 31:
-                    raise ValueError("Dia de mes invalido. Usa 1-31.")
-                h, minute, time_desc = parse_time()
-                expr = f"{minute} {h} {day} * *"
-                return self._format_cron_expression_result(expr, f"el dia {day} de cada mes a las {time_desc}", spec)
-
-            # Week ranges and named days.
-            h, minute, time_desc = parse_time()
-            if re.search(r'lunes\s+a\s+viernes|d[ií]as\s+h[aá]biles|entre\s+semana', low_spec):
-                return self._format_cron_expression_result(f"{minute} {h} * * 1-5", f"lunes a viernes a las {time_desc}", spec)
-
-            if re.search(r'fines?\s+de\s+semana|sabados?\s+y\s+domingos?|s[aá]bados?\s+y\s+domingos?', low_spec):
-                return self._format_cron_expression_result(f"{minute} {h} * * 6,0", f"fines de semana a las {time_desc}", spec)
-
-            selected_days = []
-            for name, value in day_names.items():
-                if re.search(rf'\b{name}\b', low_spec) and value not in selected_days:
-                    selected_days.append(value)
-            if selected_days:
-                expr = f"{minute} {h} * * {','.join(selected_days)}"
-                return self._format_cron_expression_result(expr, f"dias seleccionados a las {time_desc}", spec)
-
-            # Daily fallback when time is present or text says daily.
-            if re.search(r'todos\s+los\s+d[ií]as|diario|diariamente|cada\s+d[ií]a|a\s+las?', low_spec):
-                expr = f"{minute} {h} * * *"
-                return self._format_cron_expression_result(expr, f"todos los dias a las {time_desc}", spec)
-
-        except ValueError as e:
-            return f"No pude generar el cron: {e}"
-
-        return (
-            "No pude convertirlo a cron con seguridad.\n\n"
-            "Prueba con algo como:\n"
-            "  genera cron cada 10 minutos\n"
-            "  genera cron todos los dias a las 8:30\n"
-            "  genera cron lunes a viernes a las 18:00\n"
-            "  genera cron dia 1 de cada mes a las 9"
-        )
-
-    def _format_cron_expression_result(self, expr, description, original):
-        return (
-            "Expresion cron generada:\n\n"
-            f"  {expr}\n\n"
-            f"Significado: {description}\n"
-            f"Entrada: {original}\n\n"
-            "Formato: minuto hora dia_mes mes dia_semana\n"
-            "Nota: usa cron Unix de 5 campos."
-        )
-
-    def _add_cron_interval(self, interval_min, message):
-        job = {
-            "id": str(int(time.time())),
-            "type": "interval",
-            "interval_min": interval_min,
-            "message": message,
-            "last_fired": "",
-            "enabled": True,
-            "created": datetime.datetime.now().isoformat(),
-        }
-        self._cron_jobs.append(job)
-        self._save_cron_json()
-        return f"Tarea programada cada {interval_min} min: {message[:80]}"
-
-    def _add_cron_daily(self, hour, minute, message):
-        job = {
-            "id": str(int(time.time())),
-            "type": "daily",
-            "hour": hour,
-            "minute": minute,
-            "message": message,
-            "last_fired": "",
-            "enabled": True,
-            "created": datetime.datetime.now().isoformat(),
-        }
-        self._cron_jobs.append(job)
-        self._save_cron_json()
-        return f"Tarea diaria a las {hour:02d}:{minute:02d}: {message[:80]}"
 
     _WEEKDAY_NAMES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
@@ -12594,208 +10445,12 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         "domingo": 6, "domingos": 6,
     }
 
-    def _add_cron_weekly(self, weekday, hour, minute, message, action=None, email=None):
-        job = {
-            "id": str(int(time.time())),
-            "type": "weekly",
-            "weekday": weekday,
-            "hour": hour,
-            "minute": minute,
-            "message": message,
-            "last_fired": "",
-            "enabled": True,
-            "created": datetime.datetime.now().isoformat(),
-        }
-        if action:
-            job["action"] = action
-        if email:
-            job["email"] = email
-        self._cron_jobs.append(job)
-        self._save_cron_json()
-        day = self._WEEKDAY_NAMES[weekday] if 0 <= weekday < 7 else "?"
-        return f"Tarea semanal los {day} a las {hour:02d}:{minute:02d}: {message[:80]}"
 
-    def _list_cron_jobs(self):
-        if not self._cron_jobs:
-            return ("No hay tareas programadas.\n\n"
-                    "/cron cada 30 min <mensaje>\n"
-                    "/cron a las 22:00 <mensaje>\n"
-                    "/cron los martes a las 9 <mensaje>\n"
-                    "/cron list\n"
-                    "/cron editar <num> <campo> <valor>\n"
-                    "/cron off|on <num>\n"
-                    "/cron delete <num>")
-        lines = ["Tareas programadas:", "=" * 40]
-        for i, j in enumerate(self._cron_jobs, 1):
-            t = j["type"]
-            if t == "interval":
-                schedule = f"cada {j['interval_min']} min"
-            elif t == "weekly":
-                wd = j.get("weekday", 0)
-                day = self._WEEKDAY_NAMES[wd] if 0 <= wd < 7 else "?"
-                schedule = f"los {day} a las {j.get('hour',0):02d}:{j.get('minute',0):02d}"
-            else:
-                schedule = f"diario a las {j.get('hour',0):02d}:{j.get('minute',0):02d}"
-            enabled = "ON" if j.get("enabled", True) else "OFF"
-            desc = j.get("message") or j.get("label") or (f"[{j.get('action')}]" if j.get("action") else "")
-            lines.append(f"  [{i}] [{enabled}] {schedule}: {desc[:60]}")
-        lines.append("")
-        lines.append("Gestionar:")
-        lines.append("  /cron editar <num> hora 22:30   (o: cada 45 min / dia martes / mensaje ...)")
-        lines.append("  /cron off <num>   pausar      /cron on <num>   activar")
-        lines.append("  /cron delete <num>   eliminar")
-        return "\n".join(lines)
 
-    def _delete_cron_job(self, idx):
-        if idx < 0 or idx >= len(self._cron_jobs):
-            return f"Numero invalido. Hay {len(self._cron_jobs)} tareas."
-        removed = self._cron_jobs.pop(idx)
-        self._save_cron_json()
-        return f"Tarea eliminada: {removed.get('message','')[:60]}"
 
-    def _toggle_cron_job(self, idx, enabled):
-        """Pausa (enabled=False) o reanuda (enabled=True) una tarea."""
-        if idx < 0 or idx >= len(self._cron_jobs):
-            return f"Numero invalido. Hay {len(self._cron_jobs)} tareas."
-        self._cron_jobs[idx]["enabled"] = bool(enabled)
-        self._save_cron_json()
-        estado = "activada" if enabled else "pausada"
-        return f"Tarea {idx+1} {estado}: {self._cron_jobs[idx].get('message','')[:60]}"
 
-    def _edit_cron_job(self, idx, *, message=None, hour=None, minute=None,
-                       interval_min=None, weekday=None):
-        """Modifica una tarea existente. Solo cambia los campos indicados."""
-        if idx < 0 or idx >= len(self._cron_jobs):
-            return f"Numero invalido. Hay {len(self._cron_jobs)} tareas."
-        job = self._cron_jobs[idx]
-        cambios = []
-        if message is not None:
-            job["message"] = message
-            cambios.append(f"mensaje «{message[:50]}»")
-        if interval_min is not None:
-            job["type"] = "interval"
-            job["interval_min"] = interval_min
-            cambios.append(f"cada {interval_min} min")
-        if weekday is not None:
-            job["type"] = "weekly"
-            job["weekday"] = weekday
-            day = self._WEEKDAY_NAMES[weekday] if 0 <= weekday < 7 else "?"
-            cambios.append(f"día {day}")
-        if hour is not None:
-            job["hour"] = hour
-            if minute is not None:
-                job["minute"] = minute
-            # Cambiar la hora implica un horario fijo (diario salvo que ya sea semanal).
-            if job.get("type") not in ("daily", "weekly"):
-                job["type"] = "daily"
-            cambios.append(f"hora {hour:02d}:{job.get('minute', 0):02d}")
-        elif minute is not None:
-            job["minute"] = minute
-            cambios.append(f"minuto {minute:02d}")
-        if not cambios:
-            return ("No indicaste qué cambiar.\n"
-                    "Ej: /cron editar 1 hora 22:30  |  /cron editar 1 mensaje nuevo texto  |  "
-                    "/cron editar 1 cada 45 min  |  /cron editar 1 dia martes")
-        # Reinicia el disparo para que el nuevo horario aplique limpio.
-        job["last_fired"] = ""
-        self._save_cron_json()
-        return f"Tarea {idx+1} actualizada ({', '.join(cambios)})."
 
-    def _apply_cron_edit_spec(self, idx, rest):
-        """Interpreta el 'campo valor' de una edición y aplica el cambio."""
-        rest = rest.strip()
-        rlow = rest.lower()
-        m = re.match(r'cada\s+(\d+)\s*(minutos?|mins?|m|horas?|hrs?|h)\b', rlow)
-        if m:
-            n = int(m.group(1))
-            interval = n * 60 if m.group(2).startswith("h") else n
-            return self._edit_cron_job(idx, interval_min=max(1, interval))
-        m = re.search(r'(?:hora|a\s+las?)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', rlow)
-        if m:
-            h = int(m.group(1))
-            minute = int(m.group(2) or 0)
-            ampm = (m.group(3) or "")
-            if ampm == "pm" and h < 12:
-                h += 12
-            if ampm == "am" and h == 12:
-                h = 0
-            if not (0 <= h <= 23 and 0 <= minute <= 59):
-                return "Hora inválida. Usa 0-23 y 0-59."
-            return self._edit_cron_job(idx, hour=h, minute=minute)
-        m = re.match(r'(?:dia|día)\s+(\w+)', rlow)
-        if m:
-            wd = self._WEEKDAY_MAP.get(m.group(1))
-            if wd is None:
-                return "Día no reconocido. Usa lunes..domingo."
-            return self._edit_cron_job(idx, weekday=wd)
-        m = re.match(r'(?:mensaje|texto|msg)\s+(.+)', rest, flags=re.IGNORECASE | re.DOTALL)
-        if m:
-            return self._edit_cron_job(idx, message=m.group(1).strip())
-        # Sin campo explícito: se asume que es el nuevo mensaje.
-        return self._edit_cron_job(idx, message=rest)
 
-    def _manage_cron_command(self, prompt):
-        """Gestión avanzada de tareas: editar, pausar/activar y crear semanales.
-        Devuelve el texto de respuesta, o None si no es un comando de gestión."""
-        text = (prompt or "").strip()
-        low = text.lower()
-
-        # Pausar: /cron off|pausar|desactivar <num>
-        m = re.match(r'/cron\s+(?:off|pausar|pausa|desactivar)\s+(\d+)', low)
-        if m:
-            return self._toggle_cron_job(int(m.group(1)) - 1, False)
-        # Activar: /cron on|activar|reanudar <num>
-        m = re.match(r'/cron\s+(?:on|activar|activa|reanudar)\s+(\d+)', low)
-        if m:
-            return self._toggle_cron_job(int(m.group(1)) - 1, True)
-
-        # Editar: /cron editar|edit|modificar|cambiar <num> <campo> <valor>
-        m = re.match(r'/cron\s+(?:editar|edit|modificar|cambiar)\s+(\d+)\s+(.+)',
-                     text, flags=re.IGNORECASE | re.DOTALL)
-        if m:
-            return self._apply_cron_edit_spec(int(m.group(1)) - 1, m.group(2))
-
-        # Editar en lenguaje natural: "modifica/cambia/edita la tarea N ..."
-        m = re.match(r'(?:cambia|cambiar|modifica|modificar|edita|editar)\s+(?:la\s+)?'
-                     r'tarea\s+(\d+)\s+(?:a\s+|para\s+|por\s+)?(.+)',
-                     text, flags=re.IGNORECASE | re.DOTALL)
-        if m:
-            return self._apply_cron_edit_spec(int(m.group(1)) - 1, m.group(2))
-
-        # Pausar/activar en lenguaje natural.
-        m = re.match(r'(?:pausa|pausar|desactiva|desactivar|detén|deten)\s+(?:la\s+)?tarea\s+(\d+)', low)
-        if m:
-            return self._toggle_cron_job(int(m.group(1)) - 1, False)
-        m = re.match(r'(?:activa|activar|reanuda|reanudar)\s+(?:la\s+)?tarea\s+(\d+)', low)
-        if m:
-            return self._toggle_cron_job(int(m.group(1)) - 1, True)
-
-        # Crear semanal: requiere intención explícita (/cron, o una palabra de
-        # agenda como los/cada/todos los/programa/agenda/recuérdame/avísame) para
-        # no capturar frases normales tipo "lunes a las 10 entrego el informe".
-        m = re.match(
-            r'(?:/cron\s+|los?\s+|cada\s+|todos\s+los\s+|'
-            r'programa\s+|agenda\s+|recu[eé]rdame\s+(?:que\s+)?|av[ií]same\s+(?:que\s+)?)'
-            r'(?:los?\s+|cada\s+)?'
-            r'(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bados?|domingos?)'
-            r'\s+a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)',
-            text, flags=re.IGNORECASE | re.DOTALL)
-        if m:
-            wd = self._WEEKDAY_MAP.get(m.group(1).lower())
-            if wd is None:
-                return None
-            h = int(m.group(2))
-            minute = int(m.group(3) or 0)
-            ampm = (m.group(4) or "")
-            if ampm == "pm" and h < 12:
-                h += 12
-            if ampm == "am" and h == 12:
-                h = 0
-            if not (0 <= h <= 23 and 0 <= minute <= 59):
-                return "Hora inválida. Usa 0-23 y 0-59."
-            return self._add_cron_weekly(wd, h, minute, m.group(5).strip())
-
-        return None
 
     def _get_skills_context(self):
         return (
@@ -12863,264 +10518,6 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
             return ""
         return last if os.path.isdir(last) else os.path.dirname(last)
 
-    def _try_handle_create_document(self, prompt):
-        """Detect 'crea(me) (un) archivo X.docx/X.pdf [en CARPETA] con/sobre/del TEMA'
-        and create the document with LLM-generated content. Returns (handled, result)."""
-        text = prompt.strip()
-        # Variant A: "crea(me) archivo|presentacion|excel docx|pdf|xlsx|pptx [NOMBRE] [en LOC] (con|sobre|...) TEMA"
-        # Variant B: "crea(me) archivo NOMBRE.docx|.pdf|.xlsx|.pptx [en LOC] (con|sobre|...) TEMA"
-        verb_re = r"(?:cr[eé]a(?:me|r)?|genera(?:me)?|haz(?:me)?|hacer|arma(?:me)?|prepara(?:me)?)"
-        kind_re = r"(?:archivo|documento|doc|file|presentaci[oó]n|presentacion|diapositivas|slides|deck|excel|hoja(?:\s+de\s+c[aá]lculo)?|planilla|spreadsheet|libro)"
-        connector_re = r"(?:con|sobre|del|de|acerca\s+de|que\s+(?:tenga|contenga|diga|incluya|muestre))"
-        location_re = r"(?:en|dentro\s+de)"
-        fmt_alts = r"(docx|pdf|word|xlsx|excel|pptx|powerpoint|ppt)"
-
-        # Detect format hint also from kind word itself (excel/presentacion)
-        kind_match = re.match(rf"^{verb_re}\s+(?:un[ao]?\s+|el\s+|la\s+)?({kind_re})\b", text, re.I)
-        kind_word = kind_match.group(1).lower() if kind_match else ""
-
-        # Variant A
-        m = re.match(
-            rf"^{verb_re}\s+(?:un[ao]?\s+|el\s+|la\s+)?{kind_re}\s+"
-            rf"{fmt_alts}\b\s*"
-            rf"(?:(?!{location_re}\s|{connector_re}\s)(\S.*?)\s+)?"
-            rf"(?:{location_re}\s+(.+?)\s+)?"
-            rf"{connector_re}\s+(.+)$",
-            text, re.I,
-        )
-        if m:
-            fmt_word = m.group(1)
-            name_part = m.group(2) or ""
-            location_part = m.group(3)
-            topic = m.group(4)
-        else:
-            # Variant B: name has explicit extension
-            m = re.match(
-                rf"^{verb_re}\s+(?:un[ao]?\s+|el\s+|la\s+)?{kind_re}\s+"
-                rf"(\S+\.(?:docx|pdf|xlsx|pptx))"
-                rf"(?:\s+{location_re}\s+(.+?))?"
-                rf"\s+{connector_re}\s+(.+)$",
-                text, re.I,
-            )
-            if m:
-                fmt_word = None
-                name_part = m.group(1)
-                location_part = m.group(2)
-                topic = m.group(3)
-            else:
-                # Variant C: format implied by kind word (excel/presentacion sin docx/pdf)
-                m = re.match(
-                    rf"^{verb_re}\s+(?:un[ao]?\s+|el\s+|la\s+)?{kind_re}\s+"
-                    rf"(?:(?!{location_re}\s|{connector_re}\s)(\S.*?)\s+)?"
-                    rf"(?:{location_re}\s+(.+?)\s+)?"
-                    rf"{connector_re}\s+(.+)$",
-                    text, re.I,
-                )
-                if not m or not kind_word:
-                    return False, ""
-                fmt_word = None
-                name_part = m.group(1) or ""
-                location_part = m.group(2)
-                topic = m.group(3)
-
-        name_clean = (name_part or "").strip().strip('"\'')
-        fmt = ""
-        if fmt_word:
-            fw = fmt_word.lower()
-            if fw in ("docx", "word"):
-                fmt = "docx"
-            elif fw == "pdf":
-                fmt = "pdf"
-            elif fw in ("xlsx", "excel"):
-                fmt = "xlsx"
-            elif fw in ("pptx", "powerpoint", "ppt"):
-                fmt = "pptx"
-        elif name_clean.lower().endswith(".docx"):
-            fmt = "docx"
-        elif name_clean.lower().endswith(".pdf"):
-            fmt = "pdf"
-        elif name_clean.lower().endswith(".xlsx"):
-            fmt = "xlsx"
-        elif name_clean.lower().endswith(".pptx"):
-            fmt = "pptx"
-        elif kind_word:
-            if "excel" in kind_word or "hoja" in kind_word or "planilla" in kind_word or "spreadsheet" in kind_word or "libro" in kind_word:
-                fmt = "xlsx"
-            elif "presentaci" in kind_word or "diapositiv" in kind_word or "slides" in kind_word or "deck" in kind_word:
-                fmt = "pptx"
-        if not fmt:
-            return False, ""
-
-        # Resolve location: explicit phrase, or 'esta carpeta' reference, or Downloads default
-        folder = ""
-        if location_part:
-            ref = self._resolve_last_folder_reference(location_part)
-            if ref:
-                folder = ref
-            else:
-                low = location_part.lower()
-                if any(w in low for w in ("esta carpeta", "ultima carpeta", "última carpeta", "carpeta anterior", "esa carpeta", "misma carpeta")):
-                    # Reference but no memory available -> fall back to Downloads silently
-                    folder = ""
-                else:
-                    folder = location_part.strip()
-        else:
-            ref = self._resolve_last_folder_reference(prompt)
-            if ref:
-                folder = ref
-        if not folder:
-            folder = os.path.expanduser("~/Downloads")
-
-        # Strip extension from name to rebuild it cleanly; derive from topic if missing
-        bare = re.sub(r"\.(docx|pdf)$", "", name_clean, flags=re.I).strip()
-        if not bare:
-            slug = re.sub(r"[^A-Za-z0-9_\- ]+", "", topic).strip()
-            slug = re.sub(r"\s+", "_", slug)[:60] or "documento"
-            bare = slug
-        full_path = os.path.join(folder, f"{bare}.{fmt}")
-
-        topic_clean = topic.strip().rstrip(".")
-
-        try:
-            import claudy_powers as cp
-        except Exception as e:
-            return True, f"Error: {e}"
-
-        # ALL formats: try to ground content with web search first
-        try:
-            self.after(0, lambda: self._set_response_text(f"Buscando datos en internet sobre: {topic_clean}..."))
-        except Exception:
-            pass
-        web_ctx = self._web_context_for_topic(topic_clean, max_results=8)
-
-        # Load professional formatting rules from skill file
-        _skill_rules = ""
-        try:
-            _skill_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "..", "..", "skills", "professional-document-writer", "SKILL.md"
-            )
-            if os.path.isfile(_skill_path):
-                with open(_skill_path, "r", encoding="utf-8") as _sf:
-                    _skill_rules = _sf.read()
-        except Exception:
-            pass
-        if not _skill_rules:
-            _skill_rules = (
-                "FORMATO PROFESIONAL:\n"
-                "- Título con # TÍTULO. Introducción obligatoria.\n"
-                "- Secciones con ## y subsecciones con ###. Nunca saltes niveles.\n"
-                "- Usa **negritas** para conceptos clave, *cursivas* para énfasis secundario.\n"
-                "- Datos comparativos en TABLAS Markdown (| Col | Col |).\n"
-                "- Citas importantes con > formato.\n"
-                "- Termina con ## Conclusiones y ## Referencias.\n"
-                "- NO uses placeholders como [Insertar aquí]. Escribe contenido real.\n"
-                "- NO incluyas saludos ni comentarios fuera del documento."
-            )
-
-        # Check if user wants images in natural language document creation
-        _wants_images_nl = False
-        _img_keywords = ("imagen", "imágenes", "imagenes", "foto", "fotos",
-                         "ilustra", "ilustracion", "ilustraciones", "visual",
-                         "gráfico", "grafico", "con imagen", "con fotos")
-        if any(k in prompt.lower() for k in _img_keywords):
-            _wants_images_nl = True
-
-        # Format-specific LLM prompts
-        if fmt in ("docx", "pdf"):
-            llm_prompt = (
-                (web_ctx + "\n\n" if web_ctx else "") +
-                f"Escribe un documento profesional en espanol sobre: {topic_clean}.\n"
-                + ("USA la informacion de internet de arriba como base factual. Cita fuentes al final cuando uses datos especificos. " if web_ctx else "") +
-                f"\nDIRECTRICES DE FORMATO PROFESIONAL (sigue TODAS estas reglas):\n{_skill_rules}\n\n"
-                "REGLAS ADICIONALES:\n"
-                "- Escribe contenido COMPLETO y REAL. NO uses placeholders como [Introducción], [Sección], [Insertar aquí], etc.\n"
-                "- Cada sección debe tener párrafos sustanciales (mínimo 2-3 párrafos).\n"
-                "- Incluye al menos UNA tabla Markdown con datos relevantes.\n"
-                "- Extensión: 500-900 palabras. Solo el contenido del documento, sin preambulo ni cierre."
-            )
-            content = self._llm_structured(llm_prompt, timeout=180)
-            if not content:
-                return True, f"No pude generar contenido para '{topic_clean}'."
-
-            # Download and attach images if requested
-            if _wants_images_nl and fmt == "docx":
-                try:
-                    self.after(0, lambda: self._set_response_text(f"Descargando imágenes para: {topic_clean}..."))
-                    image_paths = self._download_report_images(topic_clean, max_images=3)
-                except Exception:
-                    image_paths = []
-                if image_paths:
-                    return True, cp.create_docx_with_images(full_path, content, image_paths)
-
-            if fmt == "docx":
-                return True, cp.create_docx(full_path, content)
-            return True, cp.create_pdf(full_path, content)
-
-        if fmt == "xlsx":
-            llm_prompt = (
-                (web_ctx + "\n\n" if web_ctx else "") +
-                f"Genera datos de hoja de calculo profesional en espanol sobre: {topic_clean}.\n"
-                + ("USA los datos de internet de arriba como base. Si los datos son incompletos, completa con cifras plausibles pero MARCA esas filas con '(estimado)' al final. " if web_ctx else "") +
-                "Responde SOLO con un JSON valido (sin ```fences```) con esta forma exacta:\n"
-                '{"name": "NombreHoja", "headers": ["Col1","Col2",...], "rows": [["v1","v2"],...]}\n'
-                "Si el tema requiere varias hojas, usa: {\"sheets\": [{\"name\":..., \"headers\":..., \"rows\":...}, ...]}.\n"
-                "Entre 8 y 20 filas con datos realistas y concretos. Incluye una columna 'Fuente' al final si usaste datos web. "
-                "Sin texto fuera del JSON."
-            )
-            raw = self._llm_structured(llm_prompt, timeout=180, expect_json=True)
-            data = self._extract_json(raw)
-            if not data:
-                # Last-ditch: build a sheet from the web search snippets themselves
-                lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip() and not ln.strip().startswith("{")]
-                rows = []
-                if web_ctx:
-                    for line in web_ctx.split("\n"):
-                        s = line.strip().lstrip("- ").strip()
-                        if s and not s.startswith("DATOS DE INTERNET") and not s.startswith("Fuente:"):
-                            rows.append([s[:300]])
-                if not rows and lines:
-                    rows = [[ln[:300]] for ln in lines[:30]]
-                if not rows:
-                    return True, f"No pude generar datos para '{topic_clean}'. Intenta de nuevo o se mas especifico."
-                data = {"name": (bare[:31] or "Datos"), "headers": ["Informacion"], "rows": rows[:40]}
-            return True, cp.create_xlsx(full_path, data, title=bare[:31] or "Datos")
-
-        if fmt == "pptx":
-            llm_prompt = (
-                (web_ctx + "\n\n" if web_ctx else "") +
-                f"Genera una presentacion profesional en espanol sobre: {topic_clean}.\n"
-                + ("USA los datos de internet de arriba como base factual. " if web_ctx else "") +
-                "Responde SOLO con un JSON valido con esta forma exacta:\n"
-                "{\n"
-                '  "title": "Titulo principal",\n'
-                '  "subtitle": "Subtitulo descriptivo",\n'
-                '  "theme": "history|nature|tech|business|education|warm|dark|minimal",\n'
-                '  "slides": [\n'
-                '    {"title": "Titulo slide", "bullets": ["punto 1","punto 2","punto 3"], "image_query": "descripcion visual en INGLES para generar imagen"},\n'
-                "    ...\n"
-                "  ]\n"
-                "}\n"
-                "Reglas:\n"
-                "- 6 a 10 slides. Cada slide con 3-5 bullets concisos (max 14 palabras).\n"
-                "- `theme`: elige el que mejor encaje con el tema (history para historia, tech para tecnologia, nature para naturaleza, etc.).\n"
-                "- `image_query`: SIEMPRE en INGLES, visual concreto y especifico, sin texto en la imagen. Ej: 'mapuche warriors traditional dress 19th century', 'santiago chile colonial architecture'.\n"
-                "- Sin texto fuera del JSON. Sin ```fences```."
-            )
-            raw = self._llm_structured(llm_prompt, timeout=180)
-            data = self._extract_json(raw) or {}
-            if not data.get("slides"):
-                return True, f"No pude generar la estructura para '{topic_clean}'. Intenta otra vez o se mas especifico."
-            return True, cp.create_pptx(
-                full_path,
-                slides=data.get("slides") or [],
-                title=data.get("title") or topic_clean,
-                subtitle=data.get("subtitle") or "",
-                theme=(data.get("theme") or "business").lower(),
-                images=True,
-            )
-
-        return False, ""
 
     def _needs_real_data(self, topic):
         """Heuristic: does this topic require fresh/real-world data (not LLM-fabricated)?"""
@@ -13250,831 +10647,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         "en local", "búscalo local", "buscalo local", "revisa la carpeta", "mira en la carpeta",
     ]
 
-    def _try_local_file_action(self, prompt, lower):
-        """Si el usuario indica una UBICACIÓN local + buscar/analizar un archivo:
-        ubica el archivo por semejanza, lo analiza y devuelve un mensaje con el resumen.
-        Devuelve (handled, result)."""
-        if not any(kw in lower for kw in self._LOCAL_LOC_KWS):
-            return False, None
-        # 1) Nombre/consulta del archivo
-        fp = re.search(r'[\w.\-]{2,}\.\w{1,5}', prompt)
-        query = fp.group(0) if fp else ""
-        if not query:
-            m = re.search(r'(?:archivo|fichero)\s+(?:llamado\s+|que\s+se\s+llama\s+)?(.+)$', lower)
-            if m:
-                query = m.group(1).strip()
-        if not query:
-            cleaned = lower
-            for w in self._LOCAL_LOC_KWS:
-                cleaned = cleaned.replace(w, " ")
-            cleaned = re.sub(
-                r"\b(busca|buscar|búscalo|buscalo|encuentra|encuéntrame|encuentrame|esta|este|esto|ese|esa|eso|el|la|los|las|en|mi|archivo|fichero)\b",
-                " ", cleaned)
-            query = re.sub(r"\s+", " ", cleaned).strip()
-        # Quitar comandos que se cuelan al final ("... y analízalo", "y dime de qué trata")
-        query = re.sub(
-            r'\s*\b(y|e|,)?\s*(anal[ií]za\w*|anal[ií]zam\w*|dime|mu[eé]stra\w*|res[uú]m\w*|abre\w*|lee\w*|de\s+qu[eé]\s+(se\s+)?trata|qu[eé]\s+trata|por\s+favor)\b.*$',
-            '', query, flags=re.IGNORECASE)
-        query = query.strip(" .,:;¿?¡!y").strip()
-        if (not query or query in ("esta", "este", "esto", "ese", "esa", "eso")):
-            last = (getattr(self, "_last_file_query", "") or "").strip()
-            query = last.split()[0] if last else ""
-        if not query or len(query) < 2:
-            return True, "¿Qué archivo busco? Dime el nombre (o parte de él)."
-        self._last_file_query = query
 
-        # 2) Carpeta objetivo
-        home = os.path.expanduser("~")
-        if "descarga" in lower:
-            dirs = [os.path.join(home, "Downloads")]
-        elif "escritorio" in lower or "desktop" in lower:
-            dirs = [os.path.join(home, "Desktop")]
-        elif "documento" in lower:
-            dirs = [os.path.join(home, "Documents")]
-        else:
-            dirs = [os.path.join(home, d) for d in ("Downloads", "Desktop", "Documents")] + [home]
-
-        # 3) Buscar (fuzzy) y analizar el más parecido
-        scored = self._find_local_files(query, dirs)
-        if not scored:
-            return True, (f"No encontré ningún archivo parecido a '{query}' en esa carpeta. "
-                          "Prueba con otra parte del nombre.")
-        ambiguous = len(scored) > 1 and (scored[0][0] - scored[1][0]) < 0.4
-        if ambiguous:
-            listado = "\n".join(f"  • {os.path.basename(p)}" for _, p in scored[:6])
-            return True, (f"Encontré varios archivos parecidos a '{query}':\n{listado}\n\n"
-                          "¿Cuál analizo? (dime el nombre)")
-        return True, self._analyze_local_file_sync(scored[0][1])
-
-    def _try_handle_skill_action(self, prompt):
-        lower = prompt.lower().strip()
-
-        # Clean politeness wrappers so natural language triggers match perfectly
-        cleaned_prompt = prompt
-        try:
-            import claudy_powers as cp
-            cleaned_prompt = cp.clean_politeness_prefixes(prompt)
-        except Exception:
-            pass
-
-        # ===== Marcador directo para analizar un archivo por ruta (lo usa el bot de Telegram) =====
-        if prompt.strip().startswith("[CLAUDY_ANALYZE_FILE:") and prompt.strip().endswith("]"):
-            try:
-                path = prompt.strip()[len("[CLAUDY_ANALYZE_FILE:"):-1].strip().strip('"\'')
-                if os.path.exists(path):
-                    return True, self._analyze_local_file_sync(path)
-                return True, f"No encontré el archivo en {path}."
-            except Exception as e:
-                return True, f"No pude analizar el archivo: {e}"
-
-        # ===== Actualizar memoria (Claudy + agentes + Obsidian) bajo orden explícita =====
-        try:
-            mem_hit, mem_fact = self._extract_memory_fact(prompt, lower)
-            if mem_hit:
-                return True, self._remember_knowledge(mem_fact)
-        except Exception:
-            pass
-
-        # ===== Buscar + analizar un archivo LOCAL (debe ir ANTES de crear-documento,
-        # porque "analiza el archivo X de la carpeta Y" NO es crear un documento) =====
-        try:
-            loc_handled, loc_result = self._try_local_file_action(prompt, lower)
-            if loc_handled:
-                return True, loc_result
-        except Exception:
-            pass
-
-        # ===== Crear documento .docx/.pdf con contenido generado por LLM =====
-        try:
-            handled, result = self._try_handle_create_document(cleaned_prompt)
-            if handled:
-                return True, result
-        except Exception:
-            pass
-
-        # ===== CLAUDY POWERS (intent detection lenguaje natural) =====
-        try:
-            import claudy_powers as cp
-            intent, arg = cp.detect_intent(prompt)
-            if intent:
-                # Confirm sensitive actions in the response, then execute async
-                return True, cp.execute_intent(intent, arg)
-        except Exception:
-            pass
-
-        # 1. Web search
-        if lower.startswith("/buscar ") or lower.startswith("/search "):
-            query = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._web_search_and_answer(query) if query else "¿Qué quieres que busque?"
-
-        # 2. Screenshot
-        if lower.startswith("/screenshot") or lower.startswith("/captura") or lower.startswith("/screen"):
-            return True, self._take_screenshot()
-
-        # 3. Read file
-        if lower.startswith("/leer ") or lower.startswith("/read ") or lower.startswith("/abrir "):
-            path = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._read_local_file(path) if path else "Qué archivo quieres que lea?"
-
-        # 3b. Explicit Document Creators
-        if lower.startswith("/docx ") or lower.startswith("/create-docx ") or lower.startswith("/crear-docx "):
-            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
-            try:
-                import claudy_powers as cp
-                path, content = cp.parse_path_content_arg(rest)
-                return True, cp.create_docx(path, content) if path else "Uso: /docx <ruta> | <contenido>"
-            except Exception as e:
-                return True, f"Error creando docx: {e}"
-
-        if lower.startswith("/xlsx ") or lower.startswith("/create-xlsx ") or lower.startswith("/crear-xlsx ") or lower.startswith("/excel "):
-            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
-            try:
-                import claudy_powers as cp
-                path, content = cp.parse_path_content_arg(rest)
-                import json
-                try:
-                    data = json.loads(content)
-                except Exception:
-                    data = [line.split(",") for line in content.split("\n") if line.strip()]
-                return True, cp.create_xlsx(path, data) if path else "Uso: /xlsx <ruta> | <contenido CSV/JSON>"
-            except Exception as e:
-                return True, f"Error creando xlsx: {e}"
-
-        if lower.startswith("/pptx ") or lower.startswith("/create-pptx ") or lower.startswith("/crear-pptx ") or lower.startswith("/powerpoint "):
-            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
-            try:
-                import claudy_powers as cp
-                path, content = cp.parse_path_content_arg(rest)
-                import json
-                slides = None
-                title = ""
-                subtitle = ""
-                theme = "business"
-                try:
-                    parsed = json.loads(content)
-                    if isinstance(parsed, dict):
-                        slides = parsed.get("slides")
-                        title = parsed.get("title", "")
-                        subtitle = parsed.get("subtitle", "")
-                        theme = parsed.get("theme", "business")
-                    elif isinstance(parsed, list):
-                        slides = parsed
-                except Exception:
-                    slides = [{"title": s.strip(), "bullets": ["Detalle"]} for s in content.split("\n") if s.strip()]
-                return True, cp.create_pptx(path, slides, title, subtitle, theme) if path else "Uso: /pptx <ruta> | <contenido JSON>"
-            except Exception as e:
-                return True, f"Error creando pptx: {e}"
-
-        if lower.startswith("/pdf ") or lower.startswith("/create-pdf ") or lower.startswith("/crear-pdf "):
-            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
-            try:
-                import claudy_powers as cp
-                path, content = cp.parse_path_content_arg(rest)
-                return True, cp.create_pdf(path, content) if path else "Uso: /pdf <ruta> | <contenido>"
-            except Exception as e:
-                return True, f"Error creando pdf: {e}"
-
-        # 3c. Create/edit files
-        if lower.startswith("/mkdir ") or lower.startswith("/crear-carpeta "):
-            path = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            try:
-                import claudy_powers as cp
-                return True, cp.create_folder(path) if path else "Uso: /mkdir <ruta>"
-            except Exception as e:
-                return True, f"Error creando carpeta: {e}"
-        if lower.startswith("/write ") or lower.startswith("/crear-archivo "):
-            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
-            try:
-                import claudy_powers as cp
-                path, content = cp.parse_path_content_arg(rest)
-                return True, cp.write_file(path, content) if path else "Uso: /write <ruta> | <contenido>"
-            except Exception as e:
-                return True, f"Error escribiendo archivo: {e}"
-        if lower.startswith("/append ") or lower.startswith("/agregar-archivo "):
-            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
-            try:
-                import claudy_powers as cp
-                path, content = cp.parse_path_content_arg(rest)
-                return True, cp.append_file(path, content) if path else "Uso: /append <ruta> | <contenido>"
-            except Exception as e:
-                return True, f"Error agregando contenido: {e}"
-        if lower.startswith("/replace ") or lower.startswith("/edit-replace "):
-            rest = prompt.split(None, 1)[1] if " " in prompt.strip() else ""
-            parts = [x.strip() for x in rest.split(" | ", 2)]
-            if len(parts) < 3:
-                return True, "Uso: /replace <ruta> | <buscar> | <reemplazo>"
-            try:
-                import claudy_powers as cp
-                return True, cp.replace_in_file(parts[0], parts[1], parts[2])
-            except Exception as e:
-                return True, f"Error editando archivo: {e}"
-
-        # 4. Execute command
-        if lower.startswith("/cmd ") or lower.startswith("/command ") or lower.startswith("/ejecutar "):
-            cmd = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._execute_command(cmd) if cmd else "Qué comando quieres ejecutar?"
-
-        # 5. Reminder
-        if lower.startswith("/recordar ") or lower.startswith("/reminder ") or lower.startswith("/alarma "):
-            text = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._set_reminder(text) if text else "Formato: /recordar 10 minutos comprar leche"
-
-        # 6. News
-        if lower.startswith("/noticias") or lower.startswith("/news") or lower.startswith("/noti"):
-            return True, self._get_news()
-
-        # 7. Translation
-        if lower.startswith("/traducir ") or lower.startswith("/translate ") or lower.startswith("/trad"):
-            text = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._translate_text(text) if text else "Formato: /traducir hello world a español"
-
-        # 8. Calculator
-        if lower.startswith("/calc ") or lower.startswith("/calcular ") or lower.startswith("/math "):
-            expr = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._calculate(expr) if expr else "Qué quieres calcular? Ej: /calc 2+2*3"
-
-        # 9. Music control
-        if lower.startswith("/musica ") or lower.startswith("/music ") or lower.startswith("/media "):
-            action = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._control_music(action) if action else "Acciones: play, pause, siguiente, anterior"
-
-        # 10. Theme toggle
-        if lower.startswith("/tema") or lower.startswith("/theme") or lower.startswith("/modo"):
-            return True, self._toggle_theme()
-
-        # 10.1 Backup commands
-        if lower.startswith("/backup") or lower.startswith("/respaldo"):
-            parts = prompt.strip().split()
-            sub = parts[1].lower() if len(parts) > 1 else ""
-            if sub in ("on", "auto", "activar", "enable"):
-                return True, self._set_auto_backup(True)
-            if sub in ("off", "desactivar", "disable"):
-                return True, self._set_auto_backup(False)
-            if sub in ("status", "estado"):
-                return True, self._backup_status()
-            if sub in ("restore", "restaurar"):
-                return True, "Para restaurar usa: powershell -ExecutionPolicy Bypass -File scripts\\restore-claudy-full.ps1"
-            # Default: run backup now
-            return True, self._run_backup_now()
-
-        # 10.5 Disk space
-        if lower.startswith("/disco") or lower.startswith("/espacio") or lower.startswith("/disk") or lower.startswith("/space") or lower.startswith("/almacenamiento"):
-            return True, self._get_disk_space()
-
-        # 11. File search
-        if lower.startswith("/buscar_archivo") or lower.startswith("/find_file") or lower.startswith("/buscar archivo"):
-            query = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._search_files(query) if query else "Qué archivo buscas? Ej: /buscar_archivo reporte.pdf"
-
-        # 12. Install app
-        if lower.startswith("/instalar") or lower.startswith("/install"):
-            app = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._install_app(app) if app else "Qué aplicación quieres instalar? Ej: /instalar winrar"
-
-        # 13. Download file
-        if lower.startswith("/descargar") or lower.startswith("/download") or lower.startswith("/bajar"):
-            url = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._download_file(url) if url else "Qué URL quieres descargar? Ej: /descargar https://ejemplo.com/archivo.zip"
-
-        # 14. Execute file
-        if lower.startswith("/ejecutar") or lower.startswith("/run") or lower.startswith("/abrir archivo"):
-            path = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._execute_file(path) if path else "Que archivo quieres ejecutar? Ej: /ejecutar C:\\Users\\felip\\Downloads\\app.exe"
-
-        # 15. Checkpoint / Rollback
-        if lower.startswith("/checkpoint") or lower.startswith("/guardar_punto"):
-            label = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else "manual"
-            return True, self._create_checkpoint(label)
-        if lower.startswith("/rollback") or lower.startswith("/deshacer") or lower.startswith("/volver"):
-            label = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else None
-            return True, self._rollback_checkpoint(label)
-        if lower.startswith("/checkpoints") or lower.startswith("/puntos"):
-            return True, self._list_checkpoints()
-
-        # 16. Memory search
-        if lower.startswith("/recordar ") or lower.startswith("/buscar_memoria ") or lower.startswith("/memoria "):
-            query = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._search_memory_cmd(query) if query else "Que quieres buscar en la memoria? Ej: /memoria python"
-
-        # ---- Natural language routing (no / prefix) ----
-        # 17. Subagentes
-        if lower.startswith("/delegar ") or lower.startswith("/delegate "):
-            task = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._spawn_subagent(task) if task else "Que tarea delego? Ej: /delegar analizar el codigo de pet.py"
-        if lower.startswith("/resultado") or lower.startswith("/sub_result"):
-            r = self._check_subagent_result()
-            return True, r if r else "No hay resultados de subagente pendientes."
-
-        # 18. Kanban
-        if lower.startswith("/kanban add ") or lower.startswith("/kanban crear "):
-            title = prompt.split(None, 2)[2].strip() if len(prompt.split(None)) > 2 else ""
-            return True, self._kanban_add(title) if title else "Uso: /kanban add <titulo>"
-        if lower.startswith("/kanban move ") or lower.startswith("/kanban mover "):
-            parts = prompt.split(None)
-            if len(parts) >= 4:
-                try:
-                    tid = int(parts[2])
-                    status = parts[3]
-                    return True, self._kanban_move(tid, status)
-                except ValueError:
-                    pass
-            return True, "Uso: /kanban move <id> <backlog|todo|in_progress|done>"
-        if lower.startswith("/kanban delete ") or lower.startswith("/kanban borrar "):
-            parts = prompt.split(None)
-            try:
-                tid = int(parts[2])
-                return True, self._kanban_delete(tid)
-            except (ValueError, IndexError):
-                return True, "Uso: /kanban delete <id>"
-        if lower.startswith("/kanban") or lower.startswith("/board"):
-            return True, self._kanban_list()
-
-        # 19. Webhooks
-        if lower.startswith("/webhook add ") or lower.startswith("/webhook crear "):
-            parts = prompt.split(None, 2)
-            if len(parts) >= 3:
-                name = parts[2].split()[0] if len(parts[2].split()) > 0 else ""
-                url = " ".join(parts[2].split()[1:]) if len(parts[2].split()) > 1 else ""
-                return True, self._webhook_register(name, url) if name and url else "Uso: /webhook add <nombre> <url>"
-            return True, "Uso: /webhook add <nombre> <url>"
-        if lower.startswith("/webhook trigger") or lower.startswith("/webhook disparar"):
-            return True, self._webhook_trigger_all()
-        if lower.startswith("/webhook") or lower.startswith("/webhooks"):
-            return True, self._webhook_list()
-
-        # 20. Git Worktrees
-        if lower.startswith("/worktree add ") or lower.startswith("/worktree crear "):
-            parts = prompt.split(None)
-            name = parts[2] if len(parts) > 2 else ""
-            branch = parts[3] if len(parts) > 3 else "main"
-            return True, self._worktree_create(name, branch) if name else "Uso: /worktree add <nombre> [branch]"
-        if lower.startswith("/worktree remove ") or lower.startswith("/worktree borrar "):
-            parts = prompt.split(None)
-            name = parts[2] if len(parts) > 2 else ""
-            return True, self._worktree_remove(name) if name else "Uso: /worktree remove <nombre>"
-        if lower.startswith("/worktree") or lower.startswith("/worktrees"):
-            return True, self._worktree_list()
-
-        # ---- Natural language routing (no / prefix) ----
-
-        # Weather/Clima: auto-search for weather queries
-        weather_kws = ["clima ", "clima de ", "el clima en ", "tiempo en ", "pronóstico ",
-                       "pronostico ", "weather ", "temperatura en ", "lluvia en ",
-                       "va a llover", "hace frío", "hace calor", "clima para"]
-        if any(kw in lower for kw in weather_kws):
-            # Extract city name from the prompt
-            city = ""
-            city_kws = ["clima de ", "clima en ", "el clima en ", "tiempo en ", "pronóstico de ",
-                        "pronostico de ", "pronóstico en ", "pronostico en ", "temperatura en ",
-                        "lluvia en ", "clima para ", "weather in ", "weather for "]
-            for ck in city_kws:
-                if ck in lower:
-                    city = prompt[lower.index(ck) + len(ck):].strip().strip(".!?")
-                    break
-            if not city:
-                # Try to extract any location-like word after "clima"
-                after = prompt[lower.index("clima") + 5:].strip() if "clima" in lower else prompt
-                city = after.strip().strip(".!?")
-
-            # Clean trailing time/duration phrases from city name
-            trailing_phrases = [
-                "para toda la semana", "toda la semana", "para la semana",
-                "de esta semana", "esta semana", "la semana",
-                "para hoy", "de hoy", "hoy",
-                "para mañana", "de mañana", "mañana",
-                "para los proximos dias", "para los próximos días",
-                "de los proximos dias", "de los próximos días",
-                "por favor", "porfavor", "porfa", "please",
-                "para el fin de semana", "el fin de semana",
-            ]
-            city_lower = city.lower()
-            for phrase in trailing_phrases:
-                if phrase in city_lower:
-                    idx = city_lower.index(phrase)
-                    city = city[:idx].strip()
-                    city_lower = city.lower()
-
-            # Also remove leading filler words
-            for art in ["dame ", "dime ", "cual es ", "cuál es ", "como esta ", "cómo está ",
-                         "el ", "la ", "los ", "las ", "del ", "de ", "en "]:
-                if city.lower().startswith(art):
-                    city = city[len(art):]
-
-            city = city.strip().strip(".!?,")
-
-            # Check if city is a reference to current location
-            local_kws = ["mi ubicacion", "mi ubicación", "mi ciudad", "aqui", "aquí", "aca", "acá", "donde estoy", "donde vivo", "mi zona"]
-            if city.lower() in local_kws:
-                city = ""
-
-            return True, self._get_weather(city)
-
-        # "busca en internet" / "busca en la web" — pasan al LLM para síntesis natural
-        web_search_kws = ["busca en internet", "buscar en internet", "busca en la web",
-                          "buscar en la web", "busca en google", "googleame", "googlea"]
-        if any(kw in lower for kw in web_search_kws):
-            query = prompt
-            for kw in web_search_kws:
-                if kw in lower:
-                    query = prompt[lower.index(kw) + len(kw):].strip()
-                    break
-            return True, self._web_search_and_answer(query) if query else "¿Qué quieres que busque?"
-
-        # Play game: "quiero jugar megaman de nes", "jugar super mario snes"
-        play_kws = ["quiero jugar ", "jugar a ", "jugar ", "pon el juego ", "abre el juego ", "corre el juego "]
-        if any(kw in lower for kw in play_kws):
-            full_what = ""
-            for kw in play_kws:
-                if kw in lower:
-                    full_what = prompt[lower.index(kw) + len(kw):].strip().strip('"').strip("'").strip(".!?")
-                    break
-            if full_what:
-                # Try to extract console from "de nes", "en snes", "para gba"
-                for c_kw in [" de ", " en ", " para ", " on ", " for "]:
-                    if c_kw in full_what.lower():
-                        parts = full_what.lower().split(c_kw)
-                        game = parts[0].strip()
-                        console = parts[1].strip()
-                        # Handle trailing phrases like "para toda la semana" or similar junk
-                        return True, self._play_game(game, console)
-                return True, self._play_game(full_what)
-
-        # Download: detect URLs + download intent
-        url_pattern = re.compile(r'https?://[^\s<>"]+')
-        urls_found = url_pattern.findall(prompt)
-        download_keywords = ["descarga", "descargar", "bajar", "download", "trae este archivo", "consigue este archivo"]
-        if urls_found and any(kw in lower for kw in download_keywords):
-            return True, self._download_file(urls_found[0])
-
-        # Download by name (no URL): "descarga megaman rom", "baja el emulador de snes"
-        download_name_kws = ["descarga ", "descargar ", "bajar ", "bajame ", "bájame ",
-                             "download ", "descárgame ", "descargame "]
-        if any(kw in lower for kw in download_name_kws) and not urls_found:
-            what = ""
-            for kw in download_name_kws:
-                if kw in lower:
-                    what = prompt[lower.index(kw) + len(kw):].strip().strip('"').strip("'").strip(".!?")
-                    for art in ["el ", "la ", "los ", "las ", "un ", "una ", "de ", "del "]:
-                        if what.lower().startswith(art):
-                            what = what[len(art):]
-                            break
-                    break
-            if what:
-                self._last_file_query = what
-                return True, self._download_by_name(what)
-
-        # File search: detect explicit keywords + file names with extensions + search intent
-        # NOTA: NO incluir "donde está" / "donde esta" sin "el archivo" — son demasiado amplios
-        # y rompen preguntas como "donde están ubicados ellos?"
-        file_search_kws = ["busca el archivo", "buscar archivo", "busca archivo", "encuentra el archivo",
-                           "encuentra archivo", "dónde está el archivo", "donde esta el archivo",
-                           "dónde está el fichero", "donde esta el fichero",
-                           "busca en mi pc", "buscar en mi pc",
-                           "buscar en mi computadora", "find file", "buscando archivo",
-                           "buscando el archivo", "buscando este archivo", "busca este archivo"]
-        has_search_intent = any(kw in lower for kw in file_search_kws)
-
-        # Also detect if prompt contains a file name with extension + search words
-        file_pattern = re.search(r'\b\S+\.(dll|exe|pdf|txt|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|jpg|jpeg|png|gif|mp3|mp4|avi|mov|csv|json|xml|py|js|ts|html|css|java|cpp|c|h|go|rs|php|rb|swift|kt|sql|md|log|ini|cfg|bat|ps1|msi|iso|torrent)\b', lower)
-        search_words = ["busca", "buscar", "buscando", "encuentra", "donde", "dónde", "está", "esta", "quiero", "necesito"]
-        has_file_and_intent = file_pattern and any(w in lower for w in search_words)
-
-        if has_search_intent or has_file_and_intent:
-            query = ""
-            for kw in file_search_kws:
-                if kw in lower:
-                    query = prompt[lower.index(kw) + len(kw):].strip()
-                    break
-            if not query and file_pattern:
-                query = file_pattern.group(0)
-            if query:
-                self._last_file_query = query
-            return True, self._search_files(query) if query else "Qué archivo buscas?"
-
-        # Execute: "abre", "ejecuta", "corre" + file path
-        exec_kws = ["abre el archivo", "abrir archivo", "ejecuta", "ejecutar", "corre el archivo",
-                     "run file", "abre este archivo"]
-        if any(kw in lower for kw in exec_kws):
-            for kw in exec_kws:
-                if kw in lower:
-                    path = prompt[lower.index(kw) + len(kw):].strip().strip('"').strip("'")
-                    break
-            # If path looks like a file path (has extension or starts with drive letter)
-            if path and (os.path.splitext(path)[1] or path[1:3] == ":\\"):
-                return True, self._execute_file(path)
-
-        # Install app: "instala winrar", "quiero instalar vlc", etc.
-        install_kws = ["instala ", "instalar ", "baja e instala ", "quiero instalar ",
-                       "necesito instalar ", "me puedes instalar ", "podrias instalar ",
-                       "podrías instalar ", "consígueme e instala ", "bájame e instala ",
-                       "puedes instalar "]
-        if any(kw in lower for kw in install_kws):
-            app_name = ""
-            for kw in install_kws:
-                if kw in lower:
-                    app_name = prompt[lower.index(kw) + len(kw):].strip().strip('"').strip("'").strip(".!?")
-                    # Strip leading articles/prepositions
-                    for art in ["el ", "la ", "los ", "las ", "un ", "una ", "de ", "del "]:
-                        if app_name.lower().startswith(art):
-                            app_name = app_name[len(art):]
-                            break
-                    break
-            if app_name:
-                return True, self._install_app(app_name)
-
-        # Existing skill handlers
-        kw_find = ["busca skill", "buscar skill", "busca skills", "buscar skills",
-                    "busca una skill", "buscar una skill", "find skill", "instalar skill",
-                    "skill para", "skill de"]
-        if any(kw in lower for kw in kw_find):
-            query = prompt
-            for kw in ["skill para", "skill de", "skill sobre", "buscar skills", "busca skills",
-                        "buscar skill", "busca skill", "buscar una skill", "busca una skill", "find skill"]:
-                if kw in lower:
-                    query = prompt[lower.index(kw) + len(kw):].strip()
-                    break
-            return True, self._execute_find_skills(query or "general")
-        kw_pdf = ["crea un pdf", "crear un pdf", "crea pdf", "crear pdf",
-                   "genera pdf", "generar pdf", "haz un pdf", "hacer un pdf"]
-        if any(kw in lower for kw in kw_pdf):
-            content = prompt
-            for kw in kw_pdf:
-                if kw in lower:
-                    content = prompt[lower.index(kw) + len(kw):].strip()
-                    break
-            title = content.split("\n")[0].strip()[:80] or "Documento Claudy"
-            return True, self._create_pdf_simple(title, content)
-        kw_analyze = ["analiza", "leer", "extraer texto", "abrir", "lee el"]
-        if any(kw in lower for kw in kw_analyze) and ".pdf" in lower:
-            paths = re.findall(r'[A-Z]:[\\\/][^\s"\'<>]+\.pdf', prompt)
-            if not paths:
-                paths = re.findall(r'["\']?([^\s"\'<>]+\.pdf)["\']?', prompt, re.IGNORECASE)
-            if paths:
-                return True, self._analyze_pdf_text(paths[0])
-            return True, "No encuentro la ruta del PDF. Dame la ruta completa."
-        kw_obsidian = ["crea una nota", "crear una nota", "crea nota", "crear nota",
-                        "guarda en obsidian", "guardar en obsidian", "nota en obsidian",
-                        "nueva nota", "crear nota en"]
-        if any(kw in lower for kw in kw_obsidian):
-            content = prompt
-            for kw in kw_obsidian:
-                if kw in lower:
-                    content = prompt[lower.index(kw) + len(kw):].strip()
-                    break
-            title = content.split("\n")[0].strip()[:80] or f"Nota_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            return True, self._create_obsidian_note(title, content)
-        kw_obs_search = ["busca en obsidian", "buscar en obsidian", "buscar nota", "busca nota",
-                          "mis notas", "notas de"]
-        if any(kw in lower for kw in kw_obs_search):
-            query = prompt
-            for kw in kw_obs_search:
-                if kw in lower:
-                    query = prompt[lower.index(kw) + len(kw):].strip()
-                    break
-            return True, self._search_obsidian_notes(query or "")
-
-        # ==============================================================
-        # NEW SYSTEM COMMANDS
-        # ==============================================================
-
-        # PROCESOS: "dame los procesos", "que esta corriendo", "/procesos"
-        procesos_kws = ["/procesos", "procesos", "que esta corriendo", "qué está corriendo",
-                        "tareas activas", "procesos activos", "listame los procesos",
-                        "aplicaciones abiertas", "programas abiertos", "que programas",
-                        "dame los procesos", "muestrame los procesos", "ver procesos"]
-        if any(kw in lower for kw in procesos_kws):
-            return True, self._list_processes()
-
-        # MATAR proceso: "mata el proceso 1234", "/matar 1234", "/kill 1234", "termina el proceso 1234"
-        matar_match = re.search(r'(?:/matar\s+|/kill\s+|mata\s+(?:el\s+)?proceso\s+|termina\s+(?:el\s+)?proceso\s+|cerrar\s+proceso\s+|matar\s+proceso\s+)(\d+)', lower)
-        if matar_match:
-            return True, self._kill_process(int(matar_match.group(1)))
-
-        # EXPLORAR: "explora descargas", "/explorar C:\Users", "que hay en", "listame archivos"
-        explorar_kws = ["/explorar ", "/explore ", "explora ", "explorar ", "explorando ",
-                        "que hay en ", "qué hay en ", "listame archivos en ", "lista archivos en ",
-                        "dime que hay en ", "muestra archivos en ", "ver archivos en "]
-        if any(kw in lower for kw in explorar_kws):
-            ruta = ""
-            for kw in explorar_kws:
-                if kw in lower:
-                    ruta = prompt[lower.index(kw) + len(kw):].strip().strip('"').strip("'")
-                    break
-            if not ruta or ruta.lower() in ["escritorio", "desktop"]:
-                ruta = os.path.expanduser("~/Desktop")
-            elif ruta.lower() in ["descargas", "downloads"]:
-                ruta = os.path.expanduser("~/Downloads")
-            elif ruta.lower() in ["documentos", "documents", "documentos"]:
-                ruta = os.path.expanduser("~/Documents")
-            return True, self._explore_dir(ruta)
-
-        # APPS instaladas: "dame las apps instaladas", "/apps", "programas instalados"
-        apps_kws = ["/apps", "aplicaciones instaladas", "apps instaladas", "programas instalados",
-                     "que aplicaciones tengo", "que programas tengo", "dame las apps",
-                     "dame los programas", "lista de programas", "lista de aplicaciones",
-                     "aplicaciones que tengo", "programas que tengo", "software instalado"]
-        if any(kw in lower for kw in apps_kws):
-            return True, self._list_installed_apps()
-
-        # WIFI: "ver wifi", "/wifi", "red wifi", "contraseña wifi"
-        wifi_kws = ["/wifi", "ver wifi", "red wifi", "mi wifi", "conexion wifi", "conexión wifi",
-                     "red inalambrica", "red inalámbrica", "redes disponibles",
-                     "dame el wifi", "estado del wifi", "info wifi", "informacion wifi"]
-        if any(kw in lower for kw in wifi_kws):
-            return True, self._wifi_info()
-
-        # BLUETOOTH: "ver bluetooth", "/bluetooth", "dispositivos bluetooth"
-        bt_kws = ["/bluetooth", "ver bluetooth", "dispositivos bluetooth",
-                   "dispositivos conectados bluetooth", "bluetooth dispositivos",
-                   "dame el bluetooth", "que bluetooth tengo"]
-        if any(kw in lower for kw in bt_kws):
-            return True, self._bluetooth_info()
-
-        # APAGAR/REINICIAR: "apaga en 10 minutos", "/apagar 10", "reinicia en 5"
-        apagar_match = re.search(r'(?:apaga\s+en\s+|apagar\s+en\s+|/apagar\s+|reinicia\s+en\s+|/reiniciar\s+|reiniciar\s+en\s+|/restart\s+)(\d+)', lower)
-        if apagar_match:
-            minutos = int(apagar_match.group(1))
-            is_reboot = lower.startswith("reinicia") or lower.startswith("/reiniciar") or lower.startswith("/restart")
-            return True, self._shutdown_timer(minutos, reboot=is_reboot)
-
-        # CANCELAR APAGADO: "cancela el apagado", "/noapagar"
-        cancel_kws = ["cancela el apagado", "cancelar apagado", "cancela apagado",
-                       "no apagues", "no apagar", "/noapagar", "detén el apagado", "deten el apagado"]
-        if any(kw in lower for kw in cancel_kws):
-            return True, self._cancel_shutdown()
-
-        # NOTAS: "toma nota", "/notas", "apunta", "guarda esto", "nota rapida"
-        notas_kws = ["/notas", "toma nota", "tomar nota", "apunta", "nota rápida", "nota rapida",
-                     "guarda esto", "guardar esto", "anota esto", "anotar esto",
-                     "quiero tomar una nota", "dame mis notas", "muestrame las notas",
-                     "notas guardadas", "lee mis notas"]
-        if any(kw in lower for kw in notas_kws):
-            # Check if it's a read request
-            read_notas = ["dame mis notas", "muestrame las notas", "notas guardadas",
-                          "lee mis notas", "ver notas", "que notas tengo"]
-            if any(kw in lower for kw in read_notas):
-                return True, self._read_notes()
-            # Extract note content
-            for kw in notas_kws:
-                if kw in lower and kw not in read_notas:
-                    content = prompt[lower.index(kw) + len(kw):].strip()
-                    if content:
-                        return True, self._save_note(content)
-                    break
-            return True, self._save_note("")
-
-        # CLIPBOARD: "copia al portapapeles", "/clipboard", "pegar", "copiar"
-        clipboard_kws = ["/clipboard", "/portapapeles", "/copiar", "/pegar",
-                         "copia al portapapeles", "copiar al portapapeles", "pegar del portapapeles",
-                         "que hay en el portapapeles", "portapapeles", "lee el portapapeles",
-                         "ver portapapeles", "muestra el portapapeles"]
-        if any(kw in lower for kw in clipboard_kws):
-            # Check if it's a write action (copiar algo específico)
-            if any(kw in lower for kw in ["copia ", "copiar "]):
-                text = prompt
-                for kw in ["copia al portapapeles ", "copiar al portapapeles ", "copia ", "copiar "]:
-                    if kw in lower:
-                        text = prompt[lower.index(kw) + len(kw):].strip()
-                        break
-                return True, self._clipboard_copy(text) if text else self._clipboard_read()
-            return True, self._clipboard_read()
-
-        # EN VIVO (always on top): "ponte al frente", "/envivo", "modo siempre visible"
-        envivo_kws = ["/envivo", "siempre visible", "ponte al frente", "ponte siempre visible",
-                       "modo visible", "quedate al frente", "quédate al frente", "mantente visible",
-                       "siempre al frente", "al frente"]
-        if any(kw in lower for kw in envivo_kws):
-            # Check if it's a disable request
-            if any(kw in lower for kw in ["quita", "quitar", "desactiva", "no quiero", "sal del modo", "ya"]):
-                return True, self._toggle_always_on_top(False)
-            return True, self._toggle_always_on_top(True)
-
-        # COMANDOS/AYUDA: "que comandos tienes", "/atajos", "/ayuda", "/comandos"
-        help_kws = ["/atajos", "/ayuda", "/comandos", "/help", "/commands",
-                     "que comandos tienes", "qué comandos tienes", "que puedes hacer",
-                     "qué puedes hacer", "lista de comandos", "dame los comandos",
-                     "comandos disponibles", "funciones", "que sabes hacer"]
-        if any(kw in lower for kw in help_kws):
-            return True, self._show_help()
-
-        # VOZ: "usar voz", "/voz", "input por voz", "dictado", "escucha"
-        voz_kws = ["/voz", "usar voz", "input por voz", "dictado", "hablar",
-                    "reconocimiento de voz", "voz a texto", "escucha", "/escucha"]
-        if any(kw in lower for kw in voz_kws):
-            if lower.strip() in ("/voz stop", "deja de escuchar", "silencio", "dejar de escuchar", "para de escuchar"):
-                return True, self._stop_voice_listen()
-            return True, self._start_voice_listen()
-
-        # TELEGRAM TOKEN: "/telegram-token <TOKEN>" — guarda el token y arranca el bot
-        if lower.startswith("/telegram-token ") or lower.startswith("/telegram_token "):
-            token = prompt.split(None, 1)[1].strip().strip('"\'')
-            return True, self._set_telegram_token(token) if token else (
-                "Uso: /telegram-token <TOKEN>\nPide el token a @BotFather en Telegram.")
-
-        # TELEGRAM STATUS: "/telegram-status" — ver estado (token / usuarios / bot vivo)
-        if lower.strip() in ("/telegram-status", "/telegram_status", "telegram status", "estado telegram"):
-            return True, self._telegram_status()
-
-        # VINCULAR Telegram: "/vincular <uid>"
-        if lower.startswith("/vincular ") or lower.startswith("vincular "):
-            uid = prompt.split(None, 1)[1].strip() if " " in prompt.strip() else ""
-            return True, self._vincular_telegram_user(uid) if uid else "Uso: /vincular <ID_de_Telegram>"
-
-        # SKILLS: listar / recargar
-        if lower.strip() in ("/skills", "/skill list", "skills cargadas", "que skills tienes"):
-            return True, self._list_dynamic_skills()
-        if lower.startswith("/skill crear ") or lower.startswith("crear skill "):
-            parts = prompt.split(None, 2)
-            name = parts[2].strip() if len(parts) > 2 else ""
-            return True, self._create_skill_stub(name) if name else "Uso: /skill crear <nombre>"
-
-        # SKILLS: aprender de la conversación actual (estilo Hermes Curator)
-        if lower.startswith("/aprender ") or lower.startswith("/learn "):
-            parts = prompt.split(None, 1)
-            name = parts[1].strip() if len(parts) > 1 else ""
-            return True, self._learn_skill_from_conversation(name) if name else "Uso: /aprender <nombre-de-la-skill>"
-
-        # SKILLS: estadísticas de uso / aprendizaje
-        if lower.strip() in ("/skill stats", "/skills stats", "/skill estado", "estado de skills"):
-            return True, self._skill_stats()
-
-        # SKILLS: refinar/mejorar una skill existente (la otra mitad del bucle Hermes)
-        if (lower.startswith("/skill mejorar ") or lower.startswith("/skill refinar ")
-                or lower.startswith("/refinar ") or lower.startswith("/mejorar-skill ")):
-            parts = prompt.split(None, 2) if lower.startswith("/skill") else prompt.split(None, 1)
-            name = (parts[2] if lower.startswith("/skill") and len(parts) > 2
-                    else parts[1] if len(parts) > 1 else "").strip()
-            return True, self._refine_skill(name) if name else "Uso: /skill mejorar <nombre>"
-
-        refine_match = re.search(
-            r'(?:mejora|refina|actualiza)\s+(?:la\s+)?skill\s+([^\.\?!,]+)', lower, re.IGNORECASE)
-        if refine_match:
-            return True, self._refine_skill(refine_match.group(1).strip())
-
-        # Auto-detección: "guarda esto como skill X", "aprende esto como X", "memoriza esto como X"
-        learn_match = re.search(
-            r'(?:guarda esto como|aprende esto como|aprende a|memoriza esto como|crea (?:una )?skill (?:de|para))\s+([^\.\?!,]+)',
-            lower, re.IGNORECASE
-        )
-        if learn_match:
-            name = learn_match.group(1).strip()
-            return True, self._learn_skill_from_conversation(name)
-
-        # SKILLS: eliminar
-        if lower.startswith("/skill eliminar ") or lower.startswith("/skill delete ") or lower.startswith("eliminar skill "):
-            parts = prompt.split(None, 2)
-            name = parts[2].strip() if len(parts) > 2 else ""
-            return True, self._delete_skill(name) if name else "Uso: /skill eliminar <nombre>"
-
-        # CRON: programar / listar / eliminar tareas
-        if lower.strip() in ("/cron list", "/cron listar", "cron list", "tareas programadas", "que tareas tienes"):
-            return True, self._list_cron_jobs()
-
-        # Gestión avanzada: editar, pausar/activar y crear tareas semanales.
-        # Va antes del parser NL para que "los martes a las 9 ..." no se trate como diario.
-        cron_mgmt = self._manage_cron_command(prompt)
-        if cron_mgmt is not None:
-            return True, cron_mgmt
-
-        cron_expr = self._generate_cron_expression(prompt)
-        if cron_expr:
-            return True, cron_expr
-
-        # CRON natural language: "recuerdame cada X" / "avisame a las HH" / etc.
-        nl = self._parse_cron_nl(prompt)
-        if nl:
-            kind, params, msg = nl
-            if kind == "interval":
-                return True, self._add_cron_interval(params, msg)
-            if kind == "daily":
-                h, m = params
-                return True, self._add_cron_daily(h, m, msg)
-
-        cron_match = re.match(r'(?:/cron\s+cada\s+(\d+)\s+(min|minutos|minuto|h|horas|hora)\s+)(.+)', lower)
-        if cron_match:
-            n = int(cron_match.group(1))
-            unit = cron_match.group(2)
-            msg = cron_match.group(3).strip()
-            interval_min = n if unit.startswith("min") else n * 60
-            return True, self._add_cron_interval(interval_min, msg)
-
-        cron_time_match = re.match(r'(?:/cron\s+a\s+las?\s+(\d{1,2}):?(\d{2})?\s+)(.+)', lower)
-        if cron_time_match:
-            h = int(cron_time_match.group(1))
-            m = int(cron_time_match.group(2) or 0)
-            msg = cron_time_match.group(3).strip()
-            return True, self._add_cron_daily(h, m, msg)
-
-        cron_del_match = re.match(r'(?:/cron\s+delete\s+(\d+)|/cron\s+eliminar\s+(\d+)|eliminar\s+tarea\s+(\d+))', lower)
-        if cron_del_match:
-            idx = int(cron_del_match.group(1) or cron_del_match.group(2) or cron_del_match.group(3)) - 1
-            return True, self._delete_cron_job(idx)
-
-        # AGENDA: crear reunión en Google Calendar
-        if lower.startswith("/agendar") or re.search(r'\b(agenda|agendar|agéndame|agendame)\b.*\b(reuni[oó]n|meeting|cita|llamada|evento)\b', lower):
-            return True, self._handle_agendar(prompt)
-
-        return False, ""
 
     _MESES = {
         "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
@@ -14082,108 +10655,6 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         "noviembre": 11, "diciembre": 12,
     }
 
-    def _handle_agendar(self, prompt):
-        """Crea una reunión en Google Calendar desde texto en español.
-        Ej: /agendar Reunión con Jean Paul el 10 de junio a las 15:30 jeanpaul.harb@combas.cl"""
-        try:
-            import google_calendar as gcal
-        except Exception as e:
-            return f"No pude cargar el módulo de calendario: {e}"
-        st = gcal.status()
-        if not st.get("connected"):
-            reason = st.get("reason")
-            if reason == "falta-credencial":
-                return ("Aún no conectas Google Calendar. Crea un cliente OAuth de escritorio y guarda "
-                        f"el client_secret en:\n{gcal.CLIENT_SECRET_FILE}\n"
-                        "Luego abre el panel Calendario (botón) y pulsa 'Conectar'.")
-            if reason == "no-autorizado":
-                return "Falta autorizar Google Calendar. Abre el panel Calendario y pulsa 'Conectar Google Calendar'."
-            return f"Google Calendar no está disponible: {reason}"
-
-        text = prompt
-        low = text.lower()
-        now = datetime.datetime.now()
-
-        # ── Fecha ──
-        date = None
-        m = re.search(r'(\d{4})-(\d{2})-(\d{2})', text)
-        if m:
-            try:
-                date = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            except Exception:
-                date = None
-        if not date:
-            m = re.search(r'\b(\d{1,2})\s*/\s*(\d{1,2})(?:\s*/\s*(\d{2,4}))?\b', text)
-            if m:
-                d, mo = int(m.group(1)), int(m.group(2))
-                y = int(m.group(3)) if m.group(3) else now.year
-                if y < 100:
-                    y += 2000
-                try:
-                    date = datetime.date(y, mo, d)
-                except Exception:
-                    date = None
-        if not date:
-            m = re.search(r'\b(\d{1,2})\s+de\s+([a-záéíóú]+)', low)
-            if m and m.group(2) in self._MESES:
-                d, mo = int(m.group(1)), self._MESES[m.group(2)]
-                try:
-                    date = datetime.date(now.year, mo, d)
-                    if date < now.date():
-                        date = datetime.date(now.year + 1, mo, d)
-                except Exception:
-                    date = None
-        if not date:
-            if "mañana" in low or "manana" in low:
-                date = (now + datetime.timedelta(days=1)).date()
-            elif "hoy" in low:
-                date = now.date()
-
-        # ── Hora ──
-        hh = mm = None
-        m = re.search(r'a\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', low)
-        if m:
-            hh, mm = int(m.group(1)), int(m.group(2) or 0)
-            ampm = (m.group(3) or "")
-            if ampm == "pm" and hh < 12:
-                hh += 12
-            if ampm == "am" and hh == 12:
-                hh = 0
-        else:
-            m = re.search(r'\b(\d{1,2}):(\d{2})\b', low)
-            if m:
-                hh, mm = int(m.group(1)), int(m.group(2))
-
-        if not date or hh is None:
-            return ("Para agendar dime al menos fecha y hora. Ej:\n"
-                    "/agendar Reunión con Jean Paul el 10 de junio a las 15:30 correo@dominio.cl")
-
-        # ── Invitados ──
-        attendees = re.findall(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', text)
-
-        # ── Título (limpia disparadores, fecha, hora, correos) ──
-        title = re.sub(r'^/agendar\s*', '', text, flags=re.IGNORECASE)
-        title = re.sub(r'\b(ag[eé]ndame|agendame|agenda|agendar)\b', '', title, flags=re.IGNORECASE)
-        for a in attendees:
-            title = title.replace(a, '')
-        title = re.sub(r'\b\d{4}-\d{2}-\d{2}\b', '', title)
-        title = re.sub(r'\b\d{1,2}\s*/\s*\d{1,2}(?:\s*/\s*\d{2,4})?\b', '', title)
-        title = re.sub(r'\bel\s+', ' ', title, flags=re.IGNORECASE)
-        title = re.sub(r'\b\d{1,2}\s+de\s+[a-záéíóú]+', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'a\s+las?\s+\d{1,2}(?::\d{2})?\s*(am|pm)?', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'\b(mañana|manana|hoy)\b', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'\s+', ' ', title).strip(" .,-")
-        if not title:
-            title = "Reunión"
-
-        start_iso = f"{date.isoformat()}T{hh:02d}:{(mm or 0):02d}:00"
-        res = gcal.create_event(summary=title, start_iso=start_iso, attendees=attendees, add_meet=True)
-        if res.get("ok"):
-            cuando = f"{date.strftime('%d/%m/%Y')} {hh:02d}:{(mm or 0):02d}"
-            inv = (" · invitados: " + ", ".join(attendees)) if attendees else ""
-            link = res.get("hangoutLink") or res.get("htmlLink") or ""
-            return f"✅ Reunión agendada: «{title}» el {cuando}{inv}.\n{link}"
-        return f"No pude agendar: {res.get('reason', 'error')}"
 
     def _execute_find_skills(self, query):
         try:
@@ -14204,60 +10675,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         except Exception as e:
             return f"Error buscando skills: {e}"
 
-    def _create_pdf_simple(self, title, content):
-        try:
-            from reportlab.lib.pagesizes import letter
-            from reportlab.lib.styles import getSampleStyleSheet
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-        except ImportError:
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "reportlab", "--quiet"])
-                from reportlab.lib.pagesizes import letter
-                from reportlab.lib.styles import getSampleStyleSheet
-                from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-            except Exception:
-                return "Necesito 'reportlab' para crear PDFs: pip install reportlab"
-        out_dir = os.path.join(os.path.expanduser("~"), ".claudy", "pdfs")
-        os.makedirs(out_dir, exist_ok=True)
-        fname = f"claudy_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        fpath = os.path.join(out_dir, fname)
-        try:
-            doc = SimpleDocTemplate(fpath, pagesize=letter)
-            styles = getSampleStyleSheet()
-            story = [Paragraph(title, styles['Title']), Spacer(1, 12)]
-            for line in content.split("\n"):
-                if line.strip():
-                    story.append(Paragraph(line.strip(), styles['Normal']))
-                else:
-                    story.append(Spacer(1, 6))
-            doc.build(story)
-            return f"PDF creado: {fpath}"
-        except Exception as e:
-            return f"Error creando PDF: {e}"
 
-    def _analyze_pdf_text(self, path):
-        if not os.path.exists(path):
-            return f"No encuentro: {path}"
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "pypdf", "--quiet"])
-                from pypdf import PdfReader
-            except Exception:
-                return "Necesito 'pypdf' para leer PDFs: pip install pypdf"
-        try:
-            reader = PdfReader(path)
-            n_pages = len(reader.pages)
-            text = ""
-            for page in reader.pages[:5]:
-                pt = page.extract_text()
-                if pt:
-                    text += pt + "\n"
-            summary = text[:2000] if text else "No se pudo extraer texto."
-            return f"PDF: {os.path.basename(path)}\nPáginas: {n_pages}\n\nContenido:\n{summary}"
-        except Exception as e:
-            return f"Error leyendo PDF: {e}"
 
     def _analyze_folder_deep(self, folder_path, status_widget=None):
         """Deep-analyze a folder: structure + key files + LLM interpretation, save to Obsidian.
@@ -15167,40 +11585,6 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, tk.Tk):
         results.sort(key=lambda x: (-x[0], len(os.path.basename(x[1]))))
         return results[:max_results]
 
-    def _analyze_local_file_sync(self, path):
-        """Lee, analiza y resume un archivo local; guarda el análisis en memoria
-        de agentes + Obsidian. Devuelve el resumen (texto)."""
-        name = os.path.basename(path)
-        folder = os.path.dirname(path)
-        try:
-            size_kb = round(os.path.getsize(path) / 1024, 1)
-        except Exception:
-            size_kb = 0
-        ext = os.path.splitext(path)[1].lower()
-        image_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
-        try:
-            if ext in image_exts:
-                answer = self._analyze_image_native(
-                    path, "Describe esta imagen en español y extrae el texto visible.")
-            else:
-                text = self._extract_attachment_text(path)
-                if not text.strip():
-                    return f"📄 Encontré **{name}** en {folder} ({size_kb} KB), pero no pude extraer contenido legible."
-                prompt2 = (
-                    f"Analiza este archivo y dime de qué trata.\nArchivo: {name}\n\n"
-                    "Contenido (puede venir truncado):\n```\n" + text + "\n```\n\n"
-                    "Responde en español: (1) de qué trata en 1-2 frases, (2) puntos/datos clave, "
-                    "(3) si aplica, montos, fechas o totales relevantes."
-                )
-                answer = self.send_quick_message(prompt2, _skip_skill_action=True, timeout=120)
-        except Exception as e:
-            return f"Encontré **{name}** en {folder} pero falló el análisis: {e}"
-        try:
-            self._save_memory("Usuario", f"Analizar archivo local: {name} ({folder})")
-            self._save_memory("Claudy", f"[Análisis de archivo: {name}] {answer}")
-        except Exception:
-            pass
-        return f"📄 **{name}**  ·  {folder}  ·  {size_kb} KB\n\n{answer}"
 
     def _search_files(self, query):
         """Search for files on the system using Windows search."""

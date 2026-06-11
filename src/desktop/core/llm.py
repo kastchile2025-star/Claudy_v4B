@@ -135,7 +135,7 @@ class LLMMixin:
             },
         }
 
-    def send_quick_message(self, prompt, _skip_skill_action=False, timeout=90, on_delta=None, max_tokens=None):
+    def send_quick_message(self, prompt, _skip_skill_action=False, timeout=90, on_delta=None, max_tokens=None, tier=None):
         # Check for local skill commands first
         if not _skip_skill_action:
             handled, result = self._try_handle_skill_action(prompt)
@@ -166,8 +166,23 @@ class LLMMixin:
         opencode = config["opencode"]
         base_url = opencode.get("baseUrl", "http://127.0.0.1:4096").rstrip("/")
         model = self._current_model or opencode.get("defaultModel", "deepseek-chat")
-        # P3-2: Model router - swap to a category-specific model if router enabled
-        model = _route_model(prompt, config, model)
+        # P3-2: Model router por complejidad (estilo AFM 3 de Apple):
+        #  - tier="fast": llamada interna de máquina (resúmenes, evaluaciones,
+        #    extracción de entidades) → modelo barato/rápido del router.
+        #  - Chat del usuario (sin _skip_skill_action): clasificar y rutear
+        #    (simple/code → barato, complejo → modelo de razonamiento).
+        #  - Llamadas internas largas (secciones de informes, etc.) NO se
+        #    rutean: conservan el modelo default para no romper sus timeouts.
+        _router_cfg = config.get("router") or {}
+        _default_model = model
+        if tier == "fast" and _router_cfg.get("enabled") and _router_cfg.get("simple"):
+            model = _router_cfg["simple"]
+        elif not _skip_skill_action:
+            model = _route_model(prompt, config, model)
+        if model != _default_model:
+            # Los modelos de razonamiento tardan más: dar margen extra de timeout.
+            timeout = max(timeout, 150)
+            self._debug_log("MODEL ROUTER", f"{_default_model} -> {model} (tier={tier})")
 
         is_local = any(h in base_url for h in ("127.0.0.1", "localhost", "0.0.0.0"))
         context = self._build_memory_context(prompt)

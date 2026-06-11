@@ -1184,22 +1184,58 @@ def create_docx_with_images(path, content="", image_paths=None):
         h3_style.font.italic = True
         h3_style.font.color.rgb = RGBColor(0x56, 0x56, 0x56)
 
-        # Parse and write content
-        _build_docx_content(doc, content)
+        # Parse and write content. Si hay imágenes, las REPARTIMOS por secciones
+        # (una al final de cada bloque ##) para un informe visualmente integrado,
+        # en vez de amontonarlas todas en una galería al final.
+        valid_imgs = [p for p in (image_paths or []) if p and os.path.isfile(p)]
 
-        # Embed images if provided
-        if image_paths:
-            doc.add_page_break()
-            doc.add_heading("Imágenes de Referencia", level=2)
-            for img_path in (image_paths or []):
-                if img_path and os.path.isfile(img_path):
-                    try:
-                        doc.add_picture(img_path, width=Inches(5.5))
-                        cap = doc.add_paragraph(os.path.splitext(os.path.basename(img_path))[0].replace("_", " "))
-                        cap.alignment = 1  # centered
-                        cap.paragraph_format.space_after = Pt(12)
-                    except Exception:
-                        pass
+        def _add_img(p):
+            try:
+                doc.add_picture(p, width=Inches(5.5))
+                doc.paragraphs[-1].alignment = 1  # centered
+                cap = doc.add_paragraph(os.path.splitext(os.path.basename(p))[0].replace("_", " "))
+                cap.alignment = 1
+                cap.paragraph_format.space_after = Pt(12)
+                return True
+            except Exception:
+                return False
+
+        if valid_imgs:
+            # Partir el markdown en bloques delimitados por encabezados ##
+            _lines = (content or "").split("\n")
+            _sections, _cur = [], []
+            for _ln in _lines:
+                if _ln.strip().startswith("## ") and _cur:
+                    _sections.append("\n".join(_cur))
+                    _cur = [_ln]
+                else:
+                    _cur.append(_ln)
+            if _cur:
+                _sections.append("\n".join(_cur))
+
+            _img_i = 0
+            for _si, _sec in enumerate(_sections):
+                _build_docx_content(doc, _sec)
+                _low = _sec.strip().lower()
+                _is_refs = _low.startswith("## referencias") or _low.startswith("## conclusiones") or _low.startswith("## references")
+                # Una imagen al final de cada sección de contenido (no en la
+                # intro/título ni en conclusiones/referencias).
+                if _img_i < len(valid_imgs) and _si > 0 and not _is_refs:
+                    if _add_img(valid_imgs[_img_i]):
+                        _img_i += 1
+
+            # Las que sobraron van en una galería al final (heading en el idioma
+            # del documento, detectado por sus encabezados).
+            if _img_i < len(valid_imgs):
+                _doc_low = (content or "").lower()
+                _doc_is_en = ("## references" in _doc_low or "## conclusions" in _doc_low
+                              or "## introduction" in _doc_low)
+                doc.add_page_break()
+                doc.add_heading("Reference Images" if _doc_is_en else "Imágenes de Referencia", level=2)
+                for _p in valid_imgs[_img_i:]:
+                    _add_img(_p)
+        else:
+            _build_docx_content(doc, content)
 
         doc.save(target)
         size = os.path.getsize(target)
