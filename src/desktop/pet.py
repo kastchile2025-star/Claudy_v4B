@@ -398,28 +398,34 @@ from ui.webview_api import (
 
 
 def _make_app_icon(size=64):
-    """Genera el ícono de Claudy: círculo oscuro + estrella de 4 puntas lavanda."""
-    import math
-    from PIL import Image as _PILImg, ImageDraw as _Draw
-    img = _PILImg.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = _Draw.Draw(img)
-    m = max(1, size // 32)
-    # Fondo: círculo azul oscuro casi negro
-    d.ellipse([m, m, size - m, size - m], fill=(11, 14, 32, 255))
-    # Estrella de 4 puntas (+ 4 intermedio pequeño) en lavanda
-    cx, cy = size / 2, size / 2
-    ro = size * 0.38   # punta larga
-    ri = size * 0.13   # punta corta (intermedia)
-    pts = []
-    for i in range(8):
-        ang = math.pi * i / 4 - math.pi / 2
-        r = ro if i % 2 == 0 else ri
-        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
-    d.polygon(pts, fill=(200, 185, 255, 255))
-    # Punto central pequeño blanco
-    dot = max(2, size // 16)
-    d.ellipse([cx - dot, cy - dot, cx + dot, cy + dot], fill=(255, 255, 255, 230))
-    return img
+    """Ícono de Claudy desde su sprite real, sin el halo magenta (#ff00ff).
+
+    El magenta es el color de transparencia de tkinter; al reescalar la sprite
+    se mezclaba en los bordes y el ícono salía rosado. Aquí se binariza el alfa,
+    se anula el RGB de los píxeles transparentes y se eliminan restos magenta
+    antes de recortar y reescalar con LANCZOS."""
+    from PIL import Image as _PILImg
+    try:
+        img = _PILImg.open(ASSET_FRAMES[0]).convert("RGBA")
+        px = img.load()
+        w, h = img.size
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = px[x, y]
+                if a <= 30 or (r > 180 and b > 180 and g < 110):
+                    px[x, y] = (0, 0, 0, 0)
+                else:
+                    px[x, y] = (r, g, b, 255)
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+        # Centrar en lienzo cuadrado transparente y reescalar suave
+        side = max(img.size)
+        canvas = _PILImg.new("RGBA", (side, side), (0, 0, 0, 0))
+        canvas.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
+        return canvas.resize((size, size), _PILImg.LANCZOS)
+    except Exception:
+        return _PILImg.new("RGBA", (size, size), (124, 107, 255, 255))
 
 
 class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, BubblesMixin, tk.Tk):
@@ -636,6 +642,15 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
 
     def destroy(self):
         self._is_exiting = True
+        # Quitar el ícono de la bandeja ANTES de salir; si no, Windows deja
+        # un ícono fantasma hasta que el usuario pasa el mouse por encima.
+        icon = getattr(self, "_tray_icon", None)
+        if icon is not None:
+            try:
+                icon.visible = False
+                icon.stop()
+            except Exception:
+                pass
         try:
             super().destroy()
         except Exception:
