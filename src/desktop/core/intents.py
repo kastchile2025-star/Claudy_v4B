@@ -229,6 +229,8 @@ SLASH_COMMANDS = [
      lambda s, p, l: s._watch_list()),
     (("/router",),
      lambda s, p, l: s._router_cmd(_arg(p))),
+    (("/agenda-pantalla", "/agendar-pantalla", "/screen-evento"),
+     lambda s, p, l: s._screen_to_calendar(p)),
     (("/recordar ", "/reminder ", "/alarma "),
      lambda s, p, l: s._set_reminder(_arg(p)) if _arg(p) else "Formato: /recordar 10 minutos comprar leche"),
     (("/noticias", "/news", "/noti"),
@@ -368,6 +370,16 @@ class IntentsMixin:
             g_handled, g_result = self._guard_try_confirm(prompt, lower)
             if g_handled:
                 return True, g_result
+        except Exception:
+            pass
+
+        # ===== Screenshot accionable: «agenda lo que está en pantalla» =====
+        # Requiere mención explícita de la pantalla, así el NL normal de
+        # calendario («agenda reunión mañana a las 10») no se ve afectado.
+        try:
+            from features.screen_actions import SCREEN_EVENT_RX
+            if SCREEN_EVENT_RX.search(prompt):
+                return True, self._screen_to_calendar(prompt)
         except Exception:
             pass
 

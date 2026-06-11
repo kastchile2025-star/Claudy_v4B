@@ -234,6 +234,7 @@ from features.skill_loop import SkillLoopMixin
 from features.cleaner import CleanerMixin
 from features.voice_chat import VoiceChatMixin
 from features.watcher import WatcherMixin
+from features.screen_actions import ScreenActionsMixin
 from core.command_guard import CommandGuardMixin
 from core.llm import LLMMixin
 from core.memory import (
@@ -431,7 +432,7 @@ def _make_app_icon(size=64):
         return _PILImg.new("RGBA", (size, size), (124, 107, 255, 255))
 
 
-class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, BubblesMixin, tk.Tk):
+class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, ScreenActionsMixin, BubblesMixin, tk.Tk):
     BUBBLES = [
         "Estoy listo para ayudarte.",
         "Toca dos veces para hablar.",
@@ -8983,7 +8984,16 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 text = f.read(max_chars + 1)
         text = (text or "").strip()
         if len(text) > max_chars:
-            return text[:max_chars] + "\n\n[Contenido truncado por longitud.]"
+            text = text[:max_chars] + "\n\n[Contenido truncado por longitud.]"
+        # A4: los documentos son contenido de terceros → neutralizar intentos
+        # de inyección de prompts antes de que el texto llegue al LLM.
+        try:
+            from core.injection_guard import sanitize_external
+            text, hits = sanitize_external(text, source=f"documento {os.path.basename(path)}")
+            if hits:
+                self._debug_log("INJECTION GUARD", f"{path}: {len(hits)} hits {hits[:3]}")
+        except Exception:
+            pass
         return text
 
 
@@ -11123,6 +11133,15 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 snippet = item.get("snippet", "")
                 url = item.get("url", "")
                 context += f"- {title}: {snippet}\n  Fuente: {url}\n"
+            # A4: los snippets vienen de webs de terceros → neutralizar
+            # intentos de inyección antes de pasarlos al LLM.
+            try:
+                from core.injection_guard import sanitize_external
+                context, _inj_hits = sanitize_external(context, source="web")
+                if _inj_hits:
+                    self._debug_log("INJECTION GUARD", f"web '{search_query}': {len(_inj_hits)} hits")
+            except Exception:
+                pass
             enhanced_prompt = (
                 f"Hoy es {hoy}.\n{context}\n"
                 f"INSTRUCCIONES ESTRICTAS:\n"
