@@ -150,6 +150,36 @@ class TestCorroborarEnInternet(unittest.TestCase):
         self.assertNotIn("_web_search_and_answer", str(r))
 
 
+class TestDatoActualBuscaSiempre(unittest.TestCase):
+    """Preguntas de datos actuales (horarios, precios, resultados, noticias)
+    deben ir SIEMPRE a búsqueda web, sin depender de que el LLM obedezca."""
+
+    def test_horario_de_evento(self):
+        h, r = nl("horario partido inaugural mundial 2026 Chile")
+        self.assertTrue(h)
+        self.assertIn("_web_search_and_answer", r)
+
+    def test_a_que_hora(self):
+        h, r = nl("a que hora juega mexico con sudafrica")
+        self.assertTrue(h)
+        self.assertIn("_web_search_and_answer", r)
+
+    def test_precio_actual(self):
+        h, r = nl("precio del bitcoin")
+        self.assertTrue(h)
+        self.assertIn("_web_search_and_answer", r)
+
+    def test_recordatorio_no_va_a_la_web(self):
+        # "avísame cuando empieza..." es una alarma, no una búsqueda
+        _, r = nl("avísame cuando empieza el partido")
+        self.assertNotIn("_web_search_and_answer", str(r))
+
+    def test_contexto_personal_no_va_a_la_web(self):
+        # "cuándo es mi reunión" es del calendario propio, no de internet
+        _, r = nl("cuándo es mi reunión con el equipo")
+        self.assertNotIn("_web_search_and_answer", str(r))
+
+
 class TestBusquedaArchivosNL(unittest.TestCase):
     """Búsqueda de archivos en lenguaje natural (botón 🔎 y frases libres)."""
 

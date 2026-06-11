@@ -871,6 +871,29 @@ class IntentsMixin:
             name = parts[2].strip() if len(parts) > 2 else ""
             return True, self._delete_skill(name) if name else "Uso: /skill eliminar <nombre>"
 
+        # ===== DATO ACTUAL → BÚSQUEDA WEB AUTOMÁTICA (anti-alucinación) =====
+        # El system prompt pide "dato actual → busca primero", pero eso depende
+        # de que el modelo obedezca; cuando no busca, responde de memoria con
+        # datos creíbles y FALSOS (bug del horario del mundial 2026). Esto lo
+        # vuelve determinístico: horarios, precios, resultados, noticias y
+        # versiones SIEMPRE pasan por internet, con o sin Deep Research activo.
+        # Va antes del bloque cron para que "a qué hora juega X" no caiga ahí.
+        _personal_ctx = re.search(
+            r"\b(?:mi|mis|nuestr[oa]s?)\b|\barchivo|\bcarpeta|\btest|\bc[oó]digo|"
+            r"\bscript|\bproyecto|\bqcore|\bsmartstudent|\broadix|\bluxium|\bclaudy|"
+            # frases de recordatorio/cron: deben llegar al scheduler, no a la web
+            r"\bav[ií]same\b|\brecu[eé]rdame\b|\balarma\b|\brecordatorio\b|"
+            r"\bagend|\bprogr[aá]mame\b|\bcada\s+\d|\bcada\s+(?:hora|d[ií]a|semana)", lower)
+        _current_data = re.search(
+            r"\ba\s+qu[eé]\s+hora\b|\bhorarios?\b|"
+            r"\bcu[aá]ndo\s+(?:es|ser[aá]|empieza|comienza|inicia|parte|juega|sale|estrena|abre|cierra)\b|"
+            r"\bprecio\s+del?\b|\bcotizaci[oó]n\b|\bcu[aá]nto\s+(?:vale|cuesta|est[aá])\b|"
+            r"\bvalor\s+del?\s+(?:d[oó]lar|euro|uf|utm|bitcoin)\b|\bd[oó]lar\s+hoy\b|"
+            r"\bresultado\s+del?\s+partido\b|\bmarcador\b|\bqui[eé]n\s+(?:gan[oó]|va\s+ganando)\b|"
+            r"\bnoticias?\b|\b[uú]ltima\s+versi[oó]n\b|\bversi[oó]n\s+m[aá]s\s+reciente\b", lower)
+        if _current_data and not _personal_ctx:
+            return True, self._web_search_and_answer(prompt)
+
         # CRON: programar / listar / eliminar tareas
         if lower.strip() in ("/cron list", "/cron listar", "cron list", "tareas programadas", "que tareas tienes"):
             return True, self._list_cron_jobs()
