@@ -235,6 +235,7 @@ from features.cleaner import CleanerMixin
 from features.voice_chat import VoiceChatMixin
 from features.watcher import WatcherMixin
 from features.screen_actions import ScreenActionsMixin
+from features.browser import BrowserMixin
 from core.command_guard import CommandGuardMixin
 from core.llm import LLMMixin
 from core.memory import (
@@ -432,7 +433,7 @@ def _make_app_icon(size=64):
         return _PILImg.new("RGBA", (size, size), (124, 107, 255, 255))
 
 
-class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, ScreenActionsMixin, BubblesMixin, tk.Tk):
+class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, ScreenActionsMixin, BrowserMixin, BubblesMixin, tk.Tk):
     BUBBLES = [
         "Estoy listo para ayudarte.",
         "Toca dos veces para hablar.",
@@ -10040,6 +10041,18 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
             return "No path provided."
         import claudy_powers as cp
         return cp.create_folder(path)
+    def _tool_browser_goto(_self, url=""):
+        return _self._browser_tool("goto", url) if url else "No URL provided."
+    def _tool_browser_text(_self):
+        return _self._browser_tool("text")
+    def _tool_browser_click(_self, target=""):
+        return _self._browser_tool("click", target) if target else "No target provided."
+    def _tool_browser_fill(_self, selector="", value=""):
+        if not selector:
+            return "No selector provided."
+        return _self._browser_tool("fill", selector, value)
+    def _tool_browser_press(_self, key="Enter"):
+        return _self._browser_tool("press", key or "Enter")
 
     @classmethod
     def _register_builtin_tools(cls):
@@ -10079,6 +10092,28 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         cls.register_tool("create_folder", cls._tool_create_folder, "Create a local folder", {
             "type": "object", "properties": {"path": {"type": "string", "description": "Folder path to create"}},
             "required": ["path"]})
+        # Browser automation (features/browser.py): navegar, click, forms.
+        cls.register_tool("browser_goto", cls._tool_browser_goto,
+                          "Open a URL in the automated browser (Playwright). Returns page title.", {
+            "type": "object", "properties": {"url": {"type": "string", "description": "URL to open"}},
+            "required": ["url"]})
+        cls.register_tool("browser_text", cls._tool_browser_text,
+                          "Get the visible text of the current browser page")
+        cls.register_tool("browser_click", cls._tool_browser_click,
+                          "Click an element in the browser by CSS selector or visible text", {
+            "type": "object", "properties": {"target": {"type": "string", "description": "CSS selector or visible text"}},
+            "required": ["target"]})
+        cls.register_tool("browser_fill", cls._tool_browser_fill,
+                          "Type a value into a form field (CSS selector, placeholder or label)", {
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string", "description": "CSS selector, placeholder or label"},
+                "value": {"type": "string", "description": "Text to type"},
+            },
+            "required": ["selector", "value"]})
+        cls.register_tool("browser_press", cls._tool_browser_press,
+                          "Press a keyboard key in the browser (default Enter, submits forms)", {
+            "type": "object", "properties": {"key": {"type": "string", "description": "Key, e.g. Enter"}}})
 
     # ------------------------------------------------------------------
     # Memory: checkpoints, rollback, search

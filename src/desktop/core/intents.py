@@ -231,6 +231,8 @@ SLASH_COMMANDS = [
      lambda s, p, l: s._router_cmd(_arg(p))),
     (("/agenda-pantalla", "/agendar-pantalla", "/screen-evento"),
      lambda s, p, l: s._screen_to_calendar(p)),
+    (("/navegar", "/browser", "/web "),
+     lambda s, p, l: s._browser_cmd(_arg(p))),
     (("/recordar ", "/reminder ", "/alarma "),
      lambda s, p, l: s._set_reminder(_arg(p)) if _arg(p) else "Formato: /recordar 10 minutos comprar leche"),
     (("/noticias", "/news", "/noti"),
@@ -380,6 +382,17 @@ class IntentsMixin:
             from features.screen_actions import SCREEN_EVENT_RX
             if SCREEN_EVENT_RX.search(prompt):
                 return True, self._screen_to_calendar(prompt)
+        except Exception:
+            pass
+
+        # ===== Browser: «entra a <url> y dime los precios» =====
+        # Navegación real con Playwright; el NL exige el patrón entra/navega
+        # + URL, así que no choca con el resto.
+        try:
+            from features.browser import parse_navigate_request
+            _nav = parse_navigate_request(prompt)
+            if _nav:
+                return True, self._browser_navigate_nl(_nav["url"], _nav["question"])
         except Exception:
             pass
 
