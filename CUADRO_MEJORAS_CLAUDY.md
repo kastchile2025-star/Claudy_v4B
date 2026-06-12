@@ -29,12 +29,12 @@
 
 | # | Funcionalidad | Qué aporta a Claudy | Estado | Prioridad | Esfuerzo |
 |---|---|---|---|---|---|
-| B1 | **Live Canvas controlado por el agente**: el agente decide renderizar visualizaciones interactivas según la sesión | Claudy ya tiene Canvas para informes; el salto es que Claudy lo abra por iniciativa propia con tablas/gráficos cuando la respuesta lo amerite | 🟡 | ⭐⭐⭐ | 4-6 h |
-| B2 | **Precedencia de skills workspace > global**: skills por carpeta de proyecto que pisan a las globales | Claudy trabaja sobre proyectos QCORE distintos; permitiría comportamiento por producto (SmartStudent vs Roadix) | 🆕 | ⭐⭐ | 2-3 h |
+| B1 | **Live Canvas controlado por el agente**: el agente decide renderizar visualizaciones interactivas según la sesión | Claudy ya tiene Canvas para informes; el salto es que Claudy lo abra por iniciativa propia con tablas/gráficos cuando la respuesta lo amerite | ✅ (12 jun 2026, `features/canvas.py`: tool LLM `show_canvas` + `/canvas`, tablas + Chart.js) | ⭐⭐⭐ | 4-6 h |
+| B2 | **Precedencia de skills workspace > global**: skills por carpeta de proyecto que pisan a las globales | Claudy trabaja sobre proyectos QCORE distintos; permitiría comportamiento por producto (SmartStudent vs Roadix) | ✅ (12 jun 2026, `workspaces` en config + `<workspace>/.claudy-skills` en `skill_loop.py`) | ⭐⭐ | 2-3 h |
 | B3 | **Catálogo de recetas (estilo ClawHub)**: biblioteca local de automatizaciones preconfiguradas listas para instalar | Ya existe `/skill buscar` + find-skills; falta curar un catálogo propio QCORE (facturación, informes, scraping) | 🟡 | ⭐ | continuo |
 | B4 | **Trazabilidad de linaje de sub-agentes**: metadatos de jerarquía para visualizar la ramificación de tareas | Si se hace A6/`/delegate`, mostrar el árbol de subtareas en el chat | 🆕 | ⭐ | 2-3 h |
 | B5 | **Permisos auto-aprobados solo lectura + solo en CWD**: lo no destructivo dentro del workspace pasa solo; escrituras piden confirmación | Regla simple y sólida para los poderes de archivos de Claudy; combina con A3 | ✅ (11 jun 2026, READONLY_PATTERNS en `command_guard.py`) | ⭐⭐⭐ | incluido en A3 |
-| B6 | **Lección negativa**: el modelo de permisos laxos de OpenClaw terminó en CVEs, plugins maliciosos y bloqueos institucionales | Validar/sandboxear skills de terceros antes de instalarlas (hoy `/skill install` confía a ciegas) | 🆕 | ⭐⭐ | 2-3 h |
+| B6 | **Lección negativa**: el modelo de permisos laxos de OpenClaw terminó en CVEs, plugins maliciosos y bloqueos institucionales | Validar/sandboxear skills de terceros antes de instalarlas (hoy `/skill install` confía a ciegas) | ✅ (12 jun 2026, `core/skill_vetting.py`: veta inyecciones y comandos catastróficos; override con «confiar») | ⭐⭐ | 2-3 h |
 
 ## C. Ideas extraídas de APPLE WWDC 2025/2026
 

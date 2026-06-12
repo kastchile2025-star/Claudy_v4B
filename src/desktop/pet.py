@@ -236,7 +236,9 @@ from features.voice_chat import VoiceChatMixin
 from features.watcher import WatcherMixin
 from features.screen_actions import ScreenActionsMixin
 from features.browser import BrowserMixin
+from features.canvas import CanvasMixin
 from core.command_guard import CommandGuardMixin
+from core.mcp_client import MCPMixin
 from core.llm import LLMMixin
 from core.memory import (
     MemoryMixin,
@@ -433,7 +435,7 @@ def _make_app_icon(size=64):
         return _PILImg.new("RGBA", (size, size), (124, 107, 255, 255))
 
 
-class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, ScreenActionsMixin, BrowserMixin, BubblesMixin, tk.Tk):
+class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, ScreenActionsMixin, BrowserMixin, CanvasMixin, MCPMixin, BubblesMixin, tk.Tk):
     BUBBLES = [
         "Estoy listo para ayudarte.",
         "Toca dos veces para hablar.",
@@ -4274,7 +4276,12 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 entry.configure(state="normal"); entry.focus_set(); return
             if prompt.startswith("/skill install "):
                 src = prompt.split(None, 2)[2].strip()
-                ok, msg = self._install_skill(src)
+                # «confiar» al final: fuerza la instalación pese al veto B6
+                force = False
+                if src.lower().endswith((" confiar", " --force", " force")):
+                    force = True
+                    src = src.rsplit(None, 1)[0].strip()
+                ok, msg = self._install_skill(src, force=force)
                 self._set_response_text(msg)
                 entry.configure(state="normal"); entry.focus_set(); return
             if prompt.startswith("/skill use ") or prompt.startswith("/skill usa "):
@@ -9277,9 +9284,26 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         return pattern.sub(_sub, text)
 
     # --- F3.16 /skill install <url|zip|gh-repo> ---
-    def _install_skill(self, source):
+    def _install_skill(self, source, force=False):
+        """Instala una skill desde URL .md, .zip o user/repo de GitHub.
+        B6: el contenido se VETA antes de guardarse (core/skill_vetting) —
+        rechaza inyecciones de prompt y comandos catastróficos salvo que el
+        usuario fuerce con «confiar» (force=True)."""
         skills_dir = os.path.join(os.path.expanduser("~"), ".claudy", "skills")
         os.makedirs(skills_dir, exist_ok=True)
+
+        def _vet(body_text):
+            """(permitir, mensaje_extra). Fail-closed si el veto explota."""
+            try:
+                from core.skill_vetting import vet_skill, format_vet_report
+                verdict, reasons = vet_skill(body_text)
+            except Exception as e:
+                return (False, f"⛔ No pude validar la skill ({e}); no la instalo.")
+            if verdict == "block" and not force:
+                self._debug_log("SKILL VETTING", f"bloqueada: {reasons}")
+                return (False, format_vet_report(verdict, reasons))
+            return (True, format_vet_report(verdict, reasons) if verdict != "ok" else "")
+
         try:
             # GitHub blob URL -> raw URL
             if "github.com" in source and "/blob/" in source:
@@ -9292,6 +9316,9 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 req = urllib.request.Request(source, headers={"User-Agent": "Claudy/1.0"})
                 with urllib.request.urlopen(req, timeout=30) as r:
                     body = r.read().decode("utf-8", "replace")
+                ok_vet, vet_msg = _vet(body)
+                if not ok_vet:
+                    return False, vet_msg
                 import re as _re
                 name = _re.search(r"name:\s*(\S+)", body)
                 slug = name.group(1) if name else f"imported_{int(time.time())}"
@@ -9299,7 +9326,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 os.makedirs(folder, exist_ok=True)
                 with open(os.path.join(folder, "SKILL.md"), "w", encoding="utf-8") as f:
                     f.write(body)
-                return True, f"Instalada: {slug}"
+                msg = f"Instalada: {slug}"
+                return True, (f"{msg}\n{vet_msg}" if vet_msg else msg)
             if source.endswith(".zip") or "://" in source:
                 import zipfile, io as _io
                 req = urllib.request.Request(source, headers={"User-Agent": "Claudy/1.0"})
@@ -9308,14 +9336,19 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 with zipfile.ZipFile(_io.BytesIO(data)) as z:
                     for name in z.namelist():
                         if name.endswith("SKILL.md"):
+                            with z.open(name) as f:
+                                raw = f.read()
+                            ok_vet, vet_msg = _vet(raw.decode("utf-8", "replace"))
+                            if not ok_vet:
+                                return False, vet_msg
                             parts = name.split("/")
                             slug = parts[-2] if len(parts) >= 2 else f"imported_{int(time.time())}"
                             folder = os.path.join(skills_dir, slug)
                             os.makedirs(folder, exist_ok=True)
-                            with z.open(name) as f:
-                                with open(os.path.join(folder, "SKILL.md"), "wb") as out:
-                                    out.write(f.read())
-                            return True, f"Instalada: {slug}"
+                            with open(os.path.join(folder, "SKILL.md"), "wb") as out:
+                                out.write(raw)
+                            msg = f"Instalada: {slug}"
+                            return True, (f"{msg}\n{vet_msg}" if vet_msg else msg)
                 return False, "No encontre SKILL.md en el paquete."
             return False, "Fuente desconocida. Usa URL .md, .zip o user/repo."
         except Exception as e:
@@ -10053,6 +10086,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         return _self._browser_tool("fill", selector, value)
     def _tool_browser_press(_self, key="Enter"):
         return _self._browser_tool("press", key or "Enter")
+    def _tool_show_canvas(_self, title="", markdown="", chart=None):
+        return _self._canvas_show(title, markdown, chart)
 
     @classmethod
     def _register_builtin_tools(cls):
@@ -10114,6 +10149,20 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         cls.register_tool("browser_press", cls._tool_browser_press,
                           "Press a keyboard key in the browser (default Enter, submits forms)", {
             "type": "object", "properties": {"key": {"type": "string", "description": "Key, e.g. Enter"}}})
+        # Canvas agéntico (features/canvas.py): el modelo lo abre cuando la
+        # respuesta amerita visualización (comparaciones, series, rankings).
+        cls.register_tool("show_canvas", cls._tool_show_canvas,
+                          "Open a polished visual canvas in the browser. Use PROACTIVELY when the answer "
+                          "benefits from a comparison table, ranking or data chart. markdown supports "
+                          "#headers, **bold** and |tables|. chart is optional Chart.js-like spec: "
+                          '{"type":"bar|line|pie","labels":[...],"datasets":[{"label":"...","data":[...]}],"title":"..."}', {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Canvas title"},
+                "markdown": {"type": "string", "description": "Markdown body (tables supported)"},
+                "chart": {"type": "string", "description": "Optional chart spec as JSON string"},
+            },
+            "required": ["title"]})
 
     # ------------------------------------------------------------------
     # Memory: checkpoints, rollback, search

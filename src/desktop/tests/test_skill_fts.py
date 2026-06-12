@@ -22,6 +22,9 @@ class FakePet(SkillLoopMixin):
     def _skills_index_path(self):
         return self._index
 
+    def _workspace_skills_roots(self):
+        return []  # cada test de workspace lo overridea
+
     def _debug_log(self, *a):
         pass
 
@@ -96,6 +99,43 @@ class TestIndice(SkillFTSBase):
     def test_fts_query_segura(self):
         self.assertEqual(fts_query(""), "")
         self.assertIn('"facturas"', fts_query("facturas; DROP TABLE--"))
+
+
+class TestWorkspaceSkills(SkillFTSBase):
+    """B2: skills de proyecto pisan a las globales por slug."""
+
+    def setUp(self):
+        super().setUp()
+        self.ws = os.path.join(self.tmp, "proyecto", ".claudy-skills")
+        os.makedirs(self.ws)
+        self.pet._workspace_skills_roots = lambda: [self.ws]
+
+    def test_workspace_pisa_a_la_global(self):
+        _mk_skill(self.ws, "facturas-resumen",
+                  "Version SmartStudent del resumen de facturas",
+                  "# Facturas SmartStudent\nUsar la plantilla corporativa AZUL",
+                  mtime=time.time() + 5)
+        entries = {s: p for s, p, _ in self.pet._skills_scan()}
+        self.assertIn(self.ws, entries["facturas-resumen"])  # gana la del proyecto
+        out = self.pet._load_installed_skills("resumen de facturas del mes")
+        self.assertIn("plantilla corporativa AZUL", out)
+        self.assertNotIn("Calcular IVA", out)  # el cuerpo global quedó pisado
+
+    def test_workspace_suma_skills_nuevas(self):
+        _mk_skill(self.ws, "deploy-smartstudent",
+                  "Pasos de deploy de SmartStudent",
+                  "# Deploy\n1. Compilar el APK\n2. Subir a Play Console",
+                  mtime=time.time() + 5)
+        slugs = [s for s, _, _ in self.pet._skills_scan()]
+        self.assertIn("deploy-smartstudent", slugs)
+        self.assertIn("facturas-resumen", slugs)  # las globales siguen
+        hits = self.pet._skills_fts_search("cómo hago el deploy del apk")
+        self.assertIn("deploy-smartstudent", hits)
+
+    def test_sin_workspace_todo_sigue_igual(self):
+        self.pet._workspace_skills_roots = lambda: []
+        slugs = [s for s, _, _ in self.pet._skills_scan()]
+        self.assertEqual(len(slugs), 3)
 
 
 class TestCargaSearchFirst(SkillFTSBase):

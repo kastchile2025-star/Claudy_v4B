@@ -83,26 +83,52 @@ class SkillLoopMixin:
     def _skills_index_path(self):
         return os.path.join(os.path.expanduser("~"), ".claudy", "skills_index.db")
 
+    def _workspace_skills_roots(self):
+        """B2 (OpenClaw): carpetas de skills POR PROYECTO, con precedencia
+        sobre las globales. Config (~/.claudy/config.json):
+
+          "workspaces": {"SmartStudent": "G:/.../SMARTSTUDENT", ...}
+
+        Se activa la del producto QCORE activo (self._active_product); las
+        skills viven en <workspace>/.claudy-skills/<slug>/SKILL.md."""
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".claudy", "config.json"),
+                      encoding="utf-8-sig") as f:
+                ws = json.load(f).get("workspaces") or {}
+        except Exception:
+            ws = {}
+        prod = (getattr(self, "_active_product", "") or "").lower().replace(" ", "")
+        roots = []
+        for key, path in ws.items():
+            if path and key.lower().replace(" ", "") == prod:
+                d = os.path.join(str(path), ".claudy-skills")
+                if os.path.isdir(d):
+                    roots.append(d)
+        return roots
+
     def _skills_scan(self):
-        """[(slug, ruta_SKILL.md, mtime)] de las skills instaladas (sin _archive)."""
-        root = self._skills_root()
-        out = []
-        if not os.path.isdir(root):
-            return out
-        for folder in sorted(os.listdir(root)):
-            if folder.startswith("_"):
+        """[(slug, ruta_SKILL.md, mtime)] de las skills activas (sin _archive).
+        Orden de precedencia: workspace del producto activo → globales; una
+        skill de proyecto con el mismo slug PISA a la global."""
+        out, seen = [], set()
+        for root in self._workspace_skills_roots() + [self._skills_root()]:
+            if not os.path.isdir(root):
                 continue
-            full = os.path.join(root, folder)
-            if not os.path.isdir(full):
-                continue
-            for cand in ("SKILL.md", "skill.md", "Skill.md"):
-                p = os.path.join(full, cand)
-                if os.path.isfile(p):
-                    try:
-                        out.append((folder, p, os.path.getmtime(p)))
-                    except OSError:
-                        pass
-                    break
+            for folder in sorted(os.listdir(root)):
+                if folder.startswith("_") or folder in seen:
+                    continue
+                full = os.path.join(root, folder)
+                if not os.path.isdir(full):
+                    continue
+                for cand in ("SKILL.md", "skill.md", "Skill.md"):
+                    p = os.path.join(full, cand)
+                    if os.path.isfile(p):
+                        try:
+                            out.append((folder, p, os.path.getmtime(p)))
+                            seen.add(folder)
+                        except OSError:
+                            pass
+                        break
         return out
 
     def _skills_fts_refresh(self):

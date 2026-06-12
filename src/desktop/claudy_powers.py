@@ -841,8 +841,96 @@ def _snapshot_file(path):
     ts = time.strftime("%Y%m%d_%H%M%S")
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(path))
     backup = os.path.join(_file_backups_dir(), f"{ts}__{safe_name}.bak")
+    # Dos snapshots del mismo archivo en el mismo segundo NO deben pisarse
+    # (p.ej. editar y deshacer al tiro): sufijo incremental.
+    n = 1
+    while os.path.exists(backup):
+        n += 1
+        backup = os.path.join(_file_backups_dir(), f"{ts}_{n}__{safe_name}.bak")
     shutil.copy2(path, backup)
+    # Índice para poder RESTAURAR: el nombre del .bak solo conserva el
+    # basename, así que la ruta original se registra aparte (jsonl).
+    try:
+        entry = {"ts": ts, "original": os.path.abspath(path), "backup": backup}
+        with open(os.path.join(_file_backups_dir(), "index.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     return backup
+
+
+def _load_backup_index():
+    """Entradas del índice de backups (más recientes al final), solo las
+    que aún tienen su .bak en disco."""
+    idx_path = os.path.join(_file_backups_dir(), "index.jsonl")
+    entries = []
+    try:
+        with open(idx_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                if os.path.isfile(e.get("backup", "")):
+                    entries.append(e)
+    except FileNotFoundError:
+        pass
+    return entries
+
+
+def list_file_backups(limit=10):
+    """Texto con los últimos snapshots de archivos (para /backups-archivos)."""
+    entries = _load_backup_index()[-int(limit):]
+    if not entries:
+        return ("No hay snapshots de archivos todavía. Se crean solos cada vez "
+                "que edito o sobreescribo un archivo existente.")
+    lines = ["🗂️ Snapshots de archivos (antes de cada edición):"]
+    for i, e in enumerate(reversed(entries), 1):
+        lines.append(f"  [{i}] {e.get('ts','?')} — {e.get('original','?')}")
+    lines.append("\nRestaurar: /deshacer-archivo [num | ruta]  (sin argumento = el último)")
+    return "\n".join(lines)
+
+
+def restore_file_backup(selector=""):
+    """Revierte un archivo a su snapshot. selector: vacío = último snapshot;
+    número = posición en /backups-archivos; ruta = último snapshot de ESE archivo.
+    El estado actual se respalda antes de pisarlo (la restauración es deshacible)."""
+    entries = _load_backup_index()
+    if not entries:
+        return "No hay snapshots que restaurar."
+    selector = (selector or "").strip().strip('"').strip("'")
+    chosen = None
+    if not selector:
+        chosen = entries[-1]
+    elif selector.isdigit():
+        recent = list(reversed(entries))
+        idx = int(selector) - 1
+        if 0 <= idx < len(recent):
+            chosen = recent[idx]
+    else:
+        wanted = os.path.abspath(_clean_user_path(selector) or selector).lower()
+        base = os.path.basename(selector).lower()
+        for e in reversed(entries):
+            orig = e.get("original", "")
+            if orig.lower() == wanted or os.path.basename(orig).lower() == base:
+                chosen = e
+                break
+    if not chosen:
+        return f"No encontré un snapshot para '{selector}'. Mira /backups-archivos."
+    original, backup = chosen["original"], chosen["backup"]
+    try:
+        if os.path.isfile(original):
+            _snapshot_file(original)  # la restauración también es deshacible
+        os.makedirs(os.path.dirname(original) or ".", exist_ok=True)
+        shutil.copy2(backup, original)
+        return (f"✅ Restaurado {original}\n"
+                f"   desde el snapshot {chosen.get('ts','?')}.\n"
+                "   (El estado que acabo de pisar también quedó respaldado.)")
+    except Exception as e:
+        return f"Error restaurando {original}: {e}"
 
 
 def _is_text_editable(path):
