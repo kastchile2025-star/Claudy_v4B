@@ -97,5 +97,40 @@ class TestMemoriaInfinita(unittest.TestCase):
         self.assertIn("roadix", ctx.lower())
 
 
+class TestSearchFirstA5(unittest.TestCase):
+    """A5 — escalada por capas: buffer/ventana → FTS5 profundo solo si hace falta."""
+
+    def test_no_escala_si_tema_esta_en_la_ventana(self):
+        d = make_dummy()
+        win = [{"role": "Usuario", "text": "hablemos del módulo de facturación de COMBAS"},
+               {"role": "Claudy", "text": "claro, la facturación de COMBAS va al día"}]
+        # El prompt repite palabras clave ya presentes en la ventana caliente.
+        self.assertFalse(d._should_escalate_to_deep("y la facturación de combas?", win))
+
+    def test_escala_si_falta_una_palabra_clave(self):
+        d = make_dummy()
+        win = [{"role": "Usuario", "text": "hablemos de facturación"}]
+        # "roadix" no aparece en la ventana → hay que bajar a la capa profunda.
+        self.assertTrue(d._should_escalate_to_deep("qué pasó con el servidor roadix", win))
+
+    def test_saludo_no_escala(self):
+        d = make_dummy()
+        # Sin palabras clave con contenido: charla casual no dispara búsqueda profunda.
+        self.assertFalse(d._should_escalate_to_deep("hola, cómo estás", []))
+        self.assertFalse(d._should_escalate_to_deep("gracias!", []))
+
+    def test_recall_profundo_no_se_dispara_para_tema_caliente(self):
+        d = make_dummy()
+        # Tema reciente y presente en la ventana: el contexto NO debe traer
+        # el bloque de recuerdos antiguos (sería ruido).
+        d._save_memory_sqlite("Usuario", "el proyecto saturno usa la clave secreta zeta")
+        d._save_memory_sqlite("Claudy", "anotado: proyecto saturno, clave zeta")
+        ctx = d._build_memory_context("recuérdame la clave del proyecto saturno")
+        # "saturno", "clave" y "proyecto" están en la ventana → no escala.
+        self.assertNotIn("Recuerdos relevantes", ctx)
+        # Pero la capa caliente sí debe incluir el dato.
+        self.assertIn("saturno", ctx.lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -237,6 +237,12 @@ from features.watcher import WatcherMixin
 from features.screen_actions import ScreenActionsMixin
 from features.browser import BrowserMixin
 from features.canvas import CanvasMixin
+from features.recipes import RecipesMixin
+from features.translation import TranslationMixin
+from features.optimizer import OptimizerMixin
+from features.digest import DigestMixin
+from features.group_polls import GroupPollsMixin
+from features.soul import SoulMixin
 from core.command_guard import CommandGuardMixin
 from core.mcp_client import MCPMixin
 from core.llm import LLMMixin
@@ -435,7 +441,7 @@ def _make_app_icon(size=64):
         return _PILImg.new("RGBA", (size, size), (124, 107, 255, 255))
 
 
-class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, ScreenActionsMixin, BrowserMixin, CanvasMixin, MCPMixin, BubblesMixin, tk.Tk):
+class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, DocumentsMixin, EmailMixin, SchedulerMixin, CalendarMixin, SkillLoopMixin, CleanerMixin, VoiceChatMixin, CommandGuardMixin, WatcherMixin, ScreenActionsMixin, BrowserMixin, CanvasMixin, RecipesMixin, TranslationMixin, OptimizerMixin, DigestMixin, GroupPollsMixin, SoulMixin, MCPMixin, BubblesMixin, tk.Tk):
     BUBBLES = [
         "Estoy listo para ayudarte.",
         "Toca dos veces para hablar.",
@@ -529,6 +535,14 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         self._streaming_enabled = True  # /stream on|off — streaming en vivo (default ON desde v5)
         self._streamed = False
         self._plan_mode = False  # /plan on|off — solo planea, no ejecuta
+        self._translate_mode = False  # /traducir on|off — traducción continua (C7)
+        self._translate_target = None  # idioma destino del modo traducción
+        try:
+            from core.commands import build_default_router
+            self._command_router = build_default_router()
+        except Exception:
+            from core.commands import CommandRouter
+            self._command_router = CommandRouter()  # vacío: todo cae a la cadena
         self._checkpoint_history = []  # F3.1 stack para undo/redo
         self._checkpoint_undone = []
         self._last_file_artifact_path = None
@@ -3881,6 +3895,29 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
 
             # ==================== FASE 4 — todas las features ====================
             if prompt.startswith("/") :
+                # Router de comandos (core/commands.py): primero intentamos los
+                # comandos ya migrados a la tabla testeable. Si ninguno matchea,
+                # caemos a la cadena histórica de abajo (intacta). Migración
+                # incremental: cada comando que pase al router sale de la cadena.
+                try:
+                    def _router_respond(txt):
+                        self._set_response_text(txt)
+                        entry.configure(state="normal"); entry.focus_set()
+
+                    def _router_async(fn):
+                        def _wrap():
+                            out = fn()
+                            self.after(0, lambda: self._set_response_text(out))
+                        threading.Thread(target=_wrap, daemon=True).start()
+                        entry.configure(state="normal"); entry.focus_set()
+
+                    from core.commands import CommandContext
+                    _ctx = CommandContext(self, prompt, _router_respond, _router_async)
+                    if self._command_router.dispatch(_ctx):
+                        return
+                except Exception as _router_err:
+                    self._debug_log("ROUTER", f"fallo en router, sigo con cadena: {_router_err}")
+
                 try:
                     import claudy_extras as ex
                 except Exception:
@@ -4248,18 +4285,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                     self.after(0, lambda: self._set_response_text(out))
                 threading.Thread(target=_do_exec, daemon=True).start()
                 entry.configure(state="normal"); entry.focus_set(); return
-            # F3.12 /git ...
-            if prompt.startswith("/git "):
-                args = prompt[5:].split()
-                # Special case: /git commit "mensaje"
-                if args and args[0] == "commit" and len(args) >= 2:
-                    msg = " ".join(args[1:]).strip('"\'')
-                    self._git_cmd(["add", "-A"])
-                    out = self._git_cmd(["commit", "-m", msg])
-                else:
-                    out = self._git_cmd(args)
-                self._set_response_text(out)
-                entry.configure(state="normal"); entry.focus_set(); return
+            # F3.12 /git → migrado al router (core/commands.py).
             # F3.13 /test
             if prompt.strip() == "/test":
                 self._set_response_text("Corriendo tests...")
@@ -4269,21 +4295,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                     self.after(0, lambda: self._set_response_text(out))
                 threading.Thread(target=_do_test, daemon=True).start()
                 entry.configure(state="normal"); entry.focus_set(); return
-            # F3.15 /skill buscar  F3.16 /skill install
-            if prompt.startswith("/skill buscar ") or prompt.startswith("/skill search "):
-                q = prompt.split(None, 2)[2].strip()
-                self._set_response_text(self._search_skills_registry(q))
-                entry.configure(state="normal"); entry.focus_set(); return
-            if prompt.startswith("/skill install "):
-                src = prompt.split(None, 2)[2].strip()
-                # «confiar» al final: fuerza la instalación pese al veto B6
-                force = False
-                if src.lower().endswith((" confiar", " --force", " force")):
-                    force = True
-                    src = src.rsplit(None, 1)[0].strip()
-                ok, msg = self._install_skill(src, force=force)
-                self._set_response_text(msg)
-                entry.configure(state="normal"); entry.focus_set(); return
+            # F3.15 /skill buscar  F3.16 /skill install → migrados al router.
             if prompt.startswith("/skill use ") or prompt.startswith("/skill usa "):
                 q = prompt.split(None, 2)[2].strip()
                 def _do_skill_use():
@@ -4291,29 +4303,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                     self.after(0, lambda: self._set_response_text(msg))
                 threading.Thread(target=_do_skill_use, daemon=True).start()
                 entry.configure(state="normal"); entry.focus_set(); return
-            # F3.17 /play <query>
-            if prompt.startswith("/play"):
-                parts = prompt.split(None, 1); q = parts[1].strip() if len(parts) > 1 else ""
-                self._set_response_text(self._spotify_play(q))
-                entry.configure(state="normal"); entry.focus_set(); return
-            # F3.19 /board /task
-            if prompt.strip() == "/board":
-                self._set_response_text(self._kanban_list())
-                entry.configure(state="normal"); entry.focus_set(); return
-            if prompt.startswith("/task "):
-                rest = prompt[6:].strip()
-                if rest.startswith("add "):
-                    txt = rest[4:].strip()
-                    self._set_response_text(self._kanban_add(txt))
-                elif rest.startswith("done "):
-                    tid = rest[5:].strip()
-                    self._set_response_text(self._kanban_move(tid, "done"))
-                elif rest.startswith("del "):
-                    tid = rest[4:].strip()
-                    self._set_response_text(self._kanban_delete(tid))
-                else:
-                    self._set_response_text("Usa: /task add <texto> | /task done <id> | /task del <id>")
-                entry.configure(state="normal"); entry.focus_set(); return
+            # /optimizar, /traducir, /recetas → migrados al router (core/commands.py).
+            # F3.17 /play · F3.19 /board /task → migrados al router (core/commands.py).
             # F3.21 /delegate --as <personality> <tarea>
             if prompt.startswith("/delegate-as "):
                 rest = prompt[13:].strip()
@@ -4348,6 +4339,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 self._set_response_text(self._read_exif(p))
                 entry.configure(state="normal"); entry.focus_set(); return
             # F3.8 /telegram-voice on|off  (TTS reply en Telegram)
+            # /avisos y /vincular → migrados al router (core/commands.py).
             if prompt.startswith("/telegram-voice"):
                 parts = prompt.split(None, 1); arg = parts[1].strip().lower() if len(parts) > 1 else ""
                 cfg_path = os.path.join(os.path.expanduser("~"), ".claudy", "config.json")
@@ -4661,29 +4653,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 entry.configure(state="normal")
                 entry.focus_set()
                 return
-            # Handle /delegate command (subagent spawn).
-            if prompt.startswith("/delegate"):
-                parts = prompt.split(None, 1)
-                task = parts[1].strip() if len(parts) > 1 else ""
-                ok, msg = self._spawn_subagent(task)
-                self._set_response_text(msg)
-                status.configure(text="Subagente OK" if ok else "Error", fg=THEME["accent"] if ok else "#ff6b6b")
-                entry.configure(state="normal")
-                entry.focus_set()
-                return
-            if prompt.strip() == "/subagents":
-                self._set_response_text(self._list_subagents())
-                status.configure(text="Subagentes", fg=THEME["accent"])
-                entry.configure(state="normal")
-                entry.focus_set()
-                return
-            if prompt.startswith("/subagent "):
-                sid = prompt.split(None, 1)[1].strip()
-                self._set_response_text(self._get_subagent_result(sid))
-                status.configure(text=f"Resultado {sid}", fg=THEME["accent"])
-                entry.configure(state="normal")
-                entry.focus_set()
-                return
+            # /delegate, /subagents, /subagent → migrados al router (core/commands.py).
             # Handle /batch command.
             if prompt.startswith("/batch"):
                 parts = prompt.split(None, 2)
@@ -5008,6 +4978,17 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 else:
                     msg = self._notes_add(rest)
                     self._set_response_text(msg)
+                entry.configure(state="normal"); entry.focus_set(); return
+            # C7 — Modo traducción continua: si está activo, el mensaje normal
+            # se traduce en vez de ir al flujo general (los comandos ya pasaron).
+            if getattr(self, "_translate_mode", False) and not prompt.startswith("/"):
+                def _do_live_translate(p=prompt):
+                    out = self._maybe_translate_incoming(p)
+                    if out is not None:
+                        self.after(0, lambda: self._set_response_text(out))
+                        if chat:
+                            self.after(0, lambda: chat.add_bot(out))
+                threading.Thread(target=_do_live_translate, daemon=True).start()
                 entry.configure(state="normal"); entry.focus_set(); return
             entry.configure(state="disabled")
 
@@ -5720,6 +5701,69 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
             w.configure(state="disabled")
             w.see("end")
         except tk.TclError:
+            pass
+
+    # A12 — Streaming de tool-calls en la CLAUDY CONSOLE.
+    # Etiquetas legibles para los nombres técnicos de las tools del LLM. La
+    # consola del chat (status line) muestra en vivo qué poder está ejecutando
+    # Claudy, sin tocar el DOM de chat.html (reusa el canal updateStatusText).
+    _TOOL_CONSOLE_LABELS = {
+        "get_disk_space": "🖧 Consultando espacio en disco",
+        "execute_command": "⌘ Ejecutando comando",
+        "execute_code": "🐍 Ejecutando código",
+        "search_files": "🔎 Buscando archivos",
+        "read_file": "📖 Leyendo archivo",
+        "write_file": "✍ Escribiendo archivo",
+        "append_file": "✍ Añadiendo a archivo",
+        "replace_in_file": "✎ Editando archivo",
+        "create_folder": "📁 Creando carpeta",
+        "browser_goto": "🌐 Abriendo página",
+        "browser_text": "🌐 Leyendo la página",
+        "browser_click": "🖱 Click en la página",
+        "browser_fill": "⌨ Rellenando formulario",
+        "browser_press": "⌨ Pulsando tecla",
+        "show_canvas": "🖼 Mostrando canvas",
+    }
+
+    def _tool_console_label(self, name, args=None):
+        """Etiqueta legible 'poder + detalle' para la consola. Los detalles
+        (ruta, url, comando) se recortan para caber en una línea de status."""
+        base = self._TOOL_CONSOLE_LABELS.get(name)
+        if base is None:
+            if name.startswith("mcp_"):
+                base = f"🔌 Herramienta MCP: {name[4:]}"
+            else:
+                base = f"⚙ {name}"
+        detail = ""
+        if isinstance(args, dict):
+            for key in ("command", "url", "path", "query", "target", "title", "selector"):
+                val = args.get(key)
+                if val:
+                    detail = str(val).replace("\n", " ").strip()
+                    break
+        if detail:
+            if len(detail) > 48:
+                detail = detail[:48].rstrip() + "…"
+            base = f"{base}: {detail}"
+        return base
+
+    def _emit_tool_console(self, name, args=None):
+        """Empuja a la CLAUDY CONSOLE (status line) qué tool está corriendo.
+        Throttle ligero para no saturar el webview en ráfagas de tool-calls."""
+        try:
+            label = self._tool_console_label(name, args)
+            now = time.time()
+            last = getattr(self, "_last_console_emit", 0.0)
+            if now - last < 0.05:
+                time.sleep(0.05)  # serializa ráfagas para que el front alcance a pintar
+            self._last_console_emit = time.time()
+            widget = getattr(self, "_status_widget", None)
+            if widget is not None:
+                self.after(0, lambda l=label: widget.configure(text=l))
+            else:
+                self.after(0, lambda l=label: self._eval_in_web(
+                    f"try {{ updateStatusText({json.dumps(l)}); }} catch(e) {{}}"))
+        except Exception:
             pass
 
     def _update_progress(self, msg):
@@ -8041,6 +8085,182 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         })
         return ct
 
+    def _save_config_section(self, mutator):
+        """A11 — guarda config.json aplicando `mutator(cfg)`, cifrando secretos
+        en reposo igual que el panel de Claves API. Devuelve (ok, mensaje)."""
+        try:
+            cfg = self.load_claudy_config()
+            mutator(cfg)
+            try:
+                if _secure is not None:
+                    _secure.encrypt_config_secrets(cfg)
+            except Exception:
+                pass
+            path = os.path.expanduser("~/.claudy/config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+            return True, "Guardado ✓"
+        except Exception as e:
+            return False, f"Error al guardar: {e}"
+
+    def _build_config_panels(self, shell, THEME, HFONT, HFONT_SB,
+                             add_header_hover, add_button_hover, cfg):
+        """A11 — Gestor visual de configuración: paneles colapsables de Modelo,
+        Voz (TTS) y Telegram, con el mismo estilo que Claves API/Skin/Tema.
+        Todo lo que antes se editaba a mano en config.json queda accesible aquí."""
+        import tkinter as tk
+
+        def make_panel(title):
+            frame = tk.Frame(
+                shell, bg=THEME["bg_input"],
+                highlightbackground=THEME.get("bg_bubble_border", THEME["accent"]),
+                highlightthickness=1, bd=0,
+            )
+            frame.pack(side="bottom", fill="x", padx=12, pady=(4, 6))
+            expanded = [False]
+            header = tk.Label(
+                frame, text=f"▶  {title}", bg=THEME["bg_input"], fg=THEME["accent_glow"],
+                font=(HFONT_SB, 11), cursor="hand2", anchor="w", padx=10, pady=8)
+            header.pack(fill="x")
+            add_header_hover(header)
+            content = tk.Frame(frame, bg=THEME["bg_input"])
+
+            def toggle(_e=None):
+                if expanded[0]:
+                    content.pack_forget()
+                    header.config(text=f"▶  {title}")
+                    expanded[0] = False
+                else:
+                    content.pack(fill="x")
+                    header.config(text=f"▼  {title}")
+                    expanded[0] = True
+            header.bind("<Button-1>", toggle)
+            return content
+
+        def make_status(parent):
+            lbl = tk.Label(parent, text="", bg=THEME["bg_input"], fg="#2fe6c8",
+                           font=("Segoe UI", 8, "italic"))
+            lbl.pack(anchor="w", padx=10, pady=(2, 4))
+            return lbl
+
+        def make_save_btn(parent, command):
+            btn = tk.Button(
+                parent, text="💾 Guardar", command=command,
+                bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+                font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2",
+                activebackground=THEME["accent"], activeforeground="#ffffff",
+                padx=10, pady=4, bd=0)
+            btn.pack(anchor="e", padx=10, pady=(2, 6))
+            add_button_hover(btn)
+            return btn
+
+        # ── Panel: Modelo por defecto ──
+        model_content = make_panel("🧠 Modelo de IA")
+        tk.Label(model_content, text="Modelo activo (se usa en cada respuesta):",
+                 bg=THEME["bg_input"], fg=THEME["text_secondary"],
+                 font=("Segoe UI", 8)).pack(anchor="w", padx=10, pady=(0, 4))
+        current_model = self._current_model or cfg.get("opencode", {}).get("defaultModel", "deepseek-chat")
+        model_var = tk.StringVar(value=current_model)
+        model_box = tk.Frame(model_content, bg=THEME["bg_input"])
+        model_box.pack(fill="x", padx=10)
+        try:
+            from tkinter import ttk
+            combo = ttk.Combobox(model_box, textvariable=model_var,
+                                 values=list(self._available_models), state="readonly")
+            combo.pack(fill="x")
+        except Exception:
+            combo = tk.Entry(model_box, textvariable=model_var, bg=THEME["bg_bubble"],
+                             fg=THEME["text_primary"], relief="flat")
+            combo.pack(fill="x")
+        model_status = make_status(model_content)
+
+        def save_model():
+            chosen = model_var.get().strip()
+            if not chosen:
+                model_status.config(text="Elige un modelo.", fg="#ff8888")
+                return
+            self._current_model = chosen
+            ok, msg = self._save_config_section(
+                lambda c: c.setdefault("opencode", {}).__setitem__("defaultModel", chosen))
+            model_status.config(text=(f"Modelo: {chosen} · {msg}" if ok else msg),
+                                fg="#2fe6c8" if ok else "#ff4e4e")
+        make_save_btn(model_content, save_model)
+
+        # ── Panel: Voz (TTS) ──
+        voice_content = make_panel("🔊 Voz de Claudy")
+        voice_var = tk.BooleanVar(value=bool(getattr(self, "_voice_enabled", False)))
+
+        def on_voice_toggle():
+            self._voice_enabled = bool(voice_var.get())
+        tk.Checkbutton(
+            voice_content, text="Leer las respuestas en voz alta (TTS en el chat)",
+            variable=voice_var, command=on_voice_toggle,
+            bg=THEME["bg_input"], fg=THEME["text_primary"],
+            selectcolor=THEME["bg_bubble"], activebackground=THEME["bg_input"],
+            activeforeground=THEME["text_primary"], font=("Segoe UI", 9),
+            anchor="w", padx=10, bd=0, highlightthickness=0).pack(fill="x", pady=(2, 2))
+        tg_tts_var = tk.BooleanVar(value=bool(cfg.get("telegram", {}).get("ttsReply", False)))
+        tk.Checkbutton(
+            voice_content, text="Responder con audio también en Telegram",
+            variable=tg_tts_var,
+            bg=THEME["bg_input"], fg=THEME["text_primary"],
+            selectcolor=THEME["bg_bubble"], activebackground=THEME["bg_input"],
+            activeforeground=THEME["text_primary"], font=("Segoe UI", 9),
+            anchor="w", padx=10, bd=0, highlightthickness=0).pack(fill="x", pady=(0, 2))
+        voice_status = make_status(voice_content)
+
+        def save_voice():
+            self._voice_enabled = bool(voice_var.get())
+            ok, msg = self._save_config_section(
+                lambda c: c.setdefault("telegram", {}).__setitem__("ttsReply", bool(tg_tts_var.get())))
+            voice_status.config(text=msg, fg="#2fe6c8" if ok else "#ff4e4e")
+        make_save_btn(voice_content, save_voice)
+
+        # ── Panel: Telegram ──
+        tg_content = make_panel("✈ Telegram")
+        tg_cfg = cfg.get("telegram", {}) or {}
+
+        def make_row(parent, label_text, value, show=None):
+            row = tk.Frame(parent, bg=THEME["bg_input"])
+            row.pack(fill="x", padx=10, pady=2)
+            tk.Label(row, text=label_text, bg=THEME["bg_input"], fg=THEME["text_primary"],
+                     font=("Segoe UI", 8, "bold"), width=12, anchor="w").pack(side="left")
+            ent = tk.Entry(row, bg=THEME["bg_bubble"], fg=THEME["text_primary"],
+                           insertbackground=THEME["text_primary"], font=("Segoe UI", 8),
+                           relief="flat", bd=1, show=show or "",
+                           highlightbackground=THEME.get("bg_bubble_border", THEME["bg_bubble"]),
+                           highlightcolor=THEME["accent"], highlightthickness=1)
+            ent.insert(0, value)
+            ent.pack(side="left", fill="x", expand=True, padx=(4, 0))
+            return ent
+
+        token_ent = make_row(tg_content, "Bot Token:", tg_cfg.get("token", ""), show="•")
+        users_val = tg_cfg.get("authorizedUsers", []) or []
+        if isinstance(users_val, list):
+            users_val = ", ".join(str(u) for u in users_val)
+        users_ent = make_row(tg_content, "IDs autoriz.:", str(users_val))
+        tg_status = make_status(tg_content)
+
+        def save_telegram():
+            token = token_ent.get().strip()
+            raw_users = users_ent.get().strip()
+            users = [u.strip() for u in raw_users.replace(";", ",").split(",") if u.strip()]
+            # Normaliza a int cuando se puede (los IDs de Telegram son numéricos).
+            norm_users = []
+            for u in users:
+                norm_users.append(int(u) if u.lstrip("-").isdigit() else u)
+
+            def _mut(c):
+                tg = c.setdefault("telegram", {})
+                if token:
+                    tg["token"] = token
+                tg["authorizedUsers"] = norm_users
+            ok, msg = self._save_config_section(_mut)
+            extra = " (reinicia el bot para aplicar el token)" if token else ""
+            tg_status.config(text=(msg + extra) if ok else msg,
+                             fg="#2fe6c8" if ok else "#ff4e4e")
+        make_save_btn(tg_content, save_telegram)
+
     def show_history_window(self):
         # Toggle: if already open, close it.
         if self.history_win is not None:
@@ -8256,6 +8476,12 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 api_expanded[0] = True
 
         api_header.bind("<Button-1>", toggle_api_content)
+
+        # ── A11: Modelo / Voz / Telegram (paneles colapsables) ──
+        # Completa el gestor visual: todo lo que antes se editaba a mano en
+        # config.json ahora tiene control en Ajustes, con el mismo estilo.
+        self._build_config_panels(
+            shell, THEME, HFONT, HFONT_SB, add_header_hover, add_button_hover, cfg)
 
         # ── Skin picker (Collapsible) ──
         skin_frame = tk.Frame(
@@ -8754,15 +8980,25 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 pass
         if running >= 3:
             return False, f"Limite alcanzado ({running}/3 subagentes corriendo). Usa /subagents."
+        # A6 — sin comunicación horizontal ni recursión: un subagente NO puede
+        # lanzar otros subagentes (evita árboles que explotan). Lo señalamos por
+        # variable de entorno que el runner propaga al gateway.
+        if os.environ.get("CLAUDY_SUBAGENT") == "1":
+            return False, "Un subagente no puede delegar más subagentes (sin jerarquía recursiva)."
         sid = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_") + str(int(time.time() * 1000))[-4:]
         script = os.path.join(SCRIPT_DIR, "subagent_runner.py")
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # B4 — linaje: este proceso es la raíz del árbol (no es un subagente, por
+        # el guard de recursión de arriba). Marcamos parent=root y root_task=task.
+        env = dict(os.environ, CLAUDY_SUBAGENT="1",
+                   CLAUDY_PARENT_ID="root", CLAUDY_ROOT_TASK=task)
         try:
             subprocess.Popen(
                 [sys.executable, "-u", script, sid, task],
                 creationflags=flags,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=env,
             )
         except Exception as e:
             return False, f"Error spawn: {e}"
@@ -8782,6 +9018,7 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         if not items:
             return "Sin subagentes."
         lines = [f"[{s}] {i}: {t}" for i, s, t in items]
+        lines.append("Usa /linaje para ver el árbol de delegaciones.")
         return "\n".join(lines)
 
     def _get_subagent_result(self, sid):
@@ -8796,6 +9033,81 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
             return d.get("result", "(vacio)")
         except Exception as e:
             return f"Error: {e}"
+
+    def _load_subagent_records(self):
+        """Lee todos los <id>.json del dir de subagentes (tolerante a corruptos)."""
+        records = {}
+        d = self._subagents_dir()
+        for fn in os.listdir(d):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(d, fn), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            sid = rec.get("id") or fn[:-5]
+            rec.setdefault("id", sid)
+            records[sid] = rec
+        return records
+
+    @staticmethod
+    def _render_subagent_tree(records):
+        """B4 — dibuja el linaje de subagentes como árbol de texto.
+
+        Agrupa por tarea raíz (root_task) y, dentro de cada raíz, cuelga los
+        subagentes de su `parent`. Hoy A6 prohíbe la recursión, así que el árbol
+        es raíz→hijos (1 nivel), pero el algoritmo es genérico por si se habilita
+        anidamiento. No toca el DOM: devuelve texto para la CLAUDY CONSOLE/chat.
+        """
+        if not records:
+            return "Sin subagentes en el linaje."
+        icon = {"running": "⏳", "done": "✅"}
+        # children[parent_id] = [recs...] ; el padre 'root' (o ausente) es raíz.
+        children = {}
+        roots = []
+        for rec in records.values():
+            parent = rec.get("parent") or "root"
+            if parent == "root" or parent not in records:
+                roots.append(rec)
+            else:
+                children.setdefault(parent, []).append(rec)
+
+        def _short(rec):
+            st = icon.get(rec.get("status"), "•")
+            task = (rec.get("task") or "").strip().replace("\n", " ")
+            if len(task) > 56:
+                task = task[:53] + "..."
+            return f"{st} {rec.get('id')}: {task}"
+
+        # Agrupar raíces por root_task para titular cada árbol.
+        by_root_task = {}
+        for r in sorted(roots, key=lambda x: x.get("started", 0)):
+            key = (r.get("root_task") or r.get("task") or "").strip()
+            by_root_task.setdefault(key, []).append(r)
+
+        lines = []
+
+        def _walk(rec, prefix, is_last):
+            connector = "└─ " if is_last else "├─ "
+            lines.append(prefix + connector + _short(rec))
+            kids = sorted(children.get(rec.get("id"), []),
+                          key=lambda x: x.get("started", 0))
+            child_prefix = prefix + ("   " if is_last else "│  ")
+            for i, kid in enumerate(kids):
+                _walk(kid, child_prefix, i == len(kids) - 1)
+
+        for task_key, group in by_root_task.items():
+            title = task_key if len(task_key) <= 64 else task_key[:61] + "..."
+            lines.append(f"🌳 {title or '(raíz)'}")
+            for i, root in enumerate(group):
+                _walk(root, "", i == len(group) - 1)
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    def _subagent_tree(self):
+        """Comando /linaje — devuelve el árbol de subagentes para mostrar."""
+        return self._render_subagent_tree(self._load_subagent_records())
 
     def _batches_dir(self):
         d = os.path.join(os.path.expanduser("~"), ".claudy", "batches")
@@ -9092,6 +9404,55 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
             pass
 
     # --- F3.11 execute_code sandbox Python ---
+    # A8 — Patrones de Python destructivo que execute_code rechaza fail-closed,
+    # como complemento a la lista negra de comandos shell (check_blocked). El
+    # objetivo es atrapar borrados masivos/llamadas al SO peligrosas sin matar
+    # los usos legítimos (cálculos, parseos, generar archivos puntuales).
+    _CODE_BLOCKED_PATTERNS = [
+        (r"shutil\.rmtree\s*\(\s*['\"]?(?:/|~|[a-zA-Z]:[\\/]?)['\"]?\s*\)",
+         "shutil.rmtree sobre una raíz"),
+        (r"os\.system\s*\(", "os.system (usa la tool execute_command, que pasa por el guard)"),
+        (r"subprocess\.(?:run|call|Popen|check_output)\s*\(", "subprocess (usa execute_command)"),
+        (r"\beval\s*\(|\bexec\s*\(", "eval/exec dinámico"),
+        (r"__import__\s*\(\s*['\"]os['\"]", "import dinámico de os"),
+        (r"socket\.|requests\.|urllib\.request\.urlopen", "acceso de red crudo desde código"),
+    ]
+
+    def _execute_code_guarded(self, code, timeout=20):
+        """A8 — Ejecuta un script Python autocontenido en una sola llamada,
+        tras un filtro de seguridad fail-closed. Pensado para que el modelo
+        colapse secuencias multi-paso (calcular, transformar datos, generar un
+        archivo) en una sola ejecución local en vez de varias llamadas.
+
+        Seguridad: rechaza el código que matchee la lista negra de comandos
+        (check_blocked, p.ej. os.system('rm -rf ...')) o los patrones de Python
+        peligroso (_CODE_BLOCKED_PATTERNS). Para tocar el sistema o la red, el
+        modelo debe usar las tools dedicadas (execute_command, browser_*), que
+        pasan por command_guard."""
+        import re as _re
+        code = (code or "").strip()
+        if not code:
+            return "No se entregó código para ejecutar."
+        try:
+            from core.command_guard import check_blocked
+            reason = check_blocked(code)
+        except Exception:
+            reason = None
+        if reason:
+            return f"🚫 Código rechazado por seguridad: {reason}."
+        for pat, why in self._CODE_BLOCKED_PATTERNS:
+            if _re.search(pat, code, _re.IGNORECASE):
+                return f"🚫 Código rechazado por seguridad: {why}."
+        try:
+            self._debug_log("EXECUTE_CODE", code[:500])
+        except Exception:
+            pass
+        try:
+            timeout = max(1, min(int(timeout), 60))
+        except Exception:
+            timeout = 20
+        return self._execute_python(code, timeout=timeout)
+
     def _execute_python(self, code, timeout=15):
         import tempfile, subprocess as sp
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8")
@@ -10088,6 +10449,8 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         return _self._browser_tool("press", key or "Enter")
     def _tool_show_canvas(_self, title="", markdown="", chart=None):
         return _self._canvas_show(title, markdown, chart)
+    def _tool_execute_code(_self, code="", timeout=20):
+        return _self._execute_code_guarded(code, timeout=timeout)
 
     @classmethod
     def _register_builtin_tools(cls):
@@ -10163,6 +10526,20 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
                 "chart": {"type": "string", "description": "Optional chart spec as JSON string"},
             },
             "required": ["title"]})
+        # A8 — execute_code: colapsa una secuencia multi-paso en una sola
+        # ejecución local de Python (cálculo, transformación de datos, generar
+        # un archivo). Filtrado fail-closed; para SO/red usa las tools dedicadas.
+        cls.register_tool("execute_code", cls._tool_execute_code,
+                          "Run a self-contained Python script in one call and return its stdout. Use to "
+                          "collapse multi-step work (compute, parse/transform data, build a file) into a "
+                          "single local execution instead of many tool calls. print() the result. Do NOT "
+                          "use it for the OS or network (use execute_command / browser_* instead).", {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Self-contained Python source; print the output"},
+                "timeout": {"type": "integer", "description": "Max seconds (1-60, default 20)"},
+            },
+            "required": ["code"]})
 
     # ------------------------------------------------------------------
     # Memory: checkpoints, rollback, search
@@ -13628,6 +14005,23 @@ Tambien puedes hablar naturalmente:
             return f"Usuario {uid} vinculado correctamente."
         return f"Usuario {uid} ya estaba vinculado."
 
+    def _generate_pairing_code(self):
+        """A10 — genera un código de vinculación efímero (core/pairing.py).
+        Felipe se lo pasa al usuario nuevo; este lo envía al bot con
+        '/vincular <código>'. Más seguro que dictar el uid: el código caduca,
+        es de un solo uso y el bot aplica rate-limit + lockout."""
+        try:
+            from core import pairing
+            state = pairing.load_state()
+            code = pairing.generate_code(state)
+            pairing.save_state(state)
+            mins = pairing.CODE_TTL // 60
+            return (f"🔐 Código de vinculación: {code}\n"
+                    f"Válido {mins} min, un solo uso. Dáselo a la persona y que "
+                    f"escriba al bot:\n/vincular {code}")
+        except Exception as e:
+            return f"No pude generar el código de vinculación: {e}"
+
     def launch_claudy(self):
         project_dir = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
         command = f'cd /d "{project_dir}" && npx claudy chat'
@@ -13646,52 +14040,41 @@ Tambien puedes hablar naturalmente:
 
     # --- Subagentes ---
 
-    def _spawn_subagent(self, task, context=""):
-        """Launch a subagent as an independent process via Gateway API."""
-        subagent_script = os.path.join(SCRIPT_DIR, "bg_subagent.py")
-        if not os.path.exists(subagent_script):
-            # Create on-the-fly if missing
-            with open(subagent_script, "w", encoding="utf-8") as f:
-                f.write(r'''"""Claudy Subagent - ejecuta una tarea aislada via Gateway API."""
-import asyncio, json, os, sys, urllib.request, time
-GATEWAY = "http://127.0.0.1:8720/api"
-task_file = os.path.join(os.path.expanduser("~"), ".claudy", "subagent_task.json")
-with open(task_file, "r", encoding="utf-8") as f:
-    task_data = json.load(f)
-print(f"[Subagent] Tarea: {task_data.get('task','')[:80]}")
-req = urllib.request.Request(GATEWAY,
-    data=json.dumps({"message": task_data["task"]}).encode("utf-8"),
-    headers={"Content-Type": "application/json"})
-try:
-    resp = urllib.request.urlopen(req, timeout=300)
-    result = json.loads(resp.read()).get("response", "")
-except Exception as e:
-    result = f"Error: {e}"
-result_path = os.path.join(os.path.expanduser("~"), ".claudy", "subagent_result.json")
-with open(result_path, "w", encoding="utf-8") as f:
-    json.dump({"task": task_data["task"], "result": result, "time": time.time()}, f)
-print(f"[Subagent] Completado")
-''')
-        task_file = os.path.join(os.path.expanduser("~"), ".claudy", "subagent_task.json")
-        os.makedirs(os.path.dirname(task_file), exist_ok=True)
-        with open(task_file, "w", encoding="utf-8") as f:
-            json.dump({"task": task, "context": context}, f)
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.Popen([sys.executable, "-u", subagent_script], creationflags=flags)
-        return f"Subagente lanzado para: {task[:100]}...\nResultados en ~/.claudy/subagent_result.json"
+    # NOTA (A6): aquí vivía un segundo _spawn_subagent que pisaba al de arriba
+    # (línea ~9036). Era defectuoso: devolvía un string donde los callers
+    # esperan (ok, msg) — rompía `ok, msg = self._spawn_subagent(...)` — y usaba
+    # archivos GLOBALES (subagent_task/result.json), así que dos subagentes en
+    # paralelo se pisaban los resultados, justo lo contrario del aislamiento que
+    # pide A6. Se eliminó; el _spawn_subagent bueno usa IDs únicos por subagente.
 
     def _check_subagent_result(self):
-        """Check if subagent completed and return result."""
-        result_path = os.path.join(os.path.expanduser("~"), ".claudy", "subagent_result.json")
-        if not os.path.exists(result_path):
+        """A6 — Devuelve el resultado del subagente 'done' más reciente que aún
+        no se haya recogido, y lo marca como recogido. Aislado por ID: cada
+        subagente tiene su propio <id>.json, sin colisiones en paralelo."""
+        d = self._subagents_dir()
+        candidates = []
+        for fn in os.listdir(d):
+            if not fn.endswith(".json"):
+                continue
+            path = os.path.join(d, fn)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            if data.get("status") == "done" and not data.get("collected"):
+                candidates.append((os.path.getmtime(path), path, data))
+        if not candidates:
             return None
+        candidates.sort(reverse=True)  # el más reciente primero
+        _, path, data = candidates[0]
         try:
-            with open(result_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            os.remove(result_path)
-            return data.get("result", "Sin resultado")
+            data["collected"] = True
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
-            return None
+            pass
+        return data.get("result", "Sin resultado")
 
     # --- Kanban Board ---
 

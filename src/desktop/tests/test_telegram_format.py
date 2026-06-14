@@ -14,7 +14,8 @@ _BOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 
 
 def _load_converter():
-    src = open(_BOT, encoding="utf-8").read()
+    with open(_BOT, encoding="utf-8") as f:
+        src = f.read()
     fn_src = src[src.index("def md_to_telegram_html"):src.index("# Locate ffmpeg")]
     ns = {"re": re, "html": html}
     exec(fn_src, ns)

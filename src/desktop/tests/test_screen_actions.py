@@ -2,7 +2,9 @@
 import datetime
 import os
 import sys
+import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -103,8 +105,15 @@ class TestScreenToCalendar(unittest.TestCase):
         pet = FakePet('{"found": true, "summary": "Reunión QCORE", '
                       '"date": "2026-06-13", "start": "10:00", "end": null, '
                       '"location": "Oficina", "description": "Revisión mensual"}')
-        out = pet._screen_to_calendar()
-        # Sin google_calendar conectado en el entorno de test: igual entrega el evento leído
+        # Mockeamos google_calendar para NO pegar a la red (antes el test
+        # dependía de que el entorno no tuviera Calendar conectado → frágil y
+        # dejaba un socket SSL abierto).
+        fake_gcal = types.ModuleType("google_calendar")
+        fake_gcal.status = lambda: {"connected": False, "reason": "no conectado"}
+        fake_gcal.create_event = lambda **kw: {"ok": False, "reason": "no conectado"}
+        with mock.patch.dict(sys.modules, {"google_calendar": fake_gcal}):
+            out = pet._screen_to_calendar()
+        # Igual entrega el evento leído, sin crear nada en Calendar.
         self.assertIn("Reunión QCORE", out)
         self.assertIn("13-06-2026 10:00", out)
         self.assertIn("Oficina", out)

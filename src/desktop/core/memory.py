@@ -19,9 +19,24 @@ import re
 import sqlite3
 import time
 
+try:
+    from core.logging_setup import warn as _log_warn
+except Exception:  # uso standalone en tests sin el paquete core en el path
+    def _log_warn(component, message, exc=None):
+        pass
+
 MEMORY_MAX_MESSAGES = 200
 MEMORY_CONTEXT_MESSAGES = 20
 MEMORY_CONTEXT_CHARS = 6000
+
+# A5 — Recuperación search-first por capas (estilo Hermes). El orden de escalada
+# es: buffer inmediato → ventana deslizante → FTS5 profundo (+ vault). Solo se
+# escala a la capa siguiente si la actual no cubre las palabras clave del prompt.
+# Esto reduce ruido contextual y tokens: una pregunta cuyo tema ya está en los
+# mensajes recientes NO dispara la búsqueda profunda en el archivo ni en el vault.
+MEMORY_BUFFER_MESSAGES = 6        # Capa 1: últimos intercambios (siempre presentes)
+MEMORY_WINDOW_MESSAGES = 40       # Capa 2: ventana deslizante para cubrir el tema
+MEMORY_DEEP_MIN_KEYWORD = 4       # Long. mínima de palabra clave para considerar "cubierta"
 
 
 class MemoryMixin:
@@ -320,8 +335,9 @@ class MemoryMixin:
                     pass
             conn.commit()
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # Crítico: si no se guarda, se pierde un mensaje de la memoria infinita.
+            _log_warn("memoria", "no pude guardar el mensaje en SQLite", e)
         self._prune_memory()
         self._save_count = getattr(self, "_save_count", 0) + 1
         if self._save_count % 50 == 0:
@@ -385,8 +401,9 @@ class MemoryMixin:
                 conn.execute("DELETE FROM memory WHERE id IN (SELECT id FROM memory ORDER BY id ASC LIMIT ?)", (excess,))
                 conn.commit()
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # Crítico: el archivado protege el contrato de memoria infinita.
+            _log_warn("memoria", "fallo al podar/archivar memoria", e)
 
     _VAULT_STOPWORDS = {
         "para", "como", "esta", "este", "esto", "esos", "esas", "pero", "porque", "con",
@@ -479,13 +496,63 @@ class MemoryMixin:
         return ("[Memoria del ecosistema QCORE — notas relevantes del vault]\n"
                 + "".join(parts) + "[/Memoria del ecosistema]\n\n") if parts else ""
 
+    # Muletillas de conversación que no son "tema": si solo aparecen estas,
+    # el prompt es charla casual y no justifica bajar a la capa profunda.
+    _PROMPT_STOPWORDS = frozenset(
+        "como cómo esta está estas estás estoy estamos cual cuál cuales cuáles "
+        "donde dónde cuando cuándo porque por qué para pero aunque tambien también "
+        "entonces ahora hoy ayer mañana bien mal mejor peor mucho poco nada todo "
+        "hola hello gracias chao adios adiós saludos buenas buenos dias días "
+        "tardes noches favor please".split())
+
+    @classmethod
+    def _prompt_keywords(cls, prompt):
+        """Palabras clave con contenido del prompt (>= MEMORY_DEEP_MIN_KEYWORD,
+        sin stopwords). Base para decidir si una capa de memoria 'cubre' el tema.
+        Normaliza diacríticos antes de filtrar (cómo→como) para que las
+        muletillas acentuadas también caigan."""
+        words = re.findall(r"[a-záéíóúñü0-9]+", (prompt or "").lower())
+        stop = cls._VAULT_STOPWORDS | cls._PROMPT_STOPWORDS
+        out = set()
+        for w in words:
+            if len(w) < MEMORY_DEEP_MIN_KEYWORD:
+                continue
+            norm = w.translate(str.maketrans("áéíóú", "aeiou"))
+            if w in stop or norm in stop:
+                continue
+            out.add(w)
+        return out
+
+    def _should_escalate_to_deep(self, prompt, window_msgs):
+        """A5 — ¿hay que bajar a la capa profunda (FTS5 + vault)?
+
+        Devuelve False (no escalar) solo si la ventana deslizante ya contiene
+        TODAS las palabras clave del prompt: el contexto reciente basta y la
+        búsqueda profunda sería ruido. Si el prompt no tiene palabras clave
+        (saludo, charla casual), tampoco se escala."""
+        keywords = self._prompt_keywords(prompt)
+        if not keywords:
+            return False
+        haystack = " ".join((m.get("text") or "") for m in (window_msgs or [])).lower()
+        haystack = haystack.translate(str.maketrans("áéíóú", "aeiou"))
+        missing = [k for k in keywords
+                   if k.translate(str.maketrans("áéíóú", "aeiou")) not in haystack]
+        # Escala si al menos una palabra clave del prompt no aparece en la ventana.
+        return bool(missing)
+
     def _build_memory_context(self, prompt=None):
-        # Recientes vía SQL con LIMIT — antes se cargaba la tabla completa en
-        # cada prompt, lo que degradaba con la memoria infinita creciendo.
-        messages = self._load_recent_memory(MEMORY_CONTEXT_MESSAGES * 2)
-        # Notas relevantes del vault (campañas, facturas, procesos, agentes...).
+        # A5 — Recuperación search-first por capas. Capa 1 (buffer) + Capa 2
+        # (ventana deslizante) siempre se cargan vía SQL con LIMIT. La Capa 3
+        # (FTS5 profundo en el archivo + notas del vault) solo se activa si la
+        # ventana caliente no cubre las palabras clave del prompt — así una
+        # pregunta sobre algo recién hablado no arrastra ruido del archivo.
+        messages = self._load_recent_memory(MEMORY_WINDOW_MESSAGES)
+        escalate = bool(prompt) and self._should_escalate_to_deep(prompt, messages)
+
+        # Capa 3a — Notas relevantes del vault (campañas, facturas, procesos...).
+        # Solo si hay que escalar: si el tema ya está caliente, nos lo saltamos.
         relevant_vault = ""
-        if prompt:
+        if escalate:
             try:
                 relevant_vault = self._search_vault_relevant(prompt)
             except Exception:
@@ -502,9 +569,10 @@ class MemoryMixin:
             total_chars += len(line)
         chat_context = "[Contexto de conversaciones anteriores]\n" + "".join(context_parts) + "\n[Fin del contexto]\n\n" if context_parts else ""
 
-        # Recall de historia antigua relevante al prompt (FTS5 sobre toda la
-        # historia, incluido el archivo). Excluye lo ya presente en recientes.
-        if prompt:
+        # Capa 3b — Recall de historia antigua relevante al prompt (FTS5 sobre
+        # toda la historia, incluido el archivo). Excluye lo ya presente en la
+        # ventana caliente. Solo cuando se escala (search-first).
+        if escalate:
             try:
                 recent_texts = {m["text"] for m in messages}
                 hits = [h for h in self._search_memory(prompt, limit=8)
@@ -539,10 +607,15 @@ class MemoryMixin:
         except Exception:
             pass
 
-        # Add recent Obsidian context to memory
+        # Capa 3c — Notas más recientes de Obsidian por mtime. Solo al escalar:
+        # recorrer el vault entero en cada prompt es caro y, si el tema ya está
+        # caliente, estas notas serían ruido.
         obs_context = ""
         try:
-            vault = self._get_obsidian_vault()
+            if escalate:
+                vault = self._get_obsidian_vault()
+            else:
+                vault = None
             if vault:
                 md_files = []
                 for root, dirs, files in os.walk(vault):

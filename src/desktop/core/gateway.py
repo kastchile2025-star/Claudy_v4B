@@ -16,6 +16,23 @@ import re
 import threading
 import time
 
+try:
+    from core.logging_setup import warn as _log_warn
+except Exception:
+    def _log_warn(component, message, exc=None):
+        pass
+
+
+def check_bearer_auth(configured_token, auth_header):
+    """True si la petición está autorizada. Sin token configurado, todo pasa
+    (modo abierto local). Con token, exige 'Bearer <token>' exacto.
+
+    Función pura a nivel de módulo para poder testear el contrato de auth sin
+    levantar el servidor HTTP."""
+    if not configured_token:
+        return True
+    return (auth_header or "") == f"Bearer {configured_token}"
+
 
 WEBCHAT_HTML = """<!DOCTYPE html>
 <html lang="es">
@@ -99,8 +116,8 @@ class GatewayMixin:
             port = gw.get("port", 8720)
             if port:
                 self._gateway_port = port
-        except Exception:
-            pass
+        except Exception as e:
+            _log_warn("gateway", "no pude leer config del gateway, uso defaults", e)
         import http.server
 
         pet = self
@@ -108,10 +125,8 @@ class GatewayMixin:
         class GatewayHandler(http.server.BaseHTTPRequestHandler):
             def _check_gateway_auth(_self):
                 """Check auth token if configured. Returns True if authorized."""
-                if not pet._gateway_auth_token:
-                    return True
-                auth = _self.headers.get("Authorization", "")
-                return auth == f"Bearer {pet._gateway_auth_token}"
+                return check_bearer_auth(
+                    pet._gateway_auth_token, _self.headers.get("Authorization", ""))
 
             def do_POST(_self):
                 if not _self._check_gateway_auth():

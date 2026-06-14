@@ -18,6 +18,12 @@ import subprocess
 import threading
 import time
 
+try:
+    from core.logging_setup import warn as _log_warn
+except Exception:
+    def _log_warn(component, message, exc=None):
+        pass
+
 
 class SchedulerMixin:
     def _alarms_path(self):
@@ -36,8 +42,9 @@ class SchedulerMixin:
         try:
             with open(self._alarms_path(), "w", encoding="utf-8") as f:
                 json.dump(alarms, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            # Crítico: si no persisten, se pierden recordatorios al reiniciar.
+            _log_warn("cron", "no pude guardar alarms.json", e)
 
     def _parse_alarm_time(self, text):
         """Parse Spanish natural language time from text.
@@ -361,8 +368,9 @@ class SchedulerMixin:
             self._fire_hook("on_cron", message=msg, result=result)
             # Send to Telegram if available
             self._cron_notify_telegram(notification[:500])
-        except Exception:
-            pass
+        except Exception as e:
+            # Crítico: un cron job que falla en silencio = recordatorio perdido.
+            _log_warn("cron", "fallo ejecutando un cron job", e)
 
     def _execute_cron_command(self, job):
         """Ejecuta un comando/script externo programado.
@@ -444,7 +452,20 @@ class SchedulerMixin:
                 target=self._send_reminder_email, args=(email,), daemon=True
             ).start()
 
-    def _cron_notify_telegram(self, text):
+    def _cron_notify_telegram(self, text, source="cron"):
+        # C8 — Filtrado inteligente: si el modo digest está activo, este aviso se
+        # acumula en vez de enviarse suelto (salvo que sea de alta prioridad, que
+        # el digest entrega de inmediato). _queue_or_notify devuelve True si lo
+        # encoló; entonces no enviamos ahora.
+        try:
+            if self._queue_or_notify(text, source=source):
+                return
+        except Exception:
+            pass
+        self._cron_send_telegram_raw(text)
+
+    def _cron_send_telegram_raw(self, text):
+        """Envío directo por Telegram, sin pasar por el digest (lo usa el flush)."""
         if not self._telegram_bot_app or not self._telegram_allowed_users:
             return
         import asyncio
@@ -508,6 +529,13 @@ class SchedulerMixin:
             mins = int(dm.group(2) or 0)
             ampm = (dm.group(3) or "").lower()
             partofday = (dm.group(4) or "").lower()
+            # El grupo opcional de parte-del-día a veces no se captura porque el
+            # regex corta antes (todo lo posterior es opcional). Si no lo tomó,
+            # lo buscamos aparte: "a las 8 de la noche" debe ser 20:00, no 08:00.
+            if not partofday and not ampm:
+                pod = re.search(r'de\s+la\s+(manana|mañana|tarde|noche)', low)
+                if pod:
+                    partofday = pod.group(1).lower()
             if ampm == "pm" and h < 12:
                 h += 12
             if ampm == "am" and h == 12:
@@ -519,6 +547,9 @@ class SchedulerMixin:
             if 0 <= h <= 23 and 0 <= mins <= 59:
                 msg = self._cron_strip_prefix(text)
                 msg = re.sub(r'a\s+las?\s+\d{1,2}(?::\d{2})?\s*(am|pm|hrs|h)?(\s+de\s+la\s+(manana|mañana|tarde|noche))?\s*', '', msg, count=1, flags=re.IGNORECASE).strip()
+                # Limpia un "de la noche/tarde/mañana" residual que el sub anterior
+                # no haya capturado (grupo opcional que no siempre matchea).
+                msg = re.sub(r'^de\s+la\s+(manana|mañana|tarde|noche)\s*', '', msg, flags=re.IGNORECASE).strip()
                 msg = re.sub(r'\b(todos\s+los\s+d[ií]as|diariamente|diario|cada\s+d[ií]a)\b\s*', '', msg, flags=re.IGNORECASE).strip()
                 msg = re.sub(r'^[,:\-\s]+', '', msg)
                 if msg:

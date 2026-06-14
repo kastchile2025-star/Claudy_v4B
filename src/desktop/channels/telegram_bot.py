@@ -374,6 +374,43 @@ async def _reply(update, result):
     await _send_formatted(update, result)
 
 
+def _group_polls_on():
+    """Lee telegram.groupPolls de la config (hot-reloadable)."""
+    maybe_reload_config()
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            return bool(json.load(f).get("telegram", {}).get("groupPolls", False))
+    except Exception:
+        return False
+
+
+async def _maybe_propose_poll(update, msg):
+    """C11 — en grupos, si el mensaje plantea una decisión con opciones, lanza
+    una encuesta nativa de Telegram. Devuelve True si la lanzó."""
+    chat = update.message.chat
+    if chat.type not in ("group", "supergroup"):
+        return False
+    if not _group_polls_on():
+        return False
+    try:
+        from features import group_polls
+    except Exception:
+        return False
+    poll = group_polls.detect_poll(msg)
+    if not poll:
+        return False
+    try:
+        await chat.send_poll(
+            question=poll["question"][:300],
+            options=[o[:100] for o in poll["options"]],
+            is_anonymous=False,
+        )
+        return True
+    except Exception as e:
+        print(f"[TelegramBot] no pude crear encuesta: {e}")
+        return False
+
+
 async def handle_text(update, context):
     uid = str(update.effective_user.id)
     if not _is_allowed(uid):
@@ -381,6 +418,9 @@ async def handle_text(update, context):
         return
     msg = (update.message.text or "").strip()
     if not msg:
+        return
+    # C11 — en grupos, proponer encuesta si hay una decisión con opciones.
+    if await _maybe_propose_poll(update, msg):
         return
     # ¿El usuario pidió cambiar a/desde respuestas por voz? (lenguaje natural)
     intent = _detect_voice_intent(msg)
@@ -400,6 +440,45 @@ async def handle_text(update, context):
     await update.message.chat.send_action("typing")
     result = await _ask_with_progress(update, msg)
     await _reply(update, result)
+
+
+def _persist_authorized_user(uid):
+    """Agrega un uid a telegram.allowedUsers en config.json sin tocar secretos."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            raw = json.load(f)
+        users = raw.setdefault("telegram", {}).setdefault("allowedUsers", [])
+        if str(uid) not in [str(u) for u in users]:
+            users.append(str(uid))
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=2, ensure_ascii=False)
+        STATE["config_mtime"] = os.path.getmtime(CONFIG_PATH)
+        if str(uid) not in STATE["allowed"]:
+            STATE["allowed"].append(str(uid))
+    except Exception as e:
+        print(f"[TelegramBot] No pude persistir usuario autorizado: {e}")
+
+
+async def cmd_vincular(update, context):
+    """A10 — /vincular <código>: canjea un código de emparejamiento efímero
+    generado en Claudy Desktop. Con rate-limit y lockout (core/pairing.py)."""
+    uid = str(update.effective_user.id)
+    code = (context.args[0] if context.args else "").strip()
+    if not code:
+        await update.message.reply_text(
+            "Usa: /vincular <código>\nPide el código al dueño (lo genera en Claudy Desktop con /vincular)."
+        )
+        return
+    try:
+        from core import pairing
+    except Exception:
+        from .. import pairing  # pragma: no cover
+    state = pairing.load_state()
+    ok, msg = pairing.verify_code(state, uid, code)
+    pairing.save_state(state)
+    if ok:
+        _persist_authorized_user(uid)
+    await update.message.reply_text(msg)
 
 
 async def cmd_voz(update, context):
@@ -586,6 +665,7 @@ async def handle_document(update, context):
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("vincular", cmd_vincular))
     app.add_handler(CommandHandler("voz", cmd_voz))
     app.add_handler(CommandHandler("audio", cmd_voz))
     app.add_handler(CommandHandler("memoria", cmd_memoria))

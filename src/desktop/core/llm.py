@@ -246,7 +246,13 @@ class LLMMixin:
             company_ctx = build_company_context() + "\n\n"
         except Exception:
             company_ctx = ""
-        enhanced_sys = superpowers + local_skills + company_ctx + base_sys
+        # A7 — Alma editable (SOUL.md): capa de tono/carácter sobre el protocolo.
+        soul_ctx = ""
+        try:
+            soul_ctx = self._soul_context()
+        except Exception:
+            soul_ctx = ""
+        enhanced_sys = soul_ctx + superpowers + local_skills + company_ctx + base_sys
         # Auto-detect product mention — robust matching with variations
         _detected_product = None
         try:
@@ -490,6 +496,11 @@ class LLMMixin:
                 tid = tc.get("id")
                 name = tc.get("name")
                 inp = tc.get("input", {}) or {}
+                # A12 — anunciar en la consola del chat qué tool se ejecuta.
+                try:
+                    self._emit_tool_console(name, inp)
+                except Exception:
+                    pass
                 info = self.TOOL_REGISTRY.get(name)
                 try:
                     result = info["handler"](self, **inp) if info else f"Tool '{name}' not found."
@@ -516,6 +527,11 @@ class LLMMixin:
                     args = json.loads(fn.get("arguments", "{}") or "{}")
                 except Exception:
                     args = {}
+                # A12 — anunciar en la consola del chat qué tool se ejecuta.
+                try:
+                    self._emit_tool_console(name, args)
+                except Exception:
+                    pass
                 info = self.TOOL_REGISTRY.get(name)
                 try:
                     result = info["handler"](self, **args) if info else f"Tool '{name}' not found."

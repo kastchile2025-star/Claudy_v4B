@@ -208,7 +208,8 @@ class PromptsMixin:
             "Memoria  → /recordar <nota> |  /checkpoint  |  /rollback\n"
             "Skills   → /skills  |  /aprender <nombre>  |  /skill eliminar <nombre>\n"
             "Tareas   → /delegar <tarea> (subagente)  |  /kanban add/move/list\n"
-            "Conexión → /vincular <id> (Telegram)\n\n"
+            "Conexión → /vincular <id> (Telegram)\n"
+            "Carácter → /alma <preset> (tono editable: default/profesional/cercano/brutal/mentor)\n\n"
 
             "═══ APRENDIZAJE AUTOMÁTICO (estilo Hermes Curator) ═══\n"
             "Cuando completes una tarea exitosa o aprendas un procedimiento nuevo:\n"

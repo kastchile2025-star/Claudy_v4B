@@ -46,3 +46,20 @@ def setup_logging(level=logging.INFO):
 def get_logger(name=""):
     setup_logging()
     return logging.getLogger(f"claudy.{name}" if name else "claudy")
+
+
+def warn(component, message, exc=None):
+    """Atajo para registrar un fallo NO fatal en una ruta crítica.
+
+    Pensado para reemplazar los `except Exception: pass` que ocultan bugs
+    (memoria, LLM, cron, gateway): el flujo sigue, pero queda rastro en
+    ~/.claudy/logs/claudy.log para diagnosticar. Nunca relanza.
+    """
+    try:
+        log = get_logger(component)
+        if exc is not None:
+            log.warning("%s: %s", message, exc)
+        else:
+            log.warning("%s", message)
+    except Exception:
+        pass  # el logging jamás debe tumbar la app

@@ -137,6 +137,14 @@ class MCPServer:
                     self.proc.kill()
         except Exception:
             pass
+        # Cerrar los pipes stdin/stdout para no dejar fds abiertos (ResourceWarning).
+        if self.proc:
+            for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                try:
+                    if stream:
+                        stream.close()
+                except Exception:
+                    pass
         self.proc = None
 
     @property
