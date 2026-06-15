@@ -254,6 +254,7 @@ PRODUCT_CONTEXTS = {
         "port": 5000,
         "path": r"G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\POINT",
         "stack": "Python + Flask + SQLite + Vercel + Chart.js",
+        "installer_path": r"G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\POINT\POINT_v3\tentacion_a_granel_web\installer",
         "modules": [
             "Punto de venta (POS): ventas, múltiples formas de pago, cierre de caja",
             "Inventario con control de lotes y vencimiento (FEFO)",
@@ -261,6 +262,11 @@ PRODUCT_CONTEXTS = {
             "Dashboard de ventas y exportación a Excel",
             "Multi-sucursal y branding personalizable por cliente",
             "Versión local (instalador de escritorio) y versión web",
+        ],
+        "notes": [
+            r"RUTA CANÓNICA DE INSTALADORES (Felipe, 14-jun-2026): G:\Mi unidad\QCORE-ECOSYSTEM\02-PRODUCTS\POINT\POINT_v3\tentacion_a_granel_web\installer — ahí se alojan las últimas versiones (instaladores .exe). La carpeta de proyecto es POINT_v3; en el futuro será POINT_v4 y la ruta cambiará el tramo POINT_vN.",
+            "Distinguir DOS niveles de versión: (1) carpeta de proyecto = POINT_v3; (2) instalador entregable del cliente = TentacionAGranel_Instalador_vX.Y.Z.exe. El instalador más reciente manda como 'última versión' del cliente.",
+            "Hay también un instalador de servidor: TentacionAGranel_Servidor_Instalador_vX.Y.Z.exe en la misma carpeta.",
         ],
         "status": "En desarrollo / producción. Primera implementación: Tentación a Granel (Puerto Montt).",
     },
@@ -292,6 +298,127 @@ PRODUCT_CONTEXTS = {
         "status": "En línea — https://www.jorgecastros.xyz · fuente local C:\\Users\\Felipe\\Documents\\CV_JorgeCastro_v3.5",
     },
 }
+
+
+def scan_product_versions(path: str, max_items: int = 12):
+    """Escanea la carpeta de un producto y devuelve sus versiones/subcarpetas.
+
+    Para que Claudy responda "¿cuál es la última versión?" con el dato REAL del
+    disco (POINT_v3 vive en G:\\...\\02-PRODUCTS\\POINT) en vez de irse a
+    internet. Devuelve (lista_ordenada, ultima) donde cada item es
+    (nombre, mtime, version_num|None). 'ultima' prioriza el mayor número de
+    versión; si no hay números, la subcarpeta más reciente por mtime.
+    """
+    import os
+    import re
+    if not path or not os.path.isdir(path):
+        return [], None
+    ver_rx = re.compile(r"(?:^|[_\- ])v(?:er(?:sion)?)?[_\- ]?(\d+)", re.IGNORECASE)
+    items = []
+    try:
+        for name in os.listdir(path):
+            full = os.path.join(path, name)
+            if not os.path.isdir(full):
+                continue
+            if name.startswith((".", "$", "__")):
+                continue
+            try:
+                mtime = os.path.getmtime(full)
+            except Exception:
+                mtime = 0
+            m = ver_rx.search(name)
+            vnum = int(m.group(1)) if m else None
+            items.append((name, mtime, vnum))
+    except Exception:
+        return [], None
+    if not items:
+        return [], None
+    # Última: por número de versión si hay; si no, por fecha de modificación.
+    versioned = [it for it in items if it[2] is not None]
+    if versioned:
+        ultima = max(versioned, key=lambda it: (it[2], it[1]))
+    else:
+        ultima = max(items, key=lambda it: it[1])
+    # Orden de presentación: versionadas por num desc, luego el resto por mtime desc.
+    items.sort(key=lambda it: (it[2] if it[2] is not None else -1, it[1]), reverse=True)
+    return items[:max_items], ultima
+
+
+def scan_installers(path: str, max_items: int = 10):
+    """Escanea instaladores .exe en una carpeta y devuelve (lista, ultimo).
+
+    Ordena por versión semántica vX.Y.Z embebida en el nombre (cae a mtime si no
+    hay). Responde "¿cuál es el último instalador entregable?" — el que recibe el
+    cliente, distinto de la carpeta de proyecto (POINT_v3)."""
+    import os
+    import re
+    if not path or not os.path.isdir(path):
+        return [], None
+    semver_rx = re.compile(r"v(\d+)\.(\d+)\.(\d+)", re.IGNORECASE)
+    items = []
+    try:
+        for name in os.listdir(path):
+            full = os.path.join(path, name)
+            if not os.path.isfile(full) or not name.lower().endswith(".exe"):
+                continue
+            try:
+                mtime = os.path.getmtime(full)
+            except Exception:
+                mtime = 0
+            m = semver_rx.search(name)
+            sem = tuple(int(x) for x in m.groups()) if m else None
+            items.append((name, mtime, sem))
+    except Exception:
+        return [], None
+    if not items:
+        return [], None
+    semmed = [it for it in items if it[2] is not None]
+    if semmed:
+        ultimo = max(semmed, key=lambda it: (it[2], it[1]))
+    else:
+        ultimo = max(items, key=lambda it: it[1])
+    items.sort(key=lambda it: (it[2] or (-1,), it[1]), reverse=True)
+    return items[:max_items], ultimo
+
+
+def _product_versions_block(product_name: str, path: str, installer_path: str = "") -> str:
+    """Bloque de texto con las versiones reales en disco, para el system prompt."""
+    import datetime
+    items, ultima = scan_product_versions(path)
+    if not items and not installer_path:
+        return ""
+    def _fecha(mtime):
+        try:
+            return datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        except Exception:
+            return "?"
+
+    lines = [f"\n[VERSIONES REALES EN DISCO de {product_name} — fuente: {path}]"]
+    if ultima:
+        lines.append(f"⭐ ÚLTIMA CARPETA DE PROYECTO: {ultima[0]}")
+    if items:
+        lines.append("Carpetas/versiones encontradas (más reciente primero):")
+        for name, mtime, vnum in items:
+            marca = "  ← última" if ultima and name == ultima[0] else ""
+            lines.append(f"  • {name}  (modificada {_fecha(mtime)}){marca}")
+
+    # Instaladores entregables (.exe) — el último que recibe el cliente.
+    if installer_path:
+        insts, ultimo = scan_installers(installer_path)
+        if insts:
+            lines.append(f"\nInstaladores en: {installer_path}")
+            if ultimo:
+                lines.append(f"⭐ ÚLTIMO INSTALADOR ENTREGABLE: {ultimo[0]}  "
+                             f"(modificado {_fecha(ultimo[1])}) — esta es la "
+                             f"«última versión» que usa el cliente.")
+            lines.append("Instaladores (más reciente primero):")
+            for name, mtime, sem in insts:
+                marca = "  ← último" if ultimo and name == ultimo[0] else ""
+                lines.append(f"  • {name}  (modificado {_fecha(mtime)}){marca}")
+
+    lines.append("Usa ESTOS datos del disco para responder sobre versiones; "
+                 "NO busques en internet para esto.")
+    return "\n".join(lines)
 
 
 def build_context_prompt(product_name: str) -> str:
@@ -338,6 +465,12 @@ def build_context_prompt(product_name: str) -> str:
         lines.append(f"\nNotas importantes de desarrollo:")
         for n in info["notes"]:
             lines.append(f"  • {n}")
+
+    # Versiones reales en disco (responde "¿cuál es la última versión?" sin internet).
+    vblock = _product_versions_block(product_name, info.get("path", ""),
+                                     info.get("installer_path", ""))
+    if vblock:
+        lines.append(vblock)
 
     lines.append(f"\n[FIN CONTEXTO {product_name}]")
     return "\n".join(lines)

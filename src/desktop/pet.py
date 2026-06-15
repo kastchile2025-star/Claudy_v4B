@@ -12128,16 +12128,58 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         return results[:max_results]
 
 
-    def _search_files(self, query):
-        """Search for files on the system using Windows search."""
-        import fnmatch
-        query = query.strip().strip('"').strip("'")
-        search_dirs = [
+    def _file_search_roots(self):
+        """Carpetas donde Claudy puede buscar/leer archivos.
+
+        Por defecto: perfil del usuario (~, Desktop, Downloads, Documents) MÁS
+        Google Drive y el vault de Obsidian si están montados. Se puede ampliar
+        sin tocar código vía config.json → fileAccess.searchRoots (lista de
+        rutas). Así Claudy responde sobre productos QCORE (POINT, SmartStudent…)
+        que viven en Drive, no solo en el PC local.
+        """
+        roots = [
             os.path.expanduser("~"),
             os.path.expanduser("~/Desktop"),
             os.path.expanduser("~/Downloads"),
             os.path.expanduser("~/Documents"),
         ]
+        # Raíces extra desde config (las del usuario).
+        try:
+            cfg = self.load_claudy_config()
+            for r in (cfg.get("fileAccess", {}) or {}).get("searchRoots", []) or []:
+                if isinstance(r, str) and r.strip():
+                    roots.append(os.path.expanduser(r.strip()))
+        except Exception:
+            pass
+        # Autodetección: Drive QCORE y vault de Obsidian (si están montados).
+        for auto in (r"G:\Mi unidad\QCORE-ECOSYSTEM",
+                     r"G:\Mi unidad"):
+            if os.path.isdir(auto):
+                roots.append(auto)
+                break  # con el más específico que exista basta
+        try:
+            vault = self._get_obsidian_vault()
+            if vault and os.path.isdir(vault):
+                roots.append(vault)
+        except Exception:
+            pass
+        # Quitar duplicados y rutas que sean subcarpeta de otra ya incluida,
+        # conservando orden (evita recorrer Drive dos veces).
+        seen = []
+        for r in roots:
+            rn = os.path.normpath(r)
+            if not os.path.isdir(rn):
+                continue
+            if any(rn == s or rn.startswith(s + os.sep) for s in seen):
+                continue
+            seen.append(rn)
+        return seen
+
+    def _search_files(self, query):
+        """Search for files on the system using Windows search."""
+        import fnmatch
+        query = query.strip().strip('"').strip("'")
+        search_dirs = self._file_search_roots()
         results = []
         max_results = 20
         max_depth = 4
@@ -12145,18 +12187,23 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
         # Con comodines ("*.iso", "informe?.docx") se respeta el patrón exacto
         has_wildcard = "*" in query_lower or "?" in query_lower
 
+        skip_dirs = {"AppData", "Windows", "Program Files", "Program Files (x86)",
+                     "node_modules", "venv", ".venv", "__pycache__", "$RECYCLE.BIN"}
         for search_dir in search_dirs:
             if not os.path.isdir(search_dir):
                 continue
             try:
                 for root, dirs, files in os.walk(search_dir):
-                    # Limit depth
-                    depth = root.replace(search_dir, "").count(os.sep)
+                    # Limit depth (relpath robusto, no string-replace ingenuo)
+                    rel = os.path.relpath(root, search_dir)
+                    depth = 0 if rel == "." else rel.count(os.sep) + 1
                     if depth > max_depth:
                         dirs.clear()
                         continue
-                    # Skip system/hidden dirs
-                    dirs[:] = [d for d in dirs if not d.startswith(("$", ".", "AppData", "Windows", "Program Files"))]
+                    # Skip system/hidden/heavy dirs
+                    dirs[:] = [d for d in dirs
+                               if not d.startswith(("$", "."))
+                               and d not in skip_dirs]
                     for fname in files:
                         fl = fname.lower()
                         if (fnmatch.fnmatch(fl, query_lower) if has_wildcard else query_lower in fl):
@@ -12178,7 +12225,10 @@ class ClawdPet(MemoryMixin, LLMMixin, GatewayMixin, PromptsMixin, IntentsMixin, 
 
         if results:
             return f"Archivos encontrados para '{query}' ({len(results)}):\n\n" + "\n\n".join(results)
-        return f"No encontré archivos con '{query}' en las carpetas principales."
+        donde = ", ".join(search_dirs) if search_dirs else "(sin carpetas)"
+        return (f"No encontré archivos con '{query}'. Busqué en: {donde}. "
+                "Si el archivo está en otra carpeta, añádela a "
+                "fileAccess.searchRoots en config.json.")
 
     # ------------------------------------------------------------------
     # 12. Download File
